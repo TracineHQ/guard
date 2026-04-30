@@ -53,7 +53,8 @@ git add -A is denied: stages all files indiscriminately
 Catches `git -C <path> <subcommand>` invocations that ordinary glob-based
 permission rules struggle to classify (because `*` does not cross `/`).
 Read-only subcommands (`status`, `log`, `diff`, etc.) auto-allow.
-Destructive ones (`reset`, `clean`, `restore`, `stash drop`) are denied.
+Destructive ones (`reset`, `clean`) are denied; `stash pop`, `stash drop`,
+and `stash clear` are denied as well.
 The hook also catches `git commit -C <ref>` — silent message reuse — and
 denies it.
 

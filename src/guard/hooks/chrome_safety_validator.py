@@ -23,7 +23,7 @@ from guard._utils import emit_pretooluse_decision, is_autonomous_mode, log_decis
 _HOOK_ID = "guard.chrome_safety_validator"
 
 try:
-    from chrome_cli.safety import (  # type: ignore[import-not-found]
+    from chrome_cli.safety import (  # type: ignore[import-not-found]  # optional dep, see HAS_CHROME_SAFETY
         validate_eval_expression,
         validate_profile_name,
         validate_user_data_dir,

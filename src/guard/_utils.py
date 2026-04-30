@@ -110,6 +110,8 @@ CONTEXT_BUDGET_HARD_BYTES = _env_int("GUARD_CONTEXT_HARD", 1_000_000)
 
 _STDIN_LIMIT = 1 << 20  # 1 MiB
 _JSONL_RECORD_MAX = 4096  # POSIX O_APPEND atomicity envelope on Linux
+_REASON_MAX_CHARS = 1024  # schema v1 §3
+_COMMAND_EXCERPT_MAX_CHARS = 4096  # schema v1 §3
 
 
 def parse_hook_input() -> dict[str, Any] | None:
@@ -196,11 +198,11 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
         "event": event,
         "tool_name": tool_name,
         "decision": decision,
-        "reason": reason[:1024],
+        "reason": reason[:_REASON_MAX_CHARS],
         "session_id": session_id,
     }
     if command_excerpt is not None:
-        record["command_excerpt"] = command_excerpt[:4096]
+        record["command_excerpt"] = command_excerpt[:_COMMAND_EXCERPT_MAX_CHARS]
     if cwd is not None:
         record["cwd"] = cwd
     append_jsonl(GUARD_DECISIONS_PATH, record)
@@ -295,7 +297,7 @@ def safe_main(hook_fn: Callable[[dict[str, Any]], None]) -> None:
         raise  # Allow sys.exit() from hook_fn
     except Exception:  # noqa: BLE001 -- silent passthrough is the design contract
         if os.environ.get("GUARD_DEBUG") == "1":
-            import traceback  # noqa: PLC0415
+            import traceback  # noqa: PLC0415 -- deferred import, only loaded on debug path
 
             _log_debug(f"hook crashed: {traceback.format_exc()}")
         # otherwise pass silently — guardrails not walls

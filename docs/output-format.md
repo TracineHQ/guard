@@ -77,5 +77,4 @@
 
 ## See also
 
-- `00-design-decisions.md` (private planning notes) for rationale on schema choices.
 - Reference implementation: `src/guard/_utils.py`.
