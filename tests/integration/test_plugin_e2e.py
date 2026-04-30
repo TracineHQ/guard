@@ -405,7 +405,8 @@ def test_jsonl_contract(staged: Path, log_path: Path) -> None:
         _bash_payload("git add -A"),
         log_path,
     )
-    assert rc == 0
+    # Fix #7: deny path now exits 2.
+    assert rc == 2
 
     assert log_path.exists(), "no JSONL log was written"
     raw_lines = log_path.read_bytes().splitlines()

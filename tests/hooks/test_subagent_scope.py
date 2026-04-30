@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+import pytest
+
 from guard.hooks.subagent_scope import hook
 
 if TYPE_CHECKING:
@@ -49,26 +51,32 @@ class TestSubagentScope:
         assert capsys.readouterr().out == ""
 
     def test_subagent_scope_denies_unsafe_input(self, tmp_path, capsys):
+        # Fix #7: deny path now exits 2 — wrap in pytest.raises(SystemExit).
         _write_scope(tmp_path, {"task": "T1", "allowed": ["pkg/src/x.py"]})
-        hook(
-            {
-                "tool_name": "Edit",
-                "tool_input": {"file_path": str(tmp_path / "pkg/src/y.py")},
-                "cwd": str(tmp_path),
-            }
-        )
+        with pytest.raises(SystemExit) as exc:
+            hook(
+                {
+                    "tool_name": "Edit",
+                    "tool_input": {"file_path": str(tmp_path / "pkg/src/y.py")},
+                    "cwd": str(tmp_path),
+                }
+            )
+        assert exc.value.code == 2
         envelope = json.loads(capsys.readouterr().out)
         assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     def test_write_disallowed_file_denied(self, tmp_path, capsys):
+        # Fix #7: deny path now exits 2.
         _write_scope(tmp_path, {"task": "T1", "allowed": ["pkg/src/x.py"]})
-        hook(
-            {
-                "tool_name": "Write",
-                "tool_input": {"file_path": str(tmp_path / "pkg/src/other.py")},
-                "cwd": str(tmp_path),
-            }
-        )
+        with pytest.raises(SystemExit) as exc:
+            hook(
+                {
+                    "tool_name": "Write",
+                    "tool_input": {"file_path": str(tmp_path / "pkg/src/other.py")},
+                    "cwd": str(tmp_path),
+                }
+            )
+        assert exc.value.code == 2
         envelope = json.loads(capsys.readouterr().out)
         assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
 
@@ -119,29 +127,33 @@ class TestSubagentScope:
         assert capsys.readouterr().out == ""
 
     def test_deny_message_includes_allowed_list(self, tmp_path, capsys):
+        # Fix #7: deny path now exits 2.
         allowed = ["pkg/src/x.py", "pkg/tests/test_x.py", "pkg/tests/fixtures/"]
         _write_scope(tmp_path, {"task": "T1", "allowed": allowed})
-        hook(
-            {
-                "tool_name": "Edit",
-                "tool_input": {"file_path": str(tmp_path / "pkg/src/other.py")},
-                "cwd": str(tmp_path),
-            }
-        )
+        with pytest.raises(SystemExit):
+            hook(
+                {
+                    "tool_name": "Edit",
+                    "tool_input": {"file_path": str(tmp_path / "pkg/src/other.py")},
+                    "cwd": str(tmp_path),
+                }
+            )
         envelope = json.loads(capsys.readouterr().out)
         reason = envelope["hookSpecificOutput"]["permissionDecisionReason"]
         for entry in allowed:
             assert entry in reason
 
     def test_deny_message_includes_task_name(self, tmp_path, capsys):
+        # Fix #7: deny path now exits 2.
         task_name = "Task 2.1: edit churn detection"
         _write_scope(tmp_path, {"task": task_name, "allowed": ["pkg/src/x.py"]})
-        hook(
-            {
-                "tool_name": "Edit",
-                "tool_input": {"file_path": str(tmp_path / "pkg/src/other.py")},
-                "cwd": str(tmp_path),
-            }
-        )
+        with pytest.raises(SystemExit):
+            hook(
+                {
+                    "tool_name": "Edit",
+                    "tool_input": {"file_path": str(tmp_path / "pkg/src/other.py")},
+                    "cwd": str(tmp_path),
+                }
+            )
         envelope = json.loads(capsys.readouterr().out)
         assert task_name in envelope["hookSpecificOutput"]["permissionDecisionReason"]

@@ -293,5 +293,9 @@ def safe_main(hook_fn: Callable[[dict[str, Any]], None]) -> None:
         hook_fn(payload)
     except SystemExit:
         raise  # Allow sys.exit() from hook_fn
-    except Exception:  # noqa: BLE001, S110 -- silent passthrough is the design contract
-        pass  # Silent passthrough on any error
+    except Exception:  # noqa: BLE001 -- silent passthrough is the design contract
+        if os.environ.get("GUARD_DEBUG") == "1":
+            import traceback  # noqa: PLC0415
+
+            _log_debug(f"hook crashed: {traceback.format_exc()}")
+        # otherwise pass silently — guardrails not walls

@@ -158,6 +158,7 @@ def hook(payload: dict[str, Any]) -> None:
         cwd=cwd,
     )
     sys.stdout.write(json.dumps(envelope))
+    sys.exit(2)
 
 
 if __name__ == "__main__":

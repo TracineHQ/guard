@@ -121,7 +121,8 @@ def test_bash_validator_denies_always_deny_commands(command, tmp_path):
         "cwd": str(tmp_path),
     }
     rc, stdout, _ = _run_hook(hook, payload, {"GUARD_DECISIONS_PATH": str(tmp_path / "x.jsonl")})
-    assert rc == 0, f"unexpected rc={rc} for {command!r}"
+    # Fix #7: deny path now exits 2.
+    assert rc == 2, f"unexpected rc={rc} for {command!r}"
     assert stdout.strip(), f"expected deny envelope on stdout for {command!r}"
     decision = json.loads(stdout)
     assert decision["hookSpecificOutput"]["permissionDecision"] == "deny"
@@ -207,7 +208,8 @@ def test_agent_output_guard_denies_output_read(tmp_path):
         "cwd": str(tmp_path),
     }
     rc, stdout, _ = _run_hook(hook, payload)
-    assert rc == 0
+    # Fix #7: deny path now exits 2.
+    assert rc == 2
     decision = json.loads(stdout)
     assert decision["hookSpecificOutput"]["permissionDecision"] == "deny"
 
@@ -240,6 +242,7 @@ def test_subagent_scope_denies_out_of_scope_edit(tmp_path):
         "cwd": str(tmp_path),
     }
     rc, stdout, _ = _run_hook(hook, payload)
-    assert rc == 0
+    # Fix #7: deny path now exits 2.
+    assert rc == 2
     decision = json.loads(stdout)
     assert decision["hookSpecificOutput"]["permissionDecision"] == "deny"

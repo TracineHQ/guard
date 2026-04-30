@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sys
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -39,13 +40,18 @@ from guard._utils import (
     _log_debug,
     append_jsonl,
     is_autonomous_mode,
+    log_decision,
     safe_main,
     sanitize_for_stderr,
 )
-from guard._utils import (
-    log_decision as _log_decision_spec,
+from guard.registry import (
+    ALWAYS_DENY,
+    AUTONOMOUS_FEEDBACK,
+    COMMANDS,
+    SAFE_PIPE_COMMANDS,
+    SAFE_PREFIXES,
+    Safety,
 )
-from guard.registry import ALWAYS_DENY, AUTONOMOUS_FEEDBACK, COMMANDS, Safety
 
 _HOOK_ID = "guard.bash_command_validator"
 
@@ -80,19 +86,14 @@ _SPEC_DECISION_MAP: dict[str, Literal["allow", "deny", "ask", "pass"]] = {
 }
 
 
-def log_decision(
-    command: str,
-    decision: str,
-    reason: str,
-    segments: int,  # noqa: ARG001 -- kept for callsite compatibility
-) -> None:
+def _log_local(command: str, decision: str, reason: str) -> None:
     """Append a decision row to the JSONL log. Best-effort, never raises.
 
-    Delegates to ``guard._utils.log_decision`` (the spec-compliant writer per
-    ``docs/output-format.md`` schema v1).
+    Thin wrapper that maps the local decision strings (``passthrough`` etc.)
+    onto the spec writer in ``guard._utils.log_decision``.
     """
     spec_decision = _SPEC_DECISION_MAP.get(decision, "pass")
-    _log_decision_spec(
+    log_decision(
         hook_id=_HOOK_ID,
         event="PreToolUse",
         tool_name="Bash",
@@ -102,148 +103,6 @@ def log_decision(
         session_id=os.environ.get("CLAUDE_SESSION_ID", ""),
     )
 
-
-# Safe command prefixes — read-only / non-destructive.
-SAFE_PREFIXES: frozenset[str] = frozenset(
-    {
-        # Python
-        "python3",
-        "python",
-        ".venv/bin/python",
-        "uv run python",
-        # Testing
-        "pytest",
-        "python -m pytest",
-        "python3 -m pytest",
-        ".venv/bin/pytest",
-        "uv run pytest",
-        "uvx pytest",
-        "npx vitest",
-        # Linting
-        "uvx semgrep",
-        "uvx ruff",
-        "uvx mypy",
-        "uvx black",
-        "uvx pyright",
-        "ruff",
-        "uv run ruff",
-        "mypy",
-        "uv run mypy",
-        "pyright",
-        "npx eslint",
-        "npx tsc",
-        "uvx vulture",
-        "uvx pre-commit run",
-        "pre-commit run",
-        "uvx pip-audit",
-        # Node
-        "node",
-        "npm run",
-        "npm test",
-        "npm list",
-        "npm ls",
-        "npm view",
-        "npm outdated",
-        "npm run build",
-        "npm run dev",
-        # File reading
-        "cat",
-        "head",
-        "tail",
-        "less",
-        "wc",
-        "file",
-        "stat",
-        "ls",
-        "tree",
-        "du",
-        "df",
-        # Search
-        "grep",
-        "rg",
-        "ag",
-        "ack",
-        # Text processing
-        "jq",
-        "sort",
-        "uniq",
-        "cut",
-        "tr",
-        # General
-        "date",
-        # NOTE: `env` is handled via _is_safe_env() instead of a flat prefix
-        # match because `env -i bash -c '...'` was a recursion-into-shell
-        # bypass. Bare `env` and `env K=V safe_command` are still allowed.
-        "which",
-        "whereis",
-        "type",
-        "true",
-        "false",
-        "test",
-        # Directory ops
-        "cd",
-        "mkdir -p",
-        # Git read-only
-        "git status",
-        "git log",
-        "git diff",
-        "git show",
-        "git branch",
-        "git remote",
-        "git blame",
-        "git rev-parse",
-        "git describe",
-        "git tag",
-        "git ls-files",
-        "git grep",
-        "git stash list",
-        "git stash show",
-        "git config --get",
-        "git config --list",
-        "git shortlog",
-        "git rev-list",
-        "git name-rev",
-        # Cloud read
-        "gcloud secrets list",
-        "gcloud config list",
-        "gcloud config get",
-        "gcloud logging read",
-        "gcloud storage ls",
-        "gcloud projects list",
-        "gcloud projects describe",
-        "gcloud services list",
-        "gcloud run services list",
-        "gcloud run services describe",
-        "gcloud auth list",
-        "gsutil ls",
-        # Docker read
-        "docker ps",
-        "docker logs",
-        "docker images",
-        "docker inspect",
-        # Misc
-        "ps",
-        "pwd",
-    }
-)
-
-# Pipe filter commands — passive text transformers only.
-SAFE_PIPE_COMMANDS: frozenset[str] = frozenset(
-    {
-        "head",
-        "tail",
-        "grep",
-        "rg",
-        "sort",
-        "uniq",
-        "cut",
-        "tr",
-        "wc",
-        "jq",
-        "cat",
-        "less",
-    }
-)
 
 # Commands safe only when they don't contain specific dangerous flags.
 CONDITIONAL_SAFE: dict[str, set[str]] = {
@@ -359,6 +218,45 @@ def _is_conditional_safe(segment: str, base_cmd: str) -> bool:
     return all(token not in dangerous_flags for token in segment.split())
 
 
+_INTERPRETER_BASE_CMDS: frozenset[str] = frozenset({"python", "python3", "node"})
+
+
+def _is_safe_interpreter(segment: str) -> bool:
+    """Return ``True`` for known-safe interpreter invocations.
+
+    Bare ``python`` / ``python3`` / ``node`` would, on a flat prefix match,
+    permit ``python -c '...'`` / ``node -e '...'`` and similar RCE primitives.
+    This classifier mirrors ``_is_safe_env``: only forms with no flags or a
+    single read-only ``--version`` / ``-V`` / ``-v`` flag are accepted.
+
+    Safe forms:
+
+    - bare interpreter (``python``, ``node``)
+    - version probes: ``python --version``, ``python -V``, ``python3 -V``,
+      ``node --version``, ``node -v``
+
+    Rejected forms (return ``False``):
+
+    - ``python -c ...`` / ``-m ...`` / ``-`` (stdin) / ``--eval`` / ``-e``
+    - any flag form not on the version-probe allowlist — including ``-m``,
+      because module execution allows arbitrary code paths
+    """
+    tokens = segment.split()
+    if not tokens or tokens[0] not in _INTERPRETER_BASE_CMDS:
+        return False
+    if len(tokens) == 1:
+        return True
+    base = tokens[0]
+    rest = tokens[1:]
+    # Tighter rule: any flag => deny unless it's a known version probe.
+    version_flags_python: frozenset[str] = frozenset({"--version", "-V"})
+    version_flags_node: frozenset[str] = frozenset({"--version", "-v"})
+    if base in {"python", "python3"}:
+        return len(rest) == 1 and rest[0] in version_flags_python
+    # node
+    return len(rest) == 1 and rest[0] in version_flags_node
+
+
 def _is_safe_base_cmd(segment: str) -> bool:
     """Check if ``segment``'s base command is conditionally or specially safe."""
     tokens = segment.split()
@@ -369,6 +267,8 @@ def _is_safe_base_cmd(segment: str) -> bool:
         return _is_sqlite3_safe(segment)
     if base_cmd == "env":
         return _is_safe_env(segment)
+    if base_cmd in _INTERPRETER_BASE_CMDS:
+        return _is_safe_interpreter(segment)
     return False
 
 
@@ -516,11 +416,35 @@ _ALWAYS_DENY_REASONS: dict[str, str] = {
 }
 
 
+def _normalize_segment(segment: str) -> str:
+    r"""Return a whitespace/quote-normalized form of ``segment``.
+
+    Defeats two prefix-matching bypasses:
+
+    - quoting (``"rm" -rf /`` → ``rm -rf /``)
+    - extra whitespace (``rm  -rf  /`` / ``rm\t-rf\t/`` → ``rm -rf /``)
+
+    Falls back to a raw whitespace split when ``shlex`` cannot parse the
+    fragment (e.g. unbalanced quotes).
+    """
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        return " ".join(segment.split())
+    return " ".join(tokens)
+
+
 def _match_always_deny(segment: str) -> str | None:
-    """Return the longest ALWAYS_DENY prefix matching ``segment`` or ``None``."""
+    """Return the longest ALWAYS_DENY prefix matching ``segment`` or ``None``.
+
+    Normalizes via ``_normalize_segment`` before prefix-matching so quoting
+    and whitespace bypasses (``"rm" -rf /``, ``rm  -rf  /``) cannot evade
+    the registry's deny set.
+    """
     if not segment:
         return None
-    matches = [p for p in ALWAYS_DENY if segment == p or segment.startswith(p + " ")]
+    normalized = _normalize_segment(segment)
+    matches = [p for p in ALWAYS_DENY if normalized == p or normalized.startswith(p + " ")]
     if not matches:
         return None
     return max(matches, key=len)
@@ -559,10 +483,12 @@ def get_autonomous_deny(segment: str) -> dict[str, str]:
     """Return a deny envelope for an autonomous-mode segment.
 
     Matches the segment against ``AUTONOMOUS_FEEDBACK`` (longest prefix wins).
-    Falls back to ``DEFAULT_AUTONOMOUS_DENY`` when no specific feedback exists.
+    Normalizes via ``_normalize_segment`` so quoting/whitespace cannot bypass
+    a feedback rule. Falls back to ``DEFAULT_AUTONOMOUS_DENY`` on no match.
     """
+    normalized = _normalize_segment(segment)
     for prefix, feedback in sorted(AUTONOMOUS_FEEDBACK.items(), key=lambda kv: -len(kv[0])):
-        if segment == prefix or segment.startswith(prefix + " "):
+        if normalized == prefix or normalized.startswith(prefix + " "):
             return _deny(feedback)
     return _deny(DEFAULT_AUTONOMOUS_DENY)
 
@@ -616,19 +542,18 @@ def _evaluate_segments(
     has_comments: bool,
 ) -> dict[str, str] | None:
     """Walk every segment; return decision dict or ``None`` for passthrough."""
-    n_segments = len(segments)
     for i, segment in enumerate(segments):
         if is_safe_command(segment, is_piped=(i > 0)):
             continue
         feedback = _get_alternative_feedback(segment, has_comments=has_comments, is_piped=(i > 0))
         if feedback:
-            log_decision(command, "deny", feedback, n_segments)
+            _log_local(command, "deny", feedback)
             return _deny(feedback)
-        log_decision(command, "passthrough", f"unknown segment: {segment[:80]}", n_segments)
+        _log_local(command, "passthrough", f"unknown segment: {segment[:80]}")
         return None
 
     reason = "All command segments are read-only/safe"
-    log_decision(command, "allow", reason, n_segments)
+    _log_local(command, "allow", reason)
     return _allow(reason)
 
 
@@ -636,8 +561,7 @@ def decide(command: str) -> dict[str, str] | None:  # noqa: PLR0911 -- top-level
     """Decide whether to allow a bash command. ``None`` means passthrough."""
     leak = get_credential_leak_deny(command)
     if leak is not None:
-        n_segments = len(split_pipeline(strip_comments(command))) or 1
-        log_decision(command, "deny", "credential-leak", n_segments)
+        _log_local(command, "deny", "credential-leak")
         return leak
 
     cleaned = strip_comments(command)
@@ -647,7 +571,7 @@ def decide(command: str) -> dict[str, str] | None:  # noqa: PLR0911 -- top-level
 
     deny = _get_always_deny(segments)
     if deny is not None:
-        log_decision(command, "deny", "always-deny", len(segments))
+        _log_local(command, "deny", "always-deny")
         return deny
 
     # === Pre-evaluation: dangerous-construct deny in BOTH modes ===
@@ -672,7 +596,7 @@ def decide(command: str) -> dict[str, str] | None:  # noqa: PLR0911 -- top-level
     has_pipes = len(segments) > 1
 
     if not has_comments and not has_pipes:
-        log_decision(command, "passthrough", "no match", len(segments))
+        _log_local(command, "passthrough", "no match")
         return None
 
     return _evaluate_segments(command, segments, has_comments=has_comments)
@@ -721,9 +645,8 @@ def _pre_evaluate_dangerous(command: str, segments: list[str]) -> dict[str, str]
     CONDITIONAL_SAFE-with-denied-flag pattern. Returns ``None`` to defer to
     the normal evaluator.
     """
-    n_segments = len(segments) or 1
     if _is_pipe_to_shell(segments):
-        log_decision(command, "deny", "pipe-to-shell", n_segments)
+        _log_local(command, "deny", "pipe-to-shell")
         return _deny(_PIPE_TO_SHELL_REASON)
     for segment in segments:
         if has_dangerous_constructs(segment):
@@ -733,7 +656,7 @@ def _pre_evaluate_dangerous(command: str, segments: list[str]) -> dict[str, str]
                 "These are exfil/RCE primitives and are denied in both "
                 "interactive and autonomous mode."
             )
-            log_decision(command, "deny", "dangerous-construct", n_segments)
+            _log_local(command, "deny", "dangerous-construct")
             return _deny(reason)
         tokens = segment.split()
         base_cmd = tokens[0] if tokens else ""
@@ -744,7 +667,7 @@ def _pre_evaluate_dangerous(command: str, segments: list[str]) -> dict[str, str]
                 f"(any of {denied_flags}). These flags allow arbitrary "
                 "command execution and are not permitted."
             )
-            log_decision(command, "deny", f"{base_cmd}-denied-flag", n_segments)
+            _log_local(command, "deny", f"{base_cmd}-denied-flag")
             return _deny(reason)
     return None
 
@@ -756,9 +679,13 @@ def _matches_autonomous_feedback(segment: str) -> bool:
     in driven-agent contexts, so they must NOT be allowed by SAFE_PREFIXES
     coverage (e.g. `git branch -d` falls under the broader `git branch` safe
     prefix, but is registered separately as feedback-required).
+
+    Normalizes via ``_normalize_segment`` so quoting/whitespace bypasses are
+    closed (``"git" add -A`` matches the ``git add`` ASK rule).
     """
+    normalized = _normalize_segment(segment)
     for prefix in AUTONOMOUS_FEEDBACK:
-        if segment == prefix or segment.startswith(prefix + " "):
+        if normalized == prefix or normalized.startswith(prefix + " "):
             return True
     return False
 
@@ -773,7 +700,6 @@ def _evaluate_autonomous(command: str, segments: list[str]) -> dict[str, str]:
     explicitly registered as feedback-required is denied even if a broader
     safe prefix would otherwise cover it.
     """
-    n_segments = len(segments)
     for i, segment in enumerate(segments):
         if not _matches_autonomous_feedback(segment) and is_safe_command(
             segment, is_piped=(i > 0), autonomous=True
@@ -781,11 +707,11 @@ def _evaluate_autonomous(command: str, segments: list[str]) -> dict[str, str]:
             continue
         result = get_autonomous_deny(segment)
         reason = result["permissionDecisionReason"]
-        log_decision(command, "deny", reason, n_segments)
+        _log_local(command, "deny", reason)
         queue_denied_command(command)
         return result
     reason = "All command segments are safe (autonomous mode)"
-    log_decision(command, "allow", reason, n_segments)
+    _log_local(command, "allow", reason)
     return _allow(reason)
 
 
@@ -838,6 +764,8 @@ def hook(payload: dict[str, Any]) -> None:
         }
     }
     sys.stdout.write(json.dumps(output))
+    if decision.get("permissionDecision") == "deny":
+        sys.exit(2)
 
 
 if __name__ == "__main__":

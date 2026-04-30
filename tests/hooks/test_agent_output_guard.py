@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from guard.hooks.agent_output_guard import decide, hook
 
 HOOK_PATH = (
@@ -124,12 +126,15 @@ class TestHookFunction:
         assert capsys.readouterr().out == ""
 
     def test_agent_output_guard_denies_unsafe_input(self, capsys):
-        hook(
-            {
-                "tool_name": "Read",
-                "tool_input": {"file_path": "/private/tmp/claude-1/proj/sess/tasks/x.output"},
-            }
-        )
+        # Fix #7: deny path now exits 2 — wrap in pytest.raises(SystemExit).
+        with pytest.raises(SystemExit) as exc:
+            hook(
+                {
+                    "tool_name": "Read",
+                    "tool_input": {"file_path": "/private/tmp/claude-1/proj/sess/tasks/x.output"},
+                }
+            )
+        assert exc.value.code == 2
         out = capsys.readouterr().out
         envelope = json.loads(out)
         assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
@@ -161,6 +166,7 @@ class TestSubprocess:
         assert result.stdout.strip() == ""
 
     def test_subprocess_denies_agent_output(self):
+        # Fix #7: deny path now exits 2.
         payload = json.dumps(
             {
                 "tool_name": "Read",
@@ -168,6 +174,6 @@ class TestSubprocess:
             }
         )
         result = self._run_hook(payload)
-        assert result.returncode == 0
+        assert result.returncode == 2
         envelope = json.loads(result.stdout)
         assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"

@@ -33,6 +33,13 @@ class CommandRule:
     category: str
     pipe_safe: bool = False
     autonomous_feedback: str = ""
+    # When True, the command is documented as ALLOW for permission generation
+    # but is NOT exported via SAFE_PREFIXES. Bash command validation must route
+    # the prefix through a custom classifier (e.g. `_is_safe_env`,
+    # `_is_safe_interpreter`) because a bare prefix match would let attacker-
+    # controlled flags re-exec arbitrary code (`env -i bash -c ...`,
+    # `python -c '...'`, `node -e '...'`).
+    requires_classifier: bool = False
 
 
 # === Registry ===
@@ -239,7 +246,9 @@ COMMANDS: list[CommandRule] = [
     CommandRule("tr", Safety.ALLOW, "Translate chars", "text", pipe_safe=True),
     # --- General Utilities (ALLOW) ---
     CommandRule("date", Safety.ALLOW, "Date/time", "util"),
-    CommandRule("env", Safety.ALLOW, "Environment vars", "util"),
+    # `env` is ALLOW but routed through `_is_safe_env` because `env -i bash -c`
+    # is the canonical shell-recursion bypass; bare prefix matching is unsafe.
+    CommandRule("env", Safety.ALLOW, "Environment vars", "util", requires_classifier=True),
     CommandRule("which", Safety.ALLOW, "Find executable", "util"),
     CommandRule("whereis", Safety.ALLOW, "Find executable", "util"),
     CommandRule("type", Safety.ALLOW, "Command type", "util"),
@@ -249,9 +258,14 @@ COMMANDS: list[CommandRule] = [
     CommandRule("false", Safety.ALLOW, "No-op", "util"),
     CommandRule("test", Safety.ALLOW, "Test expression", "util"),
     CommandRule("bc", Safety.ALLOW, "Calculator", "util"),
+    CommandRule("cd", Safety.ALLOW, "Change directory", "util"),
+    CommandRule("mkdir -p", Safety.ALLOW, "Create directory", "util"),
     # --- Python (ALLOW) ---
-    CommandRule("python3", Safety.ALLOW, "Python execution", "python"),
-    CommandRule("python", Safety.ALLOW, "Python execution", "python"),
+    # Bare `python`/`python3` are routed through `_is_safe_interpreter` because
+    # `python -c '...'` / `-m <module>` re-exec arbitrary code; bare prefix
+    # matching would allow attacker-controlled flag forms.
+    CommandRule("python3", Safety.ALLOW, "Python execution", "python", requires_classifier=True),
+    CommandRule("python", Safety.ALLOW, "Python execution", "python", requires_classifier=True),
     CommandRule(".venv/bin/python", Safety.ALLOW, "Venv python", "python"),
     CommandRule("uv run python", Safety.ALLOW, "UV python", "python"),
     # --- Testing (ALLOW) ---
@@ -264,6 +278,10 @@ COMMANDS: list[CommandRule] = [
     CommandRule("uvx pytest", Safety.ALLOW, "UVX pytest", "testing"),
     # --- Linting (ALLOW) ---
     CommandRule("uvx semgrep", Safety.ALLOW, "Semgrep analysis", "linting"),
+    CommandRule("uvx ruff", Safety.ALLOW, "UVX ruff", "linting"),
+    CommandRule("uvx mypy", Safety.ALLOW, "UVX mypy", "linting"),
+    CommandRule("uvx black", Safety.ALLOW, "UVX black", "linting"),
+    CommandRule("uvx pyright", Safety.ALLOW, "UVX pyright", "linting"),
     CommandRule("ruff", Safety.ALLOW, "Ruff linter", "linting"),
     CommandRule("uv run ruff", Safety.ALLOW, "UV ruff", "linting"),
     CommandRule("mypy", Safety.ALLOW, "Type checker", "linting"),
@@ -276,7 +294,9 @@ COMMANDS: list[CommandRule] = [
     CommandRule("pre-commit run", Safety.ALLOW, "Pre-commit checks", "linting"),
     CommandRule("uvx pip-audit", Safety.ALLOW, "Security audit", "linting"),
     # --- Node (ALLOW) ---
-    CommandRule("node", Safety.ALLOW, "Node execution", "node"),
+    # Bare `node` is routed through `_is_safe_interpreter` — `node -e '...'`
+    # and `node --eval` are RCE primitives that bypass bare prefix matching.
+    CommandRule("node", Safety.ALLOW, "Node execution", "node", requires_classifier=True),
     CommandRule("npm run", Safety.ALLOW, "NPM scripts", "node"),
     CommandRule("npm test", Safety.ALLOW, "NPM test", "node"),
     CommandRule("npm list", Safety.ALLOW, "NPM list", "node"),
@@ -685,6 +705,35 @@ COMMANDS: list[CommandRule] = [
         "Recursive root/home deletion is never allowed.",
         "rm-deny",
     ),
+    # --- Interpreter RCE DENY ---
+    # `python -c`, `python3 -c`, `node -e`, `node --eval` are canonical RCE
+    # primitives — denied unconditionally in both interactive and autonomous
+    # modes. Note: `_is_safe_interpreter` further restricts ANY flagged form
+    # in autonomous mode; these entries exist so even interactive mode denies.
+    CommandRule(
+        "python -c",
+        Safety.DENY,
+        "python -c re-execs arbitrary code; not allowed.",
+        "interpreter-deny",
+    ),
+    CommandRule(
+        "python3 -c",
+        Safety.DENY,
+        "python3 -c re-execs arbitrary code; not allowed.",
+        "interpreter-deny",
+    ),
+    CommandRule(
+        "node -e",
+        Safety.DENY,
+        "node -e re-execs arbitrary code; not allowed.",
+        "interpreter-deny",
+    ),
+    CommandRule(
+        "node --eval",
+        Safety.DENY,
+        "node --eval re-execs arbitrary code; not allowed.",
+        "interpreter-deny",
+    ),
     # --- env -i DENY ---
     # `env -i` clears the environment and is commonly used to wrap RCE
     # (e.g. `env -i bash -c '...'`). Always deny — bare `env` and
@@ -827,7 +876,7 @@ COMMANDS: list[CommandRule] = [
 # === Derived Data Structures ===
 
 SAFE_PREFIXES: frozenset[str] = frozenset(
-    cmd.prefix for cmd in COMMANDS if cmd.safety == Safety.ALLOW
+    cmd.prefix for cmd in COMMANDS if cmd.safety == Safety.ALLOW and not cmd.requires_classifier
 )
 
 SAFE_PIPE_COMMANDS: frozenset[str] = frozenset(cmd.prefix for cmd in COMMANDS if cmd.pipe_safe)

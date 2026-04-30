@@ -254,6 +254,77 @@ def test_git_commit_long_file_flag_with_ai_attribution_denied(tmp_path: Path) ->
     assert proc.returncode == 2
 
 
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        '"rm" -rf /',
+        "'rm' -rf /",
+        "rm  -rf  /",  # double space
+        "rm\t-rf\t/",  # tabs
+        'rm "-rf" "/"',
+        '"git" add -A',
+        "git\tadd\t-A",
+    ],
+)
+def test_always_deny_normalized(cmd: str) -> None:
+    """Quoting/whitespace bypass must not evade ALWAYS_DENY (Fix 3+4)."""
+    for autonomous in (False, True):
+        _, stdout, _ = _run_bash(cmd, autonomous=autonomous)
+        assert _decision(stdout) == "deny", f"{cmd!r} mode={autonomous} not denied"
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        'python -c "import os; os.system(chr(108)+chr(115))"',
+        "python -c 'print(1)'",
+        "python3 -c 'import os'",
+        'node -e "console.log(1)"',
+        "node --eval 'process.exit(0)'",
+    ],
+)
+def test_interpreter_rce_denied_in_both_modes(cmd: str) -> None:
+    """python -c / python3 -c / node -e are RCE primitives (Fix 1)."""
+    for autonomous in (False, True):
+        _, stdout, _ = _run_bash(cmd, autonomous=autonomous)
+        assert _decision(stdout) == "deny", f"{cmd!r} mode={autonomous} not denied"
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        # `python -m pytest` is explicitly allowed via the long-form
+        # SAFE_PREFIX entry, but any other -m / -p / script-form invocation
+        # must deny (no bare `python`/`python3` prefix on SAFE_PREFIXES).
+        "python3 -m pip install foo",
+        "python script.py",
+        "python -m http.server",
+        "python -p 'print(1)'",
+    ],
+)
+def test_python_flagged_forms_denied_in_autonomous(cmd: str) -> None:
+    """Generic flag forms of bare python must deny in autonomous mode (Fix 1)."""
+    _, stdout, _ = _run_bash(cmd, autonomous=True)
+    assert _decision(stdout) == "deny", f"{cmd!r} not denied in autonomous"
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "python --version",
+        "python -V",
+        "python3 --version",
+        "python3 -V",
+        "node --version",
+        "node -v",
+    ],
+)
+def test_interpreter_version_probes_allowed_in_autonomous(cmd: str) -> None:
+    """Version probes are the only flagged interpreter form allowed."""
+    _, stdout, _ = _run_bash(cmd, autonomous=True)
+    assert _decision(stdout) == "allow", f"{cmd!r} should be allowed in autonomous"
+
+
 def test_jsonl_writer_truncates_to_4096_bytes(tmp_path: Path) -> None:
     """Records must be <= 4096 bytes (POSIX O_APPEND atomicity envelope)."""
     from guard._utils import append_jsonl  # noqa: PLC0415
