@@ -184,8 +184,70 @@ def strip_inline_comment(line: str) -> str:
     return line
 
 
+def _split_on_operators(line: str) -> list[str]:  # noqa: C901 -- single-pass quote-aware lexer; splitting harms readability
+    """Split a single (no-newline) line on ``|``/``||``/``&&``/``;`` outside quotes.
+
+    Ignores operator characters that appear inside single- or double-quoted
+    strings so an attacker cannot smuggle a deny-list-evading prefix by
+    embedding ``;`` inside a quoted argument (F1 family).
+    """
+    segments: list[str] = []
+    buf: list[str] = []
+    in_single = False
+    in_double = False
+    i = 0
+    while i < len(line):
+        c = line[i]
+        nxt = line[i + 1] if i + 1 < len(line) else ""
+        if c == "'" and not in_double:
+            in_single = not in_single
+            buf.append(c)
+            i += 1
+            continue
+        if c == '"' and not in_single:
+            in_double = not in_double
+            buf.append(c)
+            i += 1
+            continue
+        if c == "\\" and in_double:
+            # preserve escape sequence
+            buf.append(c)
+            if nxt:
+                buf.append(nxt)
+                i += 2
+                continue
+            i += 1
+            continue
+        if not in_single and not in_double:
+            if c == "|" and nxt == "|":
+                segments.append("".join(buf))
+                buf = []
+                i += 2
+                continue
+            if c == "&" and nxt == "&":
+                segments.append("".join(buf))
+                buf = []
+                i += 2
+                continue
+            if c in {"|", ";"}:
+                segments.append("".join(buf))
+                buf = []
+                i += 1
+                continue
+        buf.append(c)
+        i += 1
+    if buf:
+        segments.append("".join(buf))
+    return segments
+
+
 def split_pipeline(command: str) -> list[str]:
-    """Split a command into segments on pipe/operator/newline boundaries."""
+    """Split a command into segments on pipe/operator/newline boundaries.
+
+    Operator splitting is quote-aware so semicolons / pipes embedded inside
+    quoted strings are preserved (closes the F1 family of bypasses where
+    ``python3'  '-c '1; __import__(...)'`` was being torn at the ``;``).
+    """
     segments: list[str] = []
     for line in command.split("\n"):
         stripped = line.strip()
@@ -194,8 +256,10 @@ def split_pipeline(command: str) -> list[str]:
         stripped = strip_inline_comment(stripped)
         if not stripped:
             continue
-        parts = re.split(r"\s*(?:\|(?!\|)|\|\||&&|;)\s*", stripped)
-        segments.extend(p.strip() for p in parts if p.strip())
+        for part in _split_on_operators(stripped):
+            piece = part.strip()
+            if piece:
+                segments.append(piece)
     return segments
 
 
@@ -419,10 +483,13 @@ _ALWAYS_DENY_REASONS: dict[str, str] = {
 def _normalize_segment(segment: str) -> str:
     r"""Return a whitespace/quote-normalized form of ``segment``.
 
-    Defeats two prefix-matching bypasses:
+    Defeats three prefix-matching bypasses:
 
     - quoting (``"rm" -rf /`` → ``rm -rf /``)
     - extra whitespace (``rm  -rf  /`` / ``rm\t-rf\t/`` → ``rm -rf /``)
+    - quoted whitespace inside a single token (``python3'  '-c`` becomes one
+      shlex token ``python3  -c`` with internal whitespace; collapsing every
+      token's internal whitespace folds it back to ``python3 -c``)
 
     Falls back to a raw whitespace split when ``shlex`` cannot parse the
     fragment (e.g. unbalanced quotes).
@@ -431,7 +498,235 @@ def _normalize_segment(segment: str) -> str:
         tokens = shlex.split(segment)
     except ValueError:
         return " ".join(segment.split())
-    return " ".join(tokens)
+    # Collapse internal whitespace per token so quoted-whitespace fragments
+    # (``python3'  '-c``) match the literal ``python3 -c`` deny prefix.
+    flat = [re.sub(r"\s+", " ", t.strip()) for t in tokens if t]
+    return " ".join(flat)
+
+
+# === Pre-deny canonicalization helpers (F2, F5, F6) ===
+
+# Unicode whitespace classes that should fold to ASCII space.
+# Spelled with \u escapes so the file itself contains no ambiguous unicode
+# whitespace characters (avoids ruff RUF001 noise on the catch-list).
+# Covered: NBSP (U+00A0), OGHAM SPACE (U+1680), EN QUAD..HAIR SPACE
+# (U+2000-U+200A), LINE/PARA SEPARATOR (U+2028-U+2029), NARROW NBSP (U+202F),
+# MEDIUM MATHEMATICAL SPACE (U+205F), IDEOGRAPHIC SPACE (U+3000).
+_UNICODE_WS_RE = re.compile("[\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]")
+
+
+def _canonicalize(command: str) -> str:
+    r"""Fold POSIX line continuations and unicode whitespace to ASCII space.
+
+    Applied at the top of ``decide()`` so downstream pipeline-split and
+    normalization operate on a canonical form. Defeats:
+
+    - ``rm \\\n-rf /`` (backslash-newline continuation)
+    - ``rm\xa0-rf\xa0/`` (NBSP) and similar unicode whitespace bypasses
+    """
+    command = command.replace("\\\n", " ")
+    return _UNICODE_WS_RE.sub(" ", command)
+
+
+# Regex matching a shell variable assignment of the form ``KEY=VALUE``.
+_SEG_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _strip_env_prefix(normalized: str) -> str | None:
+    """If segment starts with ``env K=V K=V ...``, return the rest.
+
+    Returns ``None`` if the segment doesn't begin with bare ``env`` followed
+    by zero or more ``KEY=VAL`` assignments. ``env -i`` / ``env --`` and
+    other flag forms are NOT stripped — they fall through to the existing
+    ``_is_safe_env`` / ``env -i`` ALWAYS_DENY paths.
+    """
+    tokens = normalized.split()
+    if not tokens or tokens[0] != "env":
+        return None
+    i = 1
+    while i < len(tokens) and _SEG_ENV_ASSIGN_RE.match(tokens[i]):
+        i += 1
+    if i == 1:
+        # No K=V assignments — bare `env` or `env <flag>`. Don't strip.
+        return None
+    if i == len(tokens):
+        # `env K=V` with no wrapped command — nothing to strip to.
+        return None
+    return " ".join(tokens[i:])
+
+
+# Global git options that take a value either as the next token (``-C path``,
+# ``-c k=v``) or fused (``--git-dir=...``). Stripped before ALWAYS_DENY match
+# so ``git -C /tmp add -A`` is denied like ``git add -A``.
+_GIT_GLOBAL_VALUE_FLAGS: frozenset[str] = frozenset({"-C", "-c"})
+_GIT_GLOBAL_FUSED_PREFIXES: tuple[str, ...] = (
+    "--git-dir=",
+    "--work-tree=",
+    "--namespace=",
+    "--super-prefix=",
+    "--exec-path=",
+)
+_GIT_GLOBAL_FUSED_NAMES: frozenset[str] = frozenset(
+    {
+        "--git-dir",
+        "--work-tree",
+        "--namespace",
+        "--super-prefix",
+        "--exec-path",
+    }
+)
+
+
+def _strip_git_global_options(normalized: str) -> str | None:
+    """If segment starts with ``git`` + global options, return canonical form.
+
+    Returns ``None`` for non-git segments. Otherwise walks past leading global
+    options (``-C path``, ``-c k=v``, ``--git-dir=...``, ``--work-tree=...``,
+    ``--namespace=...``, ``--super-prefix=...``, ``--exec-path=...``) to the
+    subcommand. The returned form is ``git <subcommand> <rest>``.
+    """
+    tokens = normalized.split()
+    if not tokens or tokens[0] != "git":
+        return None
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in _GIT_GLOBAL_VALUE_FLAGS:
+            # consume flag + value
+            i += 2
+            continue
+        if tok.startswith(_GIT_GLOBAL_FUSED_PREFIXES):
+            i += 1
+            continue
+        if tok in _GIT_GLOBAL_FUSED_NAMES:
+            # `--git-dir path` (separate value form)
+            i += 2
+            continue
+        break
+    if i == 1:
+        return None  # no global options stripped
+    return "git " + " ".join(tokens[i:]) if i < len(tokens) else "git"
+
+
+# === F3 — non-canonical interpreter detection ===
+
+# Matches python / python3 / python3.11 / python3.12 / nodejs / node / pypy / pypy3 / bun / deno
+_INTERPRETER_BASENAME_RE = re.compile(r"^(?:python(?:\d+(?:\.\d+)?)?|nodejs?|pypy\d?|bun|deno)$")
+# Flags / subcommands that re-execute arbitrary code.
+_INTERPRETER_EVAL_FLAGS: frozenset[str] = frozenset({"-c", "-e", "--eval", "eval"})
+# Wrapper runners — detect dangerous inner commands for the wrapped interpreter.
+_RUNNER_WRAPPERS: frozenset[str] = frozenset({"uvx", "pipx"})
+
+
+def _basename(path: str) -> str:
+    # os.path.basename works on shell tokens (no platform-Path semantics).
+    return os.path.basename(path)  # noqa: PTH119 -- string-token basename, not a real path object
+
+
+_UVX_MIN_TOKENS = 2  # `uvx <interpreter>`
+_PIPX_RUN_MIN_TOKENS = 3  # `pipx run <interpreter>`
+
+
+def _interpreter_uses_eval_flag(tokens: list[str]) -> bool:
+    """Return True if any subsequent token is an eval flag (``-c``, ``-e`` ...).
+
+    Treats clustered short flags carefully — the eval flags are short single
+    letters but we only honour exact-token matches so ``-cv`` (not real)
+    won't trip. ``deno`` uses bare ``eval`` subcommand which we accept.
+    """
+    return any(tok in _INTERPRETER_EVAL_FLAGS for tok in tokens[1:])
+
+
+def _is_dangerous_interpreter(normalized: str) -> bool:
+    """Return True if the segment invokes an interpreter with an eval flag.
+
+    Detects:
+    - bare interpreter binaries with version suffix or absolute path:
+      ``python3.11 -c``, ``/usr/bin/python3 -c``, ``nodejs -e``, ``bun -e``,
+      ``deno eval``, ``pypy3 -c``
+    - runner wrappers: ``uvx python -c``, ``pipx run python -c``
+    """
+    tokens = normalized.split()
+    if not tokens:
+        return False
+
+    # Wrapper runners — examine the wrapped command tail.
+    head = _basename(tokens[0])
+    if head == "uvx" and len(tokens) >= _UVX_MIN_TOKENS:
+        return _is_dangerous_interpreter(" ".join(tokens[1:]))
+    if head == "pipx" and len(tokens) >= _PIPX_RUN_MIN_TOKENS and tokens[1] == "run":
+        return _is_dangerous_interpreter(" ".join(tokens[2:]))
+
+    if not _INTERPRETER_BASENAME_RE.match(head):
+        return False
+    return _interpreter_uses_eval_flag(tokens)
+
+
+# === F4 — dangerous rm shapes ===
+
+_DANGEROUS_RM_OPERANDS: frozenset[str] = frozenset(
+    {
+        "/",
+        "/*",
+        "~",
+        "~/*",
+        "$HOME",
+        "$HOME/*",
+        "/.",
+        "/..",
+        ".",
+        "./",
+        "*",
+    }
+)
+
+
+def _rm_is_recursive(flags: list[str]) -> bool:
+    """Return True if the rm flag list implies recursive deletion."""
+    for f in flags:
+        if f == "--recursive":
+            return True
+        if f.startswith("--"):
+            continue
+        if not f.startswith("-"):
+            continue
+        # short flag cluster like -rf, -fr, -Rf, -rfv
+        cluster = f[1:]
+        if "r" in cluster.lower() or "R" in cluster:
+            return True
+    return False
+
+
+def _rm_is_force(flags: list[str]) -> bool:
+    """Return True if the rm flag list implies force deletion."""
+    for f in flags:
+        if f == "--force":
+            return True
+        if f.startswith("-") and not f.startswith("--") and "f" in f[1:]:
+            return True
+    return False
+
+
+def _is_dangerous_rm(normalized: str) -> bool:
+    """Return True for catastrophic rm shapes that ALWAYS_DENY literals miss.
+
+    Catches:
+    - ``rm -r -f /``, ``rm --recursive --force /``
+    - ``rm -rf /*``, ``rm -rf "/"``, ``rm -rf ~``
+    - ``rm -rf .`` / ``rm -rf ./`` (cwd-dependent — unsafe under agent)
+    """
+    tokens = normalized.split()
+    if not tokens or _basename(tokens[0]) != "rm":
+        return False
+    flags = [t for t in tokens[1:] if t.startswith("-")]
+    operands = [t for t in tokens[1:] if not t.startswith("-")]
+    if not _rm_is_recursive(flags):
+        return False
+    # force not strictly required for catastrophic shape but we mirror upstream
+    # ALWAYS_DENY literals which all include -f (or --no-preserve-root). Keep
+    # the recursive check as the trigger; force is informational.
+    _ = _rm_is_force(flags)
+    return any(op in _DANGEROUS_RM_OPERANDS for op in operands)
 
 
 def _match_always_deny(segment: str) -> str | None:
@@ -439,30 +734,105 @@ def _match_always_deny(segment: str) -> str | None:
 
     Normalizes via ``_normalize_segment`` before prefix-matching so quoting
     and whitespace bypasses (``"rm" -rf /``, ``rm  -rf  /``) cannot evade
-    the registry's deny set.
+    the registry's deny set. Additionally strips ``env K=V ...`` prefixes
+    (F2) and leading git global options (F5) so wrapped commands match the
+    same deny rules as their bare equivalents.
     """
     if not segment:
         return None
     normalized = _normalize_segment(segment)
+
+    # F2: ``env K=V K=V ... <cmd>`` — strip the env prefix and re-evaluate.
+    stripped = _strip_env_prefix(normalized)
+    if stripped is not None:
+        normalized_stripped = _normalize_segment(stripped)
+        match = _match_always_deny_literal(normalized_stripped)
+        if match is not None:
+            return match
+
+    # F5: ``git -C path``, ``git --git-dir=...`` — collapse to ``git <sub>``.
+    git_stripped = _strip_git_global_options(normalized)
+    if git_stripped is not None:
+        match = _match_always_deny_literal(git_stripped)
+        if match is not None:
+            return match
+
+    return _match_always_deny_literal(normalized)
+
+
+def _match_always_deny_literal(normalized: str) -> str | None:
+    """Pure literal prefix lookup against ALWAYS_DENY (no canonicalization)."""
     matches = [p for p in ALWAYS_DENY if normalized == p or normalized.startswith(p + " ")]
     if not matches:
         return None
     return max(matches, key=len)
 
 
+# Synthetic deny-prefix labels for fixes that don't add ALWAYS_DENY literals.
+_SYNTH_INTERPRETER_DENY = "<dangerous interpreter>"
+_SYNTH_RM_DENY = "<dangerous rm>"
+
+_SYNTH_DENY_REASONS: dict[str, str] = {
+    _SYNTH_INTERPRETER_DENY: (
+        "Interpreter eval flag detected (python/node/bun/deno/pypy variant with "
+        "-c/-e/--eval/eval). These re-exec arbitrary code and are denied "
+        "regardless of binary suffix or absolute path."
+    ),
+    _SYNTH_RM_DENY: (
+        "Recursive rm against a top-level / cwd / home operand. This shape "
+        "(any of /, /*, ~, $HOME, ., ./, *) is catastrophic and is denied "
+        "regardless of flag ordering."
+    ),
+}
+
+
+def _match_synthetic_deny(segment: str) -> str | None:
+    """Return a synthetic-deny label if matchers fire, else ``None``.
+
+    Covers F3 (non-canonical interpreters) and F4 (dangerous rm shapes) —
+    fixes that extend the matcher rather than the literal ALWAYS_DENY list.
+    Also re-runs the matchers against ``env``-prefix-stripped and ``git``-
+    global-option-stripped forms so wrapper bypasses don't slip through.
+    """
+    if not segment:
+        return None
+    normalized = _normalize_segment(segment)
+    candidates = [normalized]
+    stripped = _strip_env_prefix(normalized)
+    if stripped is not None:
+        candidates.append(_normalize_segment(stripped))
+    git_stripped = _strip_git_global_options(normalized)
+    if git_stripped is not None:
+        candidates.append(git_stripped)
+    for cand in candidates:
+        if _is_dangerous_interpreter(cand):
+            return _SYNTH_INTERPRETER_DENY
+        if _is_dangerous_rm(cand):
+            return _SYNTH_RM_DENY
+    return None
+
+
 def _get_always_deny(segments: list[str]) -> dict[str, str] | None:
-    """Return a deny envelope if any segment hits the ALWAYS_DENY set, else ``None``."""
+    """Return a deny envelope if any segment hits the ALWAYS_DENY set, else ``None``.
+
+    Checks both registry literals (via ``_match_always_deny``) and synthetic
+    matchers for non-canonical interpreter binaries (F3) and catastrophic rm
+    shapes (F4) that the literal list cannot cover exhaustively.
+    """
     for seg in segments:
         prefix = _match_always_deny(seg)
-        if prefix is None:
-            continue
-        rule_reason = _ALWAYS_DENY_REASONS.get(prefix)
-        reason = (
-            f"Blocked: `{prefix}` is on the always-deny list ({rule_reason})."
-            if rule_reason
-            else f"Blocked: `{seg[:80]}` is on the always-deny list."
-        )
-        return _deny(reason)
+        if prefix is not None:
+            rule_reason = _ALWAYS_DENY_REASONS.get(prefix)
+            reason = (
+                f"Blocked: `{prefix}` is on the always-deny list ({rule_reason})."
+                if rule_reason
+                else f"Blocked: `{seg[:80]}` is on the always-deny list."
+            )
+            return _deny(reason)
+        synth = _match_synthetic_deny(seg)
+        if synth is not None:
+            reason = f"Blocked: `{seg[:80]}` — {_SYNTH_DENY_REASONS[synth]}"
+            return _deny(reason)
     return None
 
 
@@ -559,6 +929,11 @@ def _evaluate_segments(
 
 def decide(command: str) -> dict[str, str] | None:  # noqa: PLR0911 -- top-level dispatcher with intentional early-return branches
     """Decide whether to allow a bash command. ``None`` means passthrough."""
+    # F6: fold POSIX line continuations and unicode whitespace before any
+    # other processing so downstream pipeline split / normalization sees a
+    # canonical ASCII form.
+    command = _canonicalize(command)
+
     leak = get_credential_leak_deny(command)
     if leak is not None:
         _log_local(command, "deny", "credential-leak")

@@ -173,6 +173,20 @@ def _classify_subcommand(subcommand: str, remaining: list[str]) -> dict[str, Any
     return _ask_envelope(f"git -C: '{subcommand}' is not in the allow list")
 
 
+_COMMIT_HEAD_TOKENS = 3  # ['git', 'commit', <at least one more arg>]
+
+
+def _is_reuse_token(tok: str, idx: int, parts: list[str]) -> bool:
+    """Return True iff ``tok`` at position ``idx`` requests prior-message reuse."""
+    if tok == "-C" and idx + 1 < len(parts):
+        return True
+    if tok.startswith("-C") and len(tok) > _DASH_C_PREFIX_LEN and not tok.startswith("--"):
+        return True
+    if tok == "--reuse-message" and idx + 1 < len(parts):
+        return True
+    return tok.startswith("--reuse-message=")
+
+
 def _is_commit_reuse(command: str) -> bool:
     """Return ``True`` if the command silently reuses a prior commit message.
 
@@ -184,18 +198,9 @@ def _is_commit_reuse(command: str) -> bool:
         parts = shlex.split(command)
     except ValueError:
         return False
-    if len(parts) < 3 or parts[0] != "git" or parts[1] != "commit":
+    if len(parts) < _COMMIT_HEAD_TOKENS or parts[0] != "git" or parts[1] != "commit":
         return False
-    for i, tok in enumerate(parts[2:], start=2):
-        if tok == "-C" and i + 1 < len(parts):
-            return True
-        if tok.startswith("-C") and len(tok) > _DASH_C_PREFIX_LEN and not tok.startswith("--"):
-            return True
-        if tok == "--reuse-message" and i + 1 < len(parts):
-            return True
-        if tok.startswith("--reuse-message="):
-            return True
-    return False
+    return any(_is_reuse_token(tok, i, parts) for i, tok in enumerate(parts[2:], start=2))
 
 
 def decide(command: str) -> dict[str, Any] | None:
@@ -228,9 +233,7 @@ def hook(payload: dict[str, Any]) -> None:
     if not isinstance(tool_input, dict):
         return
     command = tool_input.get("command", "")
-    if not isinstance(command, str) or (
-        "git -C" not in command and "git commit" not in command
-    ):
+    if not isinstance(command, str) or ("git -C" not in command and "git commit" not in command):
         return
 
     envelope = decide(command)

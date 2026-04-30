@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from guard.hooks.subagent_scope import hook
+from guard.hooks.subagent_scope import hook, is_allowed
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -157,3 +157,84 @@ class TestSubagentScope:
             )
         envelope = json.loads(capsys.readouterr().out)
         assert task_name in envelope["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+# === F7 — subagent_scope plain pattern matching only inside cwd ===
+#
+# Previously ``_matches_plain`` fell through to ``abs_path.endswith("/" + pattern)``
+# which matched anywhere on disk. A plain allowlist entry like ``src/safe.py``
+# would silently allow ``/totally_unrelated/src/safe.py``.
+
+
+class TestSubagentScopeF7:
+    def test_plain_pattern_does_not_match_outside_cwd(self, tmp_path):
+        # cwd = tmp_path/projA ; allowed = src/safe.py.
+        # Edit target lives in tmp_path/other/src/safe.py — outside cwd.
+
+        cwd = tmp_path / "projA"
+        cwd.mkdir()
+        outside = tmp_path / "other" / "src"
+        outside.mkdir(parents=True)
+        outside_file = outside / "safe.py"
+        outside_file.write_text("x")
+        assert not is_allowed(str(outside_file), str(cwd), ["src/safe.py"])
+
+    def test_plain_pattern_basename_only_does_not_match_etc(self, tmp_path):
+
+        cwd = tmp_path / "projA"
+        cwd.mkdir()
+        # Patterns of just a basename used to match anywhere via endswith.
+        assert not is_allowed("/etc/something/safe.py", str(cwd), ["safe.py"])
+
+    def test_plain_pattern_inside_cwd_still_matches(self, tmp_path):
+
+        cwd = tmp_path
+        target = tmp_path / "src" / "safe.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("x")
+        assert is_allowed(str(target), str(cwd), ["src/safe.py"])
+
+    def test_glob_pattern_does_not_match_outside_cwd(self, tmp_path):
+
+        cwd = tmp_path / "projA"
+        cwd.mkdir()
+        outside = tmp_path / "other" / "tests"
+        outside.mkdir(parents=True)
+        outside_file = outside / "test_x.py"
+        outside_file.write_text("x")
+        assert not is_allowed(str(outside_file), str(cwd), ["tests/test_*.py"])
+
+    def test_dir_pattern_does_not_match_outside_cwd(self, tmp_path):
+
+        cwd = tmp_path / "projA"
+        cwd.mkdir()
+        outside = tmp_path / "other" / "tests" / "deep"
+        outside.mkdir(parents=True)
+        outside_file = outside / "x.py"
+        outside_file.write_text("x")
+        assert not is_allowed(str(outside_file), str(cwd), ["tests/"])
+
+    def test_hook_denies_outside_cwd_plain(self, tmp_path, capsys):
+        # End-to-end: scope file in cwd allows ``src/safe.py``; hook is
+        # asked to Edit a file outside cwd that ends with the same suffix.
+        claude_dir = tmp_path / "projA" / ".claude"
+        claude_dir.mkdir(parents=True)
+        (claude_dir / "subagent-scope.json").write_text(
+            json.dumps({"task": "T1", "allowed": ["src/safe.py"]})
+        )
+        outside = tmp_path / "other" / "src"
+        outside.mkdir(parents=True)
+        outside_file = outside / "safe.py"
+        outside_file.write_text("x")
+
+        with pytest.raises(SystemExit) as exc:
+            hook(
+                {
+                    "tool_name": "Edit",
+                    "tool_input": {"file_path": str(outside_file)},
+                    "cwd": str(tmp_path / "projA"),
+                }
+            )
+        assert exc.value.code == 2
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"

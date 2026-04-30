@@ -20,7 +20,7 @@ from guard.hooks.bash_command_validator import (
     strip_comments,
     strip_inline_comment,
 )
-from guard.registry import AUTONOMOUS_FEEDBACK
+from guard.registry import ALWAYS_DENY, AUTONOMOUS_FEEDBACK
 
 HOOK_PATH = (
     Path(__file__).resolve().parents[2] / "src" / "guard" / "hooks" / "bash_command_validator.py"
@@ -446,3 +446,176 @@ class TestAutonomousMode:
         result = decide("git push origin main")
         assert result is not None
         assert result["permissionDecision"] == "deny"
+
+
+# === F1 — Quoted-whitespace bypass ===
+# Smuggling internal whitespace inside quoted tokens used to fold into a
+# single shlex token (``python3  -c``) that the literal ``python3 -c`` deny
+# prefix could not match.
+
+
+def _is_deny(result):
+    return result is not None and result.get("permissionDecision") == "deny"
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "python3'  '-c '1; __import__(\"os\").system(\"id\")'",
+        "python3\"  \"-c '1'",
+        # tabs inside quotes also collapse
+        "python3'\t'-c '1'",
+    ],
+)
+def test_f1_quoted_whitespace_interpreter_denied(cmd):
+    assert _is_deny(decide(cmd)), f"F1 not denied: {cmd!r}"
+
+
+# Parametrized over the entire ALWAYS_DENY set so future entries are
+# automatically regression-tested for the quoted-whitespace bypass.
+def _always_deny_quoted_whitespace_inputs():
+    cases = []
+    for prefix in ALWAYS_DENY:
+        toks = prefix.split()
+        if len(toks) < 2:
+            continue
+        # Smuggle a quoted whitespace inside the first token boundary.
+        head = toks[0] + "'  '" + toks[1]
+        rest = " ".join(toks[2:])
+        cases.append((head + (" " + rest if rest else "")).strip())
+    return cases
+
+
+@pytest.mark.parametrize("cmd", _always_deny_quoted_whitespace_inputs())
+def test_f1_always_deny_quoted_whitespace_parametric(cmd):
+    # We don't expect *every* registry entry to deny standalone (some need
+    # operands like `rm -rf /`), but each should at minimum not passthrough
+    # silently — either deny or allow when the entry was already innocuous.
+    res = decide(cmd)
+    # The shape of the test: with quoted-whitespace, the matcher should
+    # behave identically to the literal form. Since literals all deny, deny
+    # is the expected result.
+    assert _is_deny(res), f"F1 parametric not denied: {cmd!r} -> {res}"
+
+
+# === F2 — env K=V prefix smuggle ===
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        'env FOO=1 python3 -c "import os; os.system(\\"id\\")"',
+        "env A=1 B=2 python -c 'pass'",
+        "env FOO=1 node -e '1'",
+        "env X=y rm -rf /",
+        "env FOO=1 git add -A",
+    ],
+)
+def test_f2_env_kv_prefix_denied(cmd):
+    assert _is_deny(decide(cmd)), f"F2 not denied: {cmd!r}"
+
+
+def test_f2_env_dash_i_still_denied():
+    # env -i must still be denied (different code path — ALWAYS_DENY literal).
+    assert _is_deny(decide("env -i bash -c 'id'"))
+
+
+def test_f2_bare_env_kv_no_command_safe():
+    # ``env FOO=1`` with no wrapped command is still safe.
+    res = decide("env FOO=1")
+    assert res is None or res.get("permissionDecision") != "deny"
+
+
+# === F3 — non-canonical interpreter binaries ===
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        'python3.11 -c "print(1)"',
+        'python3.12 -c "print(1)"',
+        '/usr/bin/python3 -c "1"',
+        '/opt/homebrew/bin/python3 -c "1"',
+        'nodejs -e "1"',
+        'bun -e "1"',
+        'deno eval "1"',
+        'pypy3 -c "1"',
+        'uvx python -c "1"',
+        "pipx run python -c '1'",
+    ],
+)
+def test_f3_dangerous_interpreter_variants_denied(cmd):
+    assert _is_deny(decide(cmd)), f"F3 not denied: {cmd!r}"
+
+
+def test_f3_bare_python_version_still_safe():
+    # ``python --version`` is a known-safe form: must not deny.
+    # (Single-segment, no-comments path returns None passthrough — that's
+    # acceptable; what matters is we do not synthesize an interpreter deny.)
+    res = decide("python --version")
+    assert res is None or res.get("permissionDecision") != "deny"
+
+
+# === F4 — dangerous rm shapes ===
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "rm -r -f /",
+        "rm --recursive --force /",
+        'rm -rf "/"',
+        "rm -rf '/'",
+        "rm -rf ~",
+        "rm -rf /*",
+        "rm -rfv /",
+        "rm -rf .",
+        "rm -rf ./",
+        "rm -rf *",
+    ],
+)
+def test_f4_dangerous_rm_shapes_denied(cmd):
+    assert _is_deny(decide(cmd)), f"F4 not denied: {cmd!r}"
+
+
+def test_f4_safe_rm_not_blanket_denied():
+    # ``rm somefile`` is not on the deny shape — defer to existing prompt path.
+    res = decide("rm /tmp/specific_file.log")
+    # Should NOT be a deny envelope from F4 — either passthrough or ASK route.
+    if res is not None:
+        assert res.get("permissionDecision") != "deny", res
+
+
+# === F5 — git --git-dir / git -C prefix bypass ===
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "git --git-dir=/tmp/.git --work-tree=/tmp add -A",
+        "git -C /tmp add -A",
+        "git -c user.email=x@y add -A",
+        "git --git-dir /tmp/.git add -A",
+        "git -C /tmp branch -D feature",
+    ],
+)
+def test_f5_git_global_options_dont_bypass_deny(cmd):
+    assert _is_deny(decide(cmd)), f"F5 not denied: {cmd!r}"
+
+
+# === F6 — Unicode whitespace + line continuation ===
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "rm\u00a0-rf\u00a0/",  # NBSP
+        "rm\u2003-rf\u2003/",  # EM SPACE
+        "rm\u202f-rf\u202f/",  # NARROW NO-BREAK SPACE
+        "rm\u3000-rf\u3000/",  # IDEOGRAPHIC SPACE
+        "rm \\\n-rf /",  # POSIX line continuation
+        "rm \\\n -rf \\\n /",
+    ],
+)
+def test_f6_unicode_whitespace_and_continuation_denied(cmd):
+    assert _is_deny(decide(cmd)), f"F6 not denied: {cmd!r}"
