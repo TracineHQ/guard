@@ -11,7 +11,9 @@ dedicated query CLI instead.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shlex
 import sys
 from typing import Any
 
@@ -35,6 +37,53 @@ _DENY_REASON = (
     "  - fall back to the raw JSONL only when explicitly required"
 )
 
+# File-reader basenames that, when invoked against an agent-output file,
+# dump the transcript into the model's context. Includes pagers, hex/binary
+# dumpers, viewers, and grep-style tools.
+_FILE_READERS: frozenset[str] = frozenset(
+    {
+        "cat",
+        "head",
+        "tail",
+        "less",
+        "more",
+        "bat",
+        "rg",
+        "awk",
+        "sed",
+        "xxd",
+        "od",
+        "hexdump",
+        "strings",
+        "nl",
+        "tac",
+        "view",
+        "vim",
+        "vi",
+        "ed",
+        "grep",
+    }
+)
+
+
+def _is_file_reader_command(command: str) -> bool:
+    """Return True if ``command`` invokes a file reader on its first token.
+
+    Tokenizes via ``shlex`` so leading whitespace, quotes, and absolute
+    paths (``/bin/cat /path``) are all handled. Falls back to a whitespace
+    split if shlex can't parse.
+    """
+    if not command.strip():
+        return False
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.strip().split()
+    if not tokens:
+        return False
+    base = os.path.basename(tokens[0])  # noqa: PTH119 -- string-token basename
+    return base in _FILE_READERS
+
 
 def decide(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any] | None:
     """Return a deny envelope if the call targets an agent output file."""
@@ -47,7 +96,7 @@ def decide(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any] | None:
         command = tool_input.get("command", "")
         if (
             isinstance(command, str)
-            and re.match(r"^(cat|head|tail)\s", command)
+            and _is_file_reader_command(command)
             and AGENT_OUTPUT_PATTERN.search(command)
         ):
             return emit_pretooluse_decision("deny", _DENY_REASON)

@@ -228,6 +228,49 @@ def _run_hook(command):
     return decision, result.returncode
 
 
+class TestMultiMessageBypass:
+    """B6 — multi-``-m`` and ``-F /dev/stdin`` (and friends) bypasses."""
+
+    def test_multi_dash_m_second_message_caught(self):
+        # Footer hidden in the second -m used to escape detection.
+        cmd = 'git commit -m "fix" -m "Co-Authored-By: Claude <noreply@anthropic.com>"'
+        result = decide(cmd)
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_multi_long_message_second_caught(self):
+        cmd = 'git commit --message="fix" --message="Co-Authored-By: Claude"'
+        result = decide(cmd)
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/dev/stdin",
+            "/dev/null",
+            "/dev/fd/0",
+            "/proc/self/fd/0",
+        ],
+    )
+    def test_stream_file_path_denied(self, path):
+        result = decide(f"git commit -F {path}")
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "stream" in result["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+    def test_dash_F_short_form(self):  # noqa: N802 -- spec-named
+        # ``-F-`` (no space, dash means stdin) — must deny.
+        result = decide("git commit -F-")
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_long_file_dev_stdin(self):
+        result = decide("git commit --file=/dev/stdin")
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 class TestSubprocessIntegration:
     def test_clean_commit_passthrough(self):
         decision, code = _run_hook('git commit -m "fix bug"')

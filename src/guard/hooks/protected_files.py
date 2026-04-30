@@ -11,6 +11,8 @@ changes to the hook infrastructure are surfaced for review.
 from __future__ import annotations
 
 import json
+import re
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -70,20 +72,92 @@ def is_protected(file_path: str) -> str | None:
     return None
 
 
+# Bash redirect / file-write commands and their target-extracting regex / token
+# index. Used by ``_bash_targets_protected`` (B8) as a best-effort second line
+# of defense — the primary path is the Edit/Write tool guard above.
+_BASH_REDIRECT_RE = re.compile(r"(?:^|\s)>>?\s*(\S+)")
+_BASH_DD_OF_RE = re.compile(r"(?:^|\s)of=(\S+)")
+
+
+def _bash_target_paths(command: str) -> list[str]:
+    """Return likely write-target paths from a bash command (B8).
+
+    Best-effort: scans for output redirects (``>``, ``>>``), ``tee``,
+    ``cp``, ``mv``, ``ln -sf``, ``install``, and ``dd of=`` targets.
+    Used as a backup when an agent uses ``Bash`` to write to a protected
+    path that the Edit/Write hooks would otherwise miss.
+    """
+    targets: list[str] = []
+    targets.extend(_BASH_REDIRECT_RE.findall(command))
+    targets.extend(_BASH_DD_OF_RE.findall(command))
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return targets
+    if not tokens:
+        return targets
+
+    # Look for ``tee``, ``cp``, ``mv``, ``ln``, ``install`` anywhere in the
+    # token stream — pipelines like ``echo x | tee /path`` mean the head
+    # token isn't the writer. We don't try to be exhaustive about flags;
+    # just skip past any ``-x``-shaped argument right after the verb.
+    write_verbs = {"tee", "cp", "mv", "install", "ln"}
+    for i, tok in enumerate(tokens):
+        head = tok.rsplit("/", 1)[-1]
+        if head not in write_verbs:
+            continue
+        rest = tokens[i + 1 :]
+        if head == "tee":
+            targets.extend(t for t in rest if not t.startswith("-"))
+        elif head in {"cp", "mv", "install"}:
+            non_flag = [t for t in rest if not t.startswith("-")]
+            if len(non_flag) >= 2:  # noqa: PLR2004 -- need src+dst
+                targets.append(non_flag[-1])
+        elif head == "ln":
+            non_flag = [t for t in rest if not t.startswith("-")]
+            if non_flag:
+                targets.append(non_flag[-1])
+    return targets
+
+
+def _bash_first_protected_match(command: str) -> str | None:
+    """Return the first protected pattern matched by a bash write target."""
+    for target in _bash_target_paths(command):
+        matched = is_protected(target)
+        if matched is not None:
+            return matched
+    return None
+
+
+_FILE_PATH_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+
+
 def hook(payload: dict[str, Any]) -> None:
     """Top-level hook entry point."""
     tool_name = payload.get("tool_name", "")
-    if tool_name not in ("Edit", "Write"):
-        return
-
     tool_input = payload.get("tool_input", {}) or {}
     if not isinstance(tool_input, dict):
         return
-    file_path = tool_input.get("file_path", "")
-    if not isinstance(file_path, str) or not file_path:
+
+    matched: str | None = None
+    excerpt = ""
+
+    if tool_name in _FILE_PATH_TOOLS:
+        # NotebookEdit uses ``notebook_path``; the others use ``file_path``.
+        file_path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+        if not isinstance(file_path, str) or not file_path:
+            return
+        matched = is_protected(file_path)
+        excerpt = file_path
+    elif tool_name == "Bash":
+        command = tool_input.get("command", "")
+        if not isinstance(command, str) or not command:
+            return
+        matched = _bash_first_protected_match(command)
+        excerpt = command
+    else:
         return
 
-    matched = is_protected(file_path)
     if matched is None:
         return
 
@@ -96,7 +170,7 @@ def hook(payload: dict[str, Any]) -> None:
         tool_name=tool_name,
         decision="ask",
         reason=reason,
-        command_excerpt=file_path,
+        command_excerpt=excerpt,
         session_id=str(payload.get("session_id", "")),
         cwd=cwd if isinstance(cwd, str) else None,
     )

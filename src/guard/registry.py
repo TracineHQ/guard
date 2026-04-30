@@ -890,6 +890,90 @@ AUTONOMOUS_FEEDBACK: dict[str, str] = {
 ALWAYS_DENY: frozenset[str] = frozenset(cmd.prefix for cmd in COMMANDS if cmd.safety == Safety.DENY)
 
 
+# === Synthetic-deny catalogues (used by bash_command_validator matchers) ===
+# These parallel ALWAYS_DENY but are too combinatorial to express as literal
+# prefix entries. The bash command validator imports each set and either
+# compiles a regex or does a frozenset lookup.
+
+# Interpreter binary basenames whose ``-c`` / ``-e`` / ``--eval`` / ``eval``
+# invocations re-execute arbitrary code. The validator compiles a regex from
+# this set that matches optional version suffix (``python3.11``) and fully
+# qualified paths (``/usr/bin/python3``).
+DANGEROUS_INTERPRETERS: frozenset[str] = frozenset(
+    {"python", "python3", "node", "nodejs", "pypy", "pypy3", "bun", "deno"}
+)
+
+# Flags / subcommands that re-execute arbitrary code under any
+# DANGEROUS_INTERPRETERS binary.
+INTERPRETER_EVAL_FLAGS: frozenset[str] = frozenset({"-c", "-e", "--eval", "eval"})
+
+# Wrapper runners that exec a tool from a downloaded environment. The
+# validator unwraps these and re-runs the dangerous-interpreter check on
+# the inner command.
+INTERPRETER_RUNNER_WRAPPERS: frozenset[str] = frozenset({"uvx", "pipx"})
+
+# Catastrophic operands for recursive ``rm``. Any of these as an operand to
+# a recursive ``rm`` form is denied regardless of flag ordering.
+DANGEROUS_RM_OPERANDS: frozenset[str] = frozenset(
+    {"/", "/*", "~", "~/*", "$HOME", "$HOME/*", "/.", "/..", ".", "./", "*"}
+)
+
+# Shell-wrapper basenames. ``<shell> -c "..."`` is the canonical RCE wrapper.
+DANGEROUS_SHELL_WRAPPERS: frozenset[str] = frozenset(
+    {"sh", "bash", "zsh", "dash", "ksh", "fish", "ash"}
+)
+
+# Plain runner prefixes (no ``-c``) that prepend execution of an arbitrary
+# command. The validator strips these and re-evaluates the remainder.
+PLAIN_RUNNER_PREFIXES: frozenset[str] = frozenset(
+    {
+        "command",
+        "exec",
+        "time",
+        "nohup",
+        "setsid",
+        "unbuffer",
+        "busybox",
+        "toybox",
+    }
+)
+
+# Git config keys whose values can contain ``!cmd`` shell escapes (alias.*),
+# external programs run by git internals (core.pager / core.editor / ...),
+# or filter commands. Setting these via ``git -c key=value`` or
+# ``git config key value`` is a command-execution sink.
+GIT_CONFIG_EXEC_SINKS: frozenset[str] = frozenset(
+    {
+        "core.pager",
+        "core.editor",
+        "core.askpass",
+        "core.sshcommand",
+        "core.fsmonitor",
+        "core.hookspath",
+        "help.format",
+        "sequence.editor",
+        "gpg.program",
+        "gpg.openpgp.program",
+        "gpg.x509.program",
+        "diff.external",
+        "merge.tool",
+        "http.proxy",
+        "ssh.variant",
+    }
+)
+
+# Git config key glob patterns that are command-execution sinks. These are
+# matched as ``<prefix>.<anything>.<suffix>`` (case-insensitive). E.g.
+# ``alias.*`` matches ``alias.x``, ``alias.foo-bar``.
+GIT_CONFIG_EXEC_SINK_GLOBS: tuple[tuple[str, str], ...] = (
+    ("alias.", ""),
+    ("mergetool.", ".cmd"),
+    ("difftool.", ".cmd"),
+    ("filter.", ".clean"),
+    ("filter.", ".smudge"),
+)
+
+
 def get_rules_by_safety(safety: Safety) -> list[CommandRule]:
     """Get all rules with a given safety classification."""
     return [cmd for cmd in COMMANDS if cmd.safety == safety]

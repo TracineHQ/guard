@@ -48,6 +48,14 @@ from guard.registry import (
     ALWAYS_DENY,
     AUTONOMOUS_FEEDBACK,
     COMMANDS,
+    DANGEROUS_INTERPRETERS,
+    DANGEROUS_RM_OPERANDS,
+    DANGEROUS_SHELL_WRAPPERS,
+    GIT_CONFIG_EXEC_SINK_GLOBS,
+    GIT_CONFIG_EXEC_SINKS,
+    INTERPRETER_EVAL_FLAGS,
+    INTERPRETER_RUNNER_WRAPPERS,
+    PLAIN_RUNNER_PREFIXES,
     SAFE_PIPE_COMMANDS,
     SAFE_PREFIXES,
     Safety,
@@ -72,10 +80,11 @@ SHELL_FRAGMENTS: frozenset[str] = frozenset(
     {"do", "done", "then", "else", "fi", "elif", "esac", "in"}
 )
 
-# HTTP-fetch CLIs that, when piped into a shell, form the classic
-# ``curl ... | sh`` RCE pattern. Denied unconditionally regardless of mode.
-_HTTP_FETCH_CMDS: frozenset[str] = frozenset({"curl", "wget", "fetch", "http", "httpie", "https"})
-_PIPE_SHELL_CMDS: frozenset[str] = frozenset({"sh", "bash", "zsh", "dash", "fish", "ksh", "ash"})
+# Commands that, when piped into a shell, form the classic ``curl ... | sh``
+# RCE pattern. Denied unconditionally regardless of mode. Anything that
+# produces bytes followed by ``| <shell>`` is always a deliberate RCE in an
+# agent context — the producer set is intentionally broad (B5).
+_PIPE_SHELL_CMDS: frozenset[str] = frozenset(DANGEROUS_SHELL_WRAPPERS)
 
 
 _SPEC_DECISION_MAP: dict[str, Literal["allow", "deny", "ask", "pass"]] = {
@@ -127,6 +136,7 @@ DANGEROUS_PATTERNS = re.compile(
     r"|`"  # Backtick substitution `...`
     r"|<\("  # Process substitution <(...)
     r"|>\("  # Process substitution >(...)
+    r"|<<<"  # Here-string redirection (B4 — input is attacker-supplied)
     r"|>\s*\S"  # Output redirect > file (but not 2>&1)
     r"|>>"  # Append redirect >> file
     r")"
@@ -241,12 +251,40 @@ def _split_on_operators(line: str) -> list[str]:  # noqa: C901 -- single-pass qu
     return segments
 
 
+_GROUP_OPEN_RE = re.compile(r"^[!(){}\s]+")
+_GROUP_CLOSE_RE = re.compile(r"[;){}!\s]+$")
+
+
+def _strip_group_wrappers(segment: str) -> str:
+    """Strip leading ``(`` / ``{`` / ``!`` and trailing ``)`` / ``}`` (B4).
+
+    ``( rm -rf / )`` and ``{ rm -rf /; }`` are subshell / brace groups. After
+    pipeline splitting the segments are ``( rm -rf /`` etc.; stripping the
+    surrounding tokens lets the head become ``rm`` and the existing matchers
+    fire.
+
+    Leading ``!`` is the bash logical-not prefix: ``! rm -rf /`` runs the
+    command and inverts its exit code.
+    """
+    s = segment
+    while True:
+        prev = s
+        s = _GROUP_OPEN_RE.sub("", s)
+        s = _GROUP_CLOSE_RE.sub("", s)
+        if s == prev:
+            return s
+
+
 def split_pipeline(command: str) -> list[str]:
     """Split a command into segments on pipe/operator/newline boundaries.
 
     Operator splitting is quote-aware so semicolons / pipes embedded inside
     quoted strings are preserved (closes the F1 family of bypasses where
     ``python3'  '-c '1; __import__(...)'`` was being torn at the ``;``).
+
+    Each split segment also has subshell-paren / brace-group / leading-bang
+    wrappers stripped (B4) so ``( rm -rf / )`` and ``{ rm -rf /; }`` and
+    ``! rm -rf /`` are evaluated against the deny matchers.
     """
     segments: list[str] = []
     for line in command.split("\n"):
@@ -257,7 +295,7 @@ def split_pipeline(command: str) -> list[str]:
         if not stripped:
             continue
         for part in _split_on_operators(stripped):
-            piece = part.strip()
+            piece = _strip_group_wrappers(part.strip())
             if piece:
                 segments.append(piece)
     return segments
@@ -398,15 +436,32 @@ def _is_safe_env_inner(inner_tokens: list[str]) -> bool:
     return False
 
 
-def is_safe_command(segment: str, *, is_piped: bool = False, autonomous: bool = False) -> bool:
+def is_safe_command(segment: str, *, is_piped: bool = False, autonomous: bool = False) -> bool:  # noqa: PLR0911 -- public entry point with intentional early-return safety checks
     """Return ``True`` if a segment matches a known-safe prefix.
+
+    Public entry point — safe to call from outside ``decide()``. Applies the
+    full canonicalization + synthetic-deny pipeline so external callers do
+    not need to know about ``_canonicalize`` / ``_match_always_deny`` /
+    ``_match_synthetic_deny`` themselves.
 
     In autonomous mode, git segments are NOT deferred to git_c_validator —
     we must evaluate them here so the strict default-deny path can fire.
     """
     if not segment:
         return True
+    # Apply the same canonicalization the top-level dispatcher uses, so any
+    # caller is protected from line-continuation / unicode whitespace bypasses.
+    segment = _canonicalize(segment).strip()
+    if not segment:
+        return True
     if has_dangerous_constructs(segment):
+        return False
+    # ALWAYS_DENY and synthetic-deny matchers must veto regardless of pipe
+    # context: a piped ``rm -rf /`` is not made safe by being on the right
+    # side of a pipe.
+    if _match_always_deny(segment) is not None:
+        return False
+    if _match_synthetic_deny(segment) is not None:
         return False
     if is_piped:
         return _matches_prefix(segment, SAFE_PIPE_COMMANDS)
@@ -592,14 +647,20 @@ def _strip_git_global_options(normalized: str) -> str | None:
     while i < len(tokens):
         tok = tokens[i]
         if tok in _GIT_GLOBAL_VALUE_FLAGS:
-            # consume flag + value
+            # consume flag + value, but only if a value is actually present
+            # (don't swallow the next token past EOL on a malformed
+            # ``git --git-dir add -A`` — that should still match ``git add -A``)
+            if i + 1 >= len(tokens):
+                break
             i += 2
             continue
         if tok.startswith(_GIT_GLOBAL_FUSED_PREFIXES):
             i += 1
             continue
         if tok in _GIT_GLOBAL_FUSED_NAMES:
-            # `--git-dir path` (separate value form)
+            # `--git-dir path` (separate value form) — same EOL guard.
+            if i + 1 >= len(tokens):
+                break
             i += 2
             continue
         break
@@ -608,14 +669,171 @@ def _strip_git_global_options(normalized: str) -> str | None:
     return "git " + " ".join(tokens[i:]) if i < len(tokens) else "git"
 
 
+# === Runner / shell-wrapper prefix stripping (B1) ===
+
+# Shell-wrapper -c style flags that pass the next argument as a script body.
+_SHELL_C_FLAGS_RE = re.compile(r"^-[a-zA-Z]*c$")
+
+# Runners that take the form ``<runner> [<int>] <command>`` (timeout takes a
+# duration; nice/ionice take optional ``-n N`` / ``-c N``).
+_TIMING_RUNNERS: frozenset[str] = frozenset({"timeout", "nice", "ionice"})
+
+
+def _shlex_tokens(segment: str) -> list[str]:
+    """Tokenize ``segment`` via shlex, falling back to whitespace split."""
+    try:
+        return shlex.split(segment)
+    except ValueError:
+        return segment.split()
+
+
+def _strip_runner_prefix(segment: str) -> str | None:  # noqa: C901, PLR0911, PLR0912, PLR0915 -- linear strip dispatch; extracting helpers harms readability
+    """Strip a leading runner / shell-wrapper prefix from ``segment``.
+
+    Returns the remainder (still bash-shaped) so the deny matchers can be
+    re-applied to the inner command. Returns ``None`` when no recognised
+    prefix is present.
+
+    Handles:
+
+    - shell wrappers with ``-c``/``-lc``/``-eic``: ``bash -c "rm -rf /"`` →
+      ``rm -rf /``. Basename match so ``/bin/sh -c`` works too. Tokenization
+      is shlex-aware so the quoted payload comes through as a single arg.
+    - ``sudo`` (with optional ``-E``/``-H``/``-u USER`` flags). Recurses so
+      ``sudo bash -c "..."`` peels both wrappers.
+    - plain runners: ``command``, ``exec``, ``time``, ``nohup``, ``setsid``,
+      ``unbuffer``, ``busybox``, ``toybox``.
+    - ``timeout 5 cmd``, ``nice -n 10 cmd``, ``ionice -c 3 cmd``.
+    - ``xargs ... cmd``, ``parallel ... cmd ::: <args>``.
+    - ``script /dev/null -c "..."``.
+    """
+    tokens = _shlex_tokens(segment)
+    if not tokens:
+        return None
+    head = _basename(tokens[0])
+
+    # Shell wrappers with -c / -lc / -eic and so on. Find the first -c-style
+    # flag (no equals form for shells) and return the next token (which is
+    # the literal payload thanks to shlex tokenization).
+    if head in DANGEROUS_SHELL_WRAPPERS:
+        for i in range(1, len(tokens)):
+            if _SHELL_C_FLAGS_RE.match(tokens[i]):
+                if i + 1 < len(tokens):
+                    return tokens[i + 1]
+                return None
+            if not tokens[i].startswith("-"):
+                # Inline script arg (busybox-style ``sh script.sh``) — not RCE.
+                return None
+        return None
+
+    # ``sudo`` — skip its own flag block. Recurse so wrapped shells peel too.
+    if head == "sudo":
+        i = 1
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok in ("-E", "-H", "-S", "-i", "-s", "-n", "--"):
+                i += 1
+                continue
+            if tok in ("-u", "-g") and i + 1 < len(tokens):
+                i += 2
+                continue
+            break
+        if i < len(tokens):
+            # Re-quote so a recursive call sees the same token boundaries
+            # (otherwise ``sudo bash -c "rm -rf /"`` collapses to a single
+            # whitespace blob and the inner shell-wrapper detector misses).
+            requoted = " ".join(shlex.quote(t) for t in tokens[i:])
+            deeper = _strip_runner_prefix(requoted)
+            return deeper if deeper is not None else requoted
+        return None
+
+    # Plain pre-execution wrappers (no flag block).
+    if head in PLAIN_RUNNER_PREFIXES and len(tokens) > 1:
+        return " ".join(tokens[1:])
+
+    # `timeout 5 cmd`, `timeout 5s cmd`, `nice -n 10 cmd`, `ionice -c 3 cmd`.
+    if head in _TIMING_RUNNERS:
+        i = 1
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok in ("-n", "-c", "-p", "-s") and i + 1 < len(tokens):
+                i += 2
+                continue
+            if tok.startswith("-"):
+                i += 1
+                continue
+            # First non-flag token is either the duration (``5``) or the
+            # command itself. Heuristic: if it's purely numeric / ends in a
+            # time suffix, treat as duration and skip; otherwise it's the cmd.
+            if head == "timeout" and re.match(r"^\d+(?:\.\d+)?[smhd]?$", tok):
+                i += 1
+                continue
+            break
+        if i < len(tokens):
+            return " ".join(tokens[i:])
+        return None
+
+    # `xargs [-I{}] [-n N] cmd`. Skip flags; first non-flag is the command.
+    if head == "xargs":
+        i = 1
+        while i < len(tokens) and tokens[i].startswith("-"):
+            tok = tokens[i]
+            # ``-I{}`` is fused; ``-I {}`` is split.
+            if tok in ("-I", "-n", "-P", "-d", "-s", "-L") and i + 1 < len(tokens):
+                i += 2
+                continue
+            i += 1
+        if i < len(tokens):
+            return " ".join(tokens[i:])
+        return None
+
+    # ``parallel [flags] cmd ::: args``. Skip flags; cmd runs until ``:::``.
+    # Args after ``:::`` ARE the operands the command runs against, so append
+    # them to the inner command (substituting ``{}`` if present, otherwise
+    # appending) so the deny matchers see ``rm -rf /``, not ``rm -rf {}``.
+    if head == "parallel":
+        i = 1
+        while i < len(tokens) and tokens[i].startswith("-"):
+            i += 1
+        if i >= len(tokens):
+            return None
+        end = i
+        while end < len(tokens) and tokens[end] != ":::":
+            end += 1
+        cmd_tokens = tokens[i:end]
+        if not cmd_tokens:
+            return None
+        args = tokens[end + 1 :] if end < len(tokens) else []
+        if not args:
+            return " ".join(cmd_tokens)
+        # Substitute ``{}`` placeholder with the first arg (treat each arg as
+        # an iteration; we only need to detect the dangerous shape).
+        substituted = [args[0] if t == "{}" else t for t in cmd_tokens]
+        if "{}" not in cmd_tokens:
+            substituted = substituted + args
+        return " ".join(substituted)
+
+    # ``script /dev/null -c "..."``. Treat like a shell wrapper after the
+    # output-file argument.
+    if head == "script" and len(tokens) >= 4:  # noqa: PLR2004 -- shape: script <file> -c <cmd>
+        # tokens: script <output> -c <cmd...>
+        for i in range(2, len(tokens) - 1):
+            if _SHELL_C_FLAGS_RE.match(tokens[i]):
+                return tokens[i + 1] if i + 1 < len(tokens) else None
+        return None
+
+    return None
+
+
 # === F3 — non-canonical interpreter detection ===
 
-# Matches python / python3 / python3.11 / python3.12 / nodejs / node / pypy / pypy3 / bun / deno
-_INTERPRETER_BASENAME_RE = re.compile(r"^(?:python(?:\d+(?:\.\d+)?)?|nodejs?|pypy\d?|bun|deno)$")
-# Flags / subcommands that re-execute arbitrary code.
-_INTERPRETER_EVAL_FLAGS: frozenset[str] = frozenset({"-c", "-e", "--eval", "eval"})
-# Wrapper runners — detect dangerous inner commands for the wrapped interpreter.
-_RUNNER_WRAPPERS: frozenset[str] = frozenset({"uvx", "pipx"})
+# Compile a regex that matches each registry-listed interpreter basename with
+# an optional version suffix (``python3.11``). The set is the source of truth
+# (registry.DANGEROUS_INTERPRETERS); this regex is just an indexing form.
+_INTERPRETER_BASENAME_RE = re.compile(
+    r"^(?:" + "|".join(re.escape(name) for name in sorted(DANGEROUS_INTERPRETERS)) + r")"
+    r"(?:\d+(?:\.\d+)?)?$"
+)
 
 
 def _basename(path: str) -> str:
@@ -634,7 +852,7 @@ def _interpreter_uses_eval_flag(tokens: list[str]) -> bool:
     letters but we only honour exact-token matches so ``-cv`` (not real)
     won't trip. ``deno`` uses bare ``eval`` subcommand which we accept.
     """
-    return any(tok in _INTERPRETER_EVAL_FLAGS for tok in tokens[1:])
+    return any(tok in INTERPRETER_EVAL_FLAGS for tok in tokens[1:])
 
 
 def _is_dangerous_interpreter(normalized: str) -> bool:
@@ -650,12 +868,15 @@ def _is_dangerous_interpreter(normalized: str) -> bool:
     if not tokens:
         return False
 
-    # Wrapper runners — examine the wrapped command tail.
+    # Wrapper runners — examine the wrapped command tail. Both wrappers are
+    # registered in INTERPRETER_RUNNER_WRAPPERS for visibility, but each has
+    # a slightly different surface (uvx <tool>, pipx run <tool>).
     head = _basename(tokens[0])
-    if head == "uvx" and len(tokens) >= _UVX_MIN_TOKENS:
-        return _is_dangerous_interpreter(" ".join(tokens[1:]))
-    if head == "pipx" and len(tokens) >= _PIPX_RUN_MIN_TOKENS and tokens[1] == "run":
-        return _is_dangerous_interpreter(" ".join(tokens[2:]))
+    if head in INTERPRETER_RUNNER_WRAPPERS:
+        if head == "uvx" and len(tokens) >= _UVX_MIN_TOKENS:
+            return _is_dangerous_interpreter(" ".join(tokens[1:]))
+        if head == "pipx" and len(tokens) >= _PIPX_RUN_MIN_TOKENS and tokens[1] == "run":
+            return _is_dangerous_interpreter(" ".join(tokens[2:]))
 
     if not _INTERPRETER_BASENAME_RE.match(head):
         return False
@@ -663,22 +884,6 @@ def _is_dangerous_interpreter(normalized: str) -> bool:
 
 
 # === F4 — dangerous rm shapes ===
-
-_DANGEROUS_RM_OPERANDS: frozenset[str] = frozenset(
-    {
-        "/",
-        "/*",
-        "~",
-        "~/*",
-        "$HOME",
-        "$HOME/*",
-        "/.",
-        "/..",
-        ".",
-        "./",
-        "*",
-    }
-)
 
 
 def _rm_is_recursive(flags: list[str]) -> bool:
@@ -697,16 +902,6 @@ def _rm_is_recursive(flags: list[str]) -> bool:
     return False
 
 
-def _rm_is_force(flags: list[str]) -> bool:
-    """Return True if the rm flag list implies force deletion."""
-    for f in flags:
-        if f == "--force":
-            return True
-        if f.startswith("-") and not f.startswith("--") and "f" in f[1:]:
-            return True
-    return False
-
-
 def _is_dangerous_rm(normalized: str) -> bool:
     """Return True for catastrophic rm shapes that ALWAYS_DENY literals miss.
 
@@ -714,6 +909,11 @@ def _is_dangerous_rm(normalized: str) -> bool:
     - ``rm -r -f /``, ``rm --recursive --force /``
     - ``rm -rf /*``, ``rm -rf "/"``, ``rm -rf ~``
     - ``rm -rf .`` / ``rm -rf ./`` (cwd-dependent — unsafe under agent)
+
+    The ``-f``/``--force`` flag is intentionally NOT required: ``rm -r /`` is
+    just as catastrophic as ``rm -rf /`` once it hits a non-empty subtree. The
+    recursive check is the sole trigger; the registry's ALWAYS_DENY literals
+    keep their own ``-f`` requirement for prefix-matched messaging.
     """
     tokens = normalized.split()
     if not tokens or _basename(tokens[0]) != "rm":
@@ -722,42 +922,57 @@ def _is_dangerous_rm(normalized: str) -> bool:
     operands = [t for t in tokens[1:] if not t.startswith("-")]
     if not _rm_is_recursive(flags):
         return False
-    # force not strictly required for catastrophic shape but we mirror upstream
-    # ALWAYS_DENY literals which all include -f (or --no-preserve-root). Keep
-    # the recursive check as the trigger; force is informational.
-    _ = _rm_is_force(flags)
-    return any(op in _DANGEROUS_RM_OPERANDS for op in operands)
+    return any(op in DANGEROUS_RM_OPERANDS for op in operands)
+
+
+def _candidate_forms(segment: str) -> list[str]:
+    """Return all canonical forms of ``segment`` that matchers should consider.
+
+    A single attacker-supplied segment may need to be evaluated under several
+    "peelings" before the deny matchers fire:
+
+    - normalized (quote/whitespace-folded)
+    - normalized + ``env K=V ...`` prefix stripped (F2)
+    - normalized + leading git global options stripped (F5)
+    - runner / shell wrapper prefix stripped (B1: ``bash -c "..."``,
+      ``sudo``, ``timeout 5 ...`` etc.). The runner strip uses shlex
+      tokenization on the RAW segment so quoted payloads survive.
+
+    Returning the list lets ``_match_always_deny`` and ``_match_synthetic_deny``
+    iterate the same set without duplicating the strip logic.
+    """
+    forms: list[str] = []
+    normalized = _normalize_segment(segment)
+    forms.append(normalized)
+    env_stripped = _strip_env_prefix(normalized)
+    if env_stripped is not None:
+        forms.append(_normalize_segment(env_stripped))
+    git_stripped = _strip_git_global_options(normalized)
+    if git_stripped is not None:
+        forms.append(git_stripped)
+    # Runner strip operates on the raw segment so ``bash -c "rm -rf /"``
+    # yields a single inner token "rm -rf /" (preserving the payload), not
+    # the post-shlex-collapsed form which would lose the quote boundary.
+    runner_stripped = _strip_runner_prefix(segment)
+    if runner_stripped is not None:
+        forms.append(_normalize_segment(runner_stripped))
+    return forms
 
 
 def _match_always_deny(segment: str) -> str | None:
     """Return the longest ALWAYS_DENY prefix matching ``segment`` or ``None``.
 
-    Normalizes via ``_normalize_segment`` before prefix-matching so quoting
-    and whitespace bypasses (``"rm" -rf /``, ``rm  -rf  /``) cannot evade
-    the registry's deny set. Additionally strips ``env K=V ...`` prefixes
-    (F2) and leading git global options (F5) so wrapped commands match the
-    same deny rules as their bare equivalents.
+    Iterates ``_candidate_forms(segment)`` so quote / whitespace / env-prefix
+    / git-global-option / runner-wrapper bypasses cannot evade the registry's
+    deny set.
     """
     if not segment:
         return None
-    normalized = _normalize_segment(segment)
-
-    # F2: ``env K=V K=V ... <cmd>`` — strip the env prefix and re-evaluate.
-    stripped = _strip_env_prefix(normalized)
-    if stripped is not None:
-        normalized_stripped = _normalize_segment(stripped)
-        match = _match_always_deny_literal(normalized_stripped)
+    for form in _candidate_forms(segment):
+        match = _match_always_deny_literal(form)
         if match is not None:
             return match
-
-    # F5: ``git -C path``, ``git --git-dir=...`` — collapse to ``git <sub>``.
-    git_stripped = _strip_git_global_options(normalized)
-    if git_stripped is not None:
-        match = _match_always_deny_literal(git_stripped)
-        if match is not None:
-            return match
-
-    return _match_always_deny_literal(normalized)
+    return None
 
 
 def _match_always_deny_literal(normalized: str) -> str | None:
@@ -771,6 +986,9 @@ def _match_always_deny_literal(normalized: str) -> str | None:
 # Synthetic deny-prefix labels for fixes that don't add ALWAYS_DENY literals.
 _SYNTH_INTERPRETER_DENY = "<dangerous interpreter>"
 _SYNTH_RM_DENY = "<dangerous rm>"
+_SYNTH_GIT_CONFIG_DENY = "<git config injection>"
+_SYNTH_VAR_EXPAND_DENY = "<variable-expanded head>"
+_SYNTH_SHELL_WRAPPER_DENY = "<shell-wrapper invocation>"
 
 _SYNTH_DENY_REASONS: dict[str, str] = {
     _SYNTH_INTERPRETER_DENY: (
@@ -783,33 +1001,175 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         "(any of /, /*, ~, $HOME, ., ./, *) is catastrophic and is denied "
         "regardless of flag ordering."
     ),
+    _SYNTH_GIT_CONFIG_DENY: (
+        "git config injection: a config key on the command line is a "
+        "command-execution sink (alias.*, core.pager, core.editor, "
+        "*.cmd / *.clean / *.smudge, gpg.program, etc.). These keys cause "
+        "git internals to exec arbitrary commands; rewrite without -c."
+    ),
+    _SYNTH_VAR_EXPAND_DENY: (
+        "Variable-expanded head token cannot be statically evaluated. "
+        "Rewrite the command without indirection (``$VAR cmd`` is not safe "
+        "to validate; use the literal command name)."
+    ),
+    _SYNTH_SHELL_WRAPPER_DENY: (
+        "Shell-wrapper invocation (``bash -c '...'``, ``sh -lc '...'``, "
+        "``zsh -c '...'``, ``sudo bash -c ...``, ``script /dev/null -c ...``). "
+        "These re-enter the shell with attacker-controlled script bodies and "
+        "are not allowed in agent contexts. Run the underlying command directly."
+    ),
 }
 
 
-def _match_synthetic_deny(segment: str) -> str | None:
+def _normalize_git_config_key(key: str) -> str:
+    """Lower-case + collapse internal whitespace for git config-key matching."""
+    return re.sub(r"\s+", "", key).lower()
+
+
+def _git_config_key_is_sink(key: str) -> bool:
+    """Return True if a git config key is a command-execution sink (B2)."""
+    norm = _normalize_git_config_key(key)
+    if norm in GIT_CONFIG_EXEC_SINKS:
+        return True
+    return any(
+        norm.startswith(prefix) and (suffix == "" or norm.endswith(suffix))
+        for prefix, suffix in GIT_CONFIG_EXEC_SINK_GLOBS
+    )
+
+
+def _is_git_config_injection(normalized: str) -> bool:  # noqa: C901 -- linear scan of -c key=value tokens, branches mirror flag forms
+    """Return True for ``git -c <sink>=<v>`` or ``git config <sink> ...`` (B2).
+
+    The bypass: ``git -c alias.x='!rm -rf /' x`` — git executes the alias as
+    a shell command. Same for ``core.pager=!rm`` and ``mergetool.foo.cmd``.
+    Detect any ``-c key=value`` global option (or ``--config-env``-style
+    variants) where ``key`` matches a known exec sink, plus ``git config``
+    direct sets.
+    """
+    tokens = normalized.split()
+    if not tokens or tokens[0] != "git":
+        return False
+    # Walk tokens looking for ``-c key=value`` shapes anywhere in the
+    # command, including before and after the subcommand.
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "-c" and i + 1 < len(tokens):
+            kv = tokens[i + 1]
+            if "=" in kv:
+                k = kv.split("=", 1)[0]
+                if _git_config_key_is_sink(k):
+                    return True
+            i += 2
+            continue
+        if tok.startswith("-c") and "=" in tok[2:]:
+            # Fused form ``-c key=val`` — rare but handle.
+            kv = tok[2:]
+            k = kv.split("=", 1)[0]
+            if _git_config_key_is_sink(k):
+                return True
+            i += 1
+            continue
+        i += 1
+    # ``git config <key> <value>`` — direct config write.
+    sub_idx = next((j for j, t in enumerate(tokens[1:], start=1) if not t.startswith("-")), None)
+    if sub_idx is not None and tokens[sub_idx] == "config":
+        # Skip past ``config`` flag block to first non-flag token.
+        j = sub_idx + 1
+        while j < len(tokens) and tokens[j].startswith("-"):
+            j += 1
+        if j < len(tokens) and _git_config_key_is_sink(tokens[j]):
+            return True
+    return False
+
+
+_VAR_HEAD_RE = re.compile(r"^\$[A-Za-z_{]")
+
+
+def _has_var_expanded_head(normalized: str) -> bool:
+    """Return True if the head token starts with an unquoted ``$`` (B3).
+
+    ``R=rm; $R -rf /`` becomes, after pipeline split on ``;``, two segments,
+    the second of which is ``$R -rf /``. The head token is ``$R``. There is
+    no legitimate use of a bare ``$VAR`` as the command name in agent input
+    (the value is attacker-controlled and cannot be statically evaluated).
+    """
+    tokens = normalized.split(maxsplit=1)
+    if not tokens:
+        return False
+    return bool(_VAR_HEAD_RE.match(tokens[0]))
+
+
+def _is_shell_wrapper_invocation(segment: str) -> bool:
+    """Return True if any token sequence in ``segment`` matches ``<shell> -c``.
+
+    The mere presence of a shell wrapper with a ``-c``-style script body is
+    denied in agent contexts: the script body is attacker-controlled and the
+    shell silently re-interprets quoting / expansion / pipelines that the
+    static validator cannot reason about. Walks all tokens so wrappers buried
+    behind ``sudo`` / ``script /dev/null`` / ``time`` etc. are still caught.
+    """
+    tokens = _shlex_tokens(segment)
+    for i, tok in enumerate(tokens):
+        if _basename(tok) in DANGEROUS_SHELL_WRAPPERS:
+            # Look ahead for a -c-style flag among the next few tokens (a
+            # shell wrapper followed by a -c flag is the bypass).
+            for j in range(i + 1, min(i + 4, len(tokens))):
+                if _SHELL_C_FLAGS_RE.match(tokens[j]):
+                    return True
+                if not tokens[j].startswith("-"):
+                    break
+    return False
+
+
+def _match_synthetic_deny(segment: str) -> str | None:  # noqa: PLR0911 -- linear matcher chain; each early-return represents a distinct synthetic deny class
     """Return a synthetic-deny label if matchers fire, else ``None``.
 
-    Covers F3 (non-canonical interpreters) and F4 (dangerous rm shapes) —
-    fixes that extend the matcher rather than the literal ALWAYS_DENY list.
-    Also re-runs the matchers against ``env``-prefix-stripped and ``git``-
-    global-option-stripped forms so wrapper bypasses don't slip through.
+    Covers F3 (non-canonical interpreters), F4 (dangerous rm shapes), and the
+    git config-injection sinks (B2). Iterates ``_candidate_forms(segment)``
+    so env / git / runner-wrapper bypasses are evaluated against the same
+    matchers as their bare forms.
     """
     if not segment:
         return None
-    normalized = _normalize_segment(segment)
-    candidates = [normalized]
-    stripped = _strip_env_prefix(normalized)
-    if stripped is not None:
-        candidates.append(_normalize_segment(stripped))
-    git_stripped = _strip_git_global_options(normalized)
-    if git_stripped is not None:
-        candidates.append(git_stripped)
-    for cand in candidates:
+    forms = _candidate_forms(segment)
+    for cand in forms:
         if _is_dangerous_interpreter(cand):
             return _SYNTH_INTERPRETER_DENY
         if _is_dangerous_rm(cand):
             return _SYNTH_RM_DENY
+    # Git config-injection (B2). The git canonicalization is done on the
+    # normalized form (no env / runner peeling needed for this matcher).
+    if _is_git_config_injection(forms[0]):
+        return _SYNTH_GIT_CONFIG_DENY
+    # Variable-expanded head token (B3). Same: the raw normalized form is
+    # what matters; runner stripping would just hide the ``$VAR`` head.
+    if _has_var_expanded_head(forms[0]):
+        return _SYNTH_VAR_EXPAND_DENY
+    # Shell-wrapper invocations (B1). Deny outright regardless of payload.
+    if _is_shell_wrapper_invocation(segment):
+        return _SYNTH_SHELL_WRAPPER_DENY
     return None
+
+
+def _expand_runner_payload_segments(seg: str) -> list[str]:
+    """Expand a shell-wrapper invocation's inner payload into pipeline segments.
+
+    ``bash -c "rm -rf /; other"`` has operators inside the payload that the
+    outer split missed. Re-split the inner payload as a fresh pipeline so the
+    matchers see each inner sub-segment.
+
+    Returns the empty list when ``seg`` doesn't start with a shell wrapper.
+    """
+    tokens = seg.split()
+    if not tokens or _basename(tokens[0]) not in DANGEROUS_SHELL_WRAPPERS:
+        return []
+    inner = _strip_runner_prefix(seg)
+    if inner is None:
+        return []
+    # Re-canonicalize and re-split the inner payload as a fresh pipeline.
+    inner_canon = _canonicalize(inner)
+    return split_pipeline(inner_canon)
 
 
 def _get_always_deny(segments: list[str]) -> dict[str, str] | None:
@@ -817,9 +1177,17 @@ def _get_always_deny(segments: list[str]) -> dict[str, str] | None:
 
     Checks both registry literals (via ``_match_always_deny``) and synthetic
     matchers for non-canonical interpreter binaries (F3) and catastrophic rm
-    shapes (F4) that the literal list cannot cover exhaustively.
+    shapes (F4) that the literal list cannot cover exhaustively. For shell-
+    wrapper invocations (``bash -c "..."``), recursively re-evaluates the
+    inner payload as a full pipeline.
     """
-    for seg in segments:
+    queue: list[str] = list(segments)
+    seen: set[str] = set()
+    while queue:
+        seg = queue.pop(0)
+        if seg in seen:
+            continue
+        seen.add(seg)
         prefix = _match_always_deny(seg)
         if prefix is not None:
             rule_reason = _ALWAYS_DENY_REASONS.get(prefix)
@@ -833,6 +1201,9 @@ def _get_always_deny(segments: list[str]) -> dict[str, str] | None:
         if synth is not None:
             reason = f"Blocked: `{seg[:80]}` — {_SYNTH_DENY_REASONS[synth]}"
             return _deny(reason)
+        # B1: shell-wrapper recursion. ``bash -c "rm -rf /; other"`` has
+        # operators inside the payload that the outer split missed.
+        queue.extend(_expand_runner_payload_segments(seg))
     return None
 
 
@@ -978,12 +1349,14 @@ def decide(command: str) -> dict[str, str] | None:  # noqa: PLR0911 -- top-level
 
 
 def _is_pipe_to_shell(segments: list[str]) -> bool:
-    """Detect ``curl|wget|... | sh|bash|...`` pipelines.
+    """Detect any ``<producer> | <shell>`` pipeline.
 
     The segments list is what ``split_pipeline`` produced — already split on
-    pipe boundaries — so consecutive entries represent producer/consumer pairs.
-    Returns ``True`` if any HTTP-fetch segment feeds directly into a shell
-    interpreter segment.
+    pipe boundaries — so consecutive entries represent producer/consumer
+    pairs. Returns ``True`` whenever any segment feeds directly into one of
+    DANGEROUS_SHELL_WRAPPERS — that pattern is RCE in an agent context
+    regardless of which encoder/decoder/fetcher is on the producing side
+    (curl, wget, base64, xxd, openssl, printf, echo, python -c, ...).
     """
     if len(segments) < 2:  # noqa: PLR2004 -- "two segments minimum to form a producer|consumer pair"
         return False
@@ -992,18 +1365,18 @@ def _is_pipe_to_shell(segments: list[str]) -> bool:
         consumer = segments[i + 1].strip()
         if not producer or not consumer:
             continue
-        prod_token = producer.split(maxsplit=1)[0]
-        cons_token = consumer.split(maxsplit=1)[0]
-        if prod_token in _HTTP_FETCH_CMDS and cons_token in _PIPE_SHELL_CMDS:
+        cons_token = _basename(consumer.split(maxsplit=1)[0])
+        if cons_token in _PIPE_SHELL_CMDS:
             return True
     return False
 
 
 _PIPE_TO_SHELL_REASON = (
-    "Blocked: piping HTTP fetch output (curl/wget/...) directly into a shell "
-    "(sh/bash/zsh/...) is a classic remote-code-execution pattern with no "
-    "legitimate use in an agent context. Download to a file first, inspect "
-    "it, then run it explicitly if you really mean to."
+    "Blocked: piping any output directly into a shell (sh/bash/zsh/...) is a "
+    "classic remote-code-execution pattern (curl|sh, echo cm0...|base64 -d|sh, "
+    "xxd -r -p|bash, etc.). There is no legitimate use of this shape in an "
+    "agent context. Write the output to a file first, inspect it, then run "
+    "it explicitly if you really mean to."
 )
 
 

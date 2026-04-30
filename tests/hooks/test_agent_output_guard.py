@@ -101,6 +101,33 @@ class TestDecide:
         assert decide("Read", {"file_path": "/var/log/foo.output_old"}) is None
 
 
+class TestExpandedReaderCoverage:
+    """B7 — expanded file-reader coverage beyond cat/head/tail."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "less /private/tmp/claude-1/x/tasks/y.output",
+            "bat /private/tmp/claude-1/x/tasks/y.output",
+            "more /private/tmp/claude-1/x/tasks/y.output",
+            "vim /private/tmp/claude-1/x/tasks/y.output",
+            "view /private/tmp/claude-1/x/tasks/y.output",
+            "xxd /private/tmp/claude-1/x/tasks/y.output",
+            "hexdump /private/tmp/claude-1/x/tasks/y.output",
+            "strings /private/tmp/claude-1/x/tasks/y.output",
+            "rg foo /private/tmp/claude-1/x/tasks/y.output",
+            "grep foo /private/tmp/claude-1/x/tasks/y.output",
+            "tac /private/tmp/claude-1/x/tasks/y.output",
+            " cat /private/tmp/claude-1/x/tasks/y.output",  # leading space
+            "/bin/cat /private/tmp/claude-1/x/tasks/y.output",  # absolute path
+        ],
+    )
+    def test_reader_command_denied(self, command):
+        result = decide("Bash", {"command": command})
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 class TestDecideRobustness:
     def test_numeric_file_path(self):
         with contextlib.suppress(TypeError):

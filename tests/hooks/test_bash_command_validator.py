@@ -20,7 +20,13 @@ from guard.hooks.bash_command_validator import (
     strip_comments,
     strip_inline_comment,
 )
-from guard.registry import ALWAYS_DENY, AUTONOMOUS_FEEDBACK
+from guard.registry import (
+    ALWAYS_DENY,
+    AUTONOMOUS_FEEDBACK,
+    DANGEROUS_INTERPRETERS,
+    DANGEROUS_RM_OPERANDS,
+    INTERPRETER_EVAL_FLAGS,
+)
 
 HOOK_PATH = (
     Path(__file__).resolve().parents[2] / "src" / "guard" / "hooks" / "bash_command_validator.py"
@@ -619,3 +625,52 @@ def test_f5_git_global_options_dont_bypass_deny(cmd):
 )
 def test_f6_unicode_whitespace_and_continuation_denied(cmd):
     assert _is_deny(decide(cmd)), f"F6 not denied: {cmd!r}"
+
+
+# === Parametrized over the registry catalogues (A7) ===
+# Future additions to DANGEROUS_INTERPRETERS / DANGEROUS_RM_OPERANDS / etc.
+# get coverage automatically. Hardcoded smoke tests above are kept for
+# readability when triaging a regression.
+
+
+@pytest.mark.parametrize("interp", sorted(DANGEROUS_INTERPRETERS))
+@pytest.mark.parametrize("flag", sorted(INTERPRETER_EVAL_FLAGS))
+def test_f3_every_interpreter_with_eval_flag_denied(interp, flag):
+    # ``deno eval`` uses subcommand syntax; the matcher treats both forms.
+    cmd = f"{interp} {flag} 'pass'"
+    res = decide(cmd)
+    assert _is_deny(res), f"F3 not denied: {cmd!r} -> {res}"
+
+
+@pytest.mark.parametrize("operand", sorted(DANGEROUS_RM_OPERANDS))
+def test_f4_every_dangerous_rm_operand_denied(operand):
+    cmd = f"rm -rf {operand}"
+    res = decide(cmd)
+    assert _is_deny(res), f"F4 not denied: {cmd!r} -> {res}"
+
+
+# F5 \u2014 every ALWAYS_DENY git literal is reachable behind global git options.
+def _git_always_deny_literals():
+    return [p for p in ALWAYS_DENY if p.startswith("git ")]
+
+
+@pytest.mark.parametrize("literal", _git_always_deny_literals())
+def test_f5_git_literals_behind_dash_C_denied(literal):  # noqa: N802 -- spec-named
+    cmd = literal.replace("git ", "git -C /tmp ", 1)
+    assert _is_deny(decide(cmd)), f"F5 not denied: {cmd!r}"
+
+
+@pytest.mark.parametrize("literal", _git_always_deny_literals())
+def test_f5_git_literals_behind_git_dir_denied(literal):
+    cmd = literal.replace("git ", "git --git-dir=/tmp/.git ", 1)
+    assert _is_deny(decide(cmd)), f"F5 not denied: {cmd!r}"
+
+
+# F2 \u2014 every ALWAYS_DENY literal is reachable behind ``env K=V``.
+@pytest.mark.parametrize("literal", sorted(ALWAYS_DENY))
+def test_f2_env_kv_prefix_every_literal_denied(literal):
+    if literal.startswith("env "):
+        # ``env -i`` etc. \u2014 already env-prefixed, skip wrapping.
+        return
+    cmd = f"env FOO=1 {literal}"
+    assert _is_deny(decide(cmd)), f"F2 not denied: {cmd!r}"

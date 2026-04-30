@@ -109,3 +109,68 @@ class TestHook:
     def test_passes_through_on_missing_file_path(self, capsys):
         hook({"tool_name": "Edit", "tool_input": {}})
         assert capsys.readouterr().out == ""
+
+
+class TestExpandedToolCoverage:
+    """B8 — extra tools (MultiEdit, NotebookEdit) and Bash write targets."""
+
+    def test_multi_edit_protected_asks(self, capsys):
+        hook(
+            {
+                "tool_name": "MultiEdit",
+                "tool_input": {"file_path": "/repo/src/guard/hooks/protected_files.py"},
+            }
+        )
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_notebook_edit_protected_asks(self, capsys):
+        hook(
+            {
+                "tool_name": "NotebookEdit",
+                "tool_input": {"notebook_path": "/repo/src/guard/registry.py"},
+            }
+        )
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_bash_redirect_to_protected_asks(self, capsys):
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo x > /repo/src/guard/hooks/credential_check.py"},
+            }
+        )
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_bash_tee_protected_asks(self, capsys):
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo x | tee /repo/src/guard/registry.py"},
+            }
+        )
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_bash_cp_protected_dst_asks(self, capsys):
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": "cp /tmp/x.py /repo/src/guard/hooks/bash_command_validator.py"
+                },
+            }
+        )
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_bash_unrelated_command_passes(self, capsys):
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls /tmp"},
+            }
+        )
+        assert capsys.readouterr().out == ""

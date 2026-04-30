@@ -80,7 +80,7 @@ def _resolve_paths(file_path: str, cwd: str) -> tuple[str, str, bool]:
     return abs_path, rel_path, inside_cwd
 
 
-def _matches_dir(pattern: str, rel_path: str, inside_cwd: bool) -> bool:  # noqa: FBT001 -- internal helper; bool arg is part of the simple dispatch contract
+def _matches_dir(pattern: str, rel_path: str, *, inside_cwd: bool) -> bool:
     """Recursive directory match for a trailing-slash pattern.
 
     Anchored against ``rel_path`` only when the file is inside cwd. Patterns
@@ -96,7 +96,7 @@ def _matches_dir(pattern: str, rel_path: str, inside_cwd: bool) -> bool:  # noqa
     return rel_path == base or rel_path.startswith(base + "/")
 
 
-def _matches_glob(pattern: str, abs_path: str, rel_path: str, inside_cwd: bool) -> bool:  # noqa: FBT001 -- internal helper; bool arg is part of the simple dispatch contract
+def _matches_glob(pattern: str, abs_path: str, rel_path: str, *, inside_cwd: bool) -> bool:
     """Glob-match against the relative path only (when inside cwd).
 
     Absolute glob patterns (starting with ``/``) match the absolute path.
@@ -108,7 +108,7 @@ def _matches_glob(pattern: str, abs_path: str, rel_path: str, inside_cwd: bool) 
     return fnmatch.fnmatch(rel_path, pattern)
 
 
-def _matches_plain(pattern: str, abs_path: str, rel_path: str, inside_cwd: bool) -> bool:  # noqa: FBT001 -- internal helper; bool arg is part of the simple dispatch contract
+def _matches_plain(pattern: str, abs_path: str, rel_path: str, *, inside_cwd: bool) -> bool:
     """Plain-path match anchored to cwd.
 
     F7: previously fell through to ``abs_path.endswith("/" + pattern)`` which
@@ -123,13 +123,13 @@ def _matches_plain(pattern: str, abs_path: str, rel_path: str, inside_cwd: bool)
     return rel_path == pattern or rel_path.startswith(pattern + "/")
 
 
-def _matches_pattern(pattern: str, abs_path: str, rel_path: str, inside_cwd: bool) -> bool:  # noqa: FBT001 -- internal helper; bool arg is part of the simple dispatch contract
+def _matches_pattern(pattern: str, abs_path: str, rel_path: str, *, inside_cwd: bool) -> bool:
     """Dispatch a single allowlist pattern against ``abs_path`` / ``rel_path``."""
     if pattern.endswith("/"):
-        return _matches_dir(pattern, rel_path, inside_cwd)
+        return _matches_dir(pattern, rel_path, inside_cwd=inside_cwd)
     if any(c in pattern for c in "*?["):
-        return _matches_glob(pattern, abs_path, rel_path, inside_cwd)
-    return _matches_plain(pattern, abs_path, rel_path, inside_cwd)
+        return _matches_glob(pattern, abs_path, rel_path, inside_cwd=inside_cwd)
+    return _matches_plain(pattern, abs_path, rel_path, inside_cwd=inside_cwd)
 
 
 def is_allowed(file_path: str, cwd: str, allowed: list[Any]) -> bool:
@@ -138,7 +138,7 @@ def is_allowed(file_path: str, cwd: str, allowed: list[Any]) -> bool:
     return any(
         isinstance(pattern, str)
         and pattern
-        and _matches_pattern(pattern, abs_path, rel_path, inside_cwd)
+        and _matches_pattern(pattern, abs_path, rel_path, inside_cwd=inside_cwd)
         for pattern in allowed
     )
 
