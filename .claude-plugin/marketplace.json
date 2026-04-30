@@ -1,0 +1,17 @@
+{
+  "name": "tracinehq",
+  "owner": { "name": "TracineHQ", "url": "https://github.com/tracinehq" },
+  "metadata": {
+    "description": "TracineHQ's Claude Code plugin catalog.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "guard",
+      "description": "Stdlib-only safety hooks for Claude Code.",
+      "source": "./",
+      "category": "safety",
+      "homepage": "https://github.com/tracinehq/guard"
+    }
+  ]
+}
