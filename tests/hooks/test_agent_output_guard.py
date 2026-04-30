@@ -129,9 +129,9 @@ class TestSubprocess:
         assert result.stdout.strip() == ""
 
     def test_malformed_json(self):
+        # Tranche 1 hardening I2: malformed JSON now fail-closed denies (rc=2).
         result = self._run_hook("not json at all")
-        assert result.returncode == 0
-        assert result.stdout.strip() == ""
+        assert result.returncode == 2
 
     def test_json_missing_keys(self):
         result = self._run_hook(json.dumps({"unexpected": "data"}))

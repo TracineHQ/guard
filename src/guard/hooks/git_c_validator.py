@@ -19,7 +19,7 @@ import shlex
 import sys
 from typing import Any
 
-from guard._utils import emit_pretooluse_decision, make_decision, safe_main
+from guard._utils import emit_pretooluse_decision, safe_main
 
 # Read-only git subcommands — safe to auto-allow
 ALLOWED_SUBCOMMANDS: frozenset[str] = frozenset(
@@ -182,9 +182,8 @@ def decide(command: str) -> dict[str, Any] | None:
 
 
 def _ask_envelope(reason: str) -> dict[str, Any]:
-    """Return an ``ask`` envelope using the legacy ``make_decision`` shape."""
-    parsed: dict[str, Any] = json.loads(make_decision("ask", reason))
-    return parsed
+    """Return an ``ask`` envelope via the modern PreToolUse helper."""
+    return emit_pretooluse_decision("ask", reason)
 
 
 def hook(payload: dict[str, Any]) -> None:

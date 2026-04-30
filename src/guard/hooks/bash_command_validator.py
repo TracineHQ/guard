@@ -39,6 +39,7 @@ from guard._utils import (
     GUARD_AUTONOMOUS_QUEUE_PATH,
     GUARD_DECISIONS_PATH,
     _log_debug,
+    append_jsonl,
     is_autonomous_mode,
     safe_main,
 )
@@ -72,23 +73,21 @@ def log_decision(
     reason: str,
     segments: int,
 ) -> None:
-    """Append a decision row to the JSONL log. Best-effort, never raises."""
-    try:
-        entry = {
-            "ts": datetime.now(UTC).isoformat(),
-            "command": command[:500],
-            "decision": decision,
-            "reason": reason[:200],
-            "segments": segments,
-            "session_id": os.environ.get("CLAUDE_SESSION_ID", ""),
-            "base_cmd": " ".join(command.split()[:2]),
-        }
-        log_path = _decisions_log_path()
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("a") as f:
-            f.write(json.dumps(entry) + "\n")
-    except OSError:
-        pass
+    """Append a decision row to the JSONL log. Best-effort, never raises.
+
+    Delegates to ``append_jsonl`` for atomic O_APPEND semantics and the 4 KiB
+    record cap (POSIX atomicity envelope).
+    """
+    entry = {
+        "ts": datetime.now(UTC).isoformat(),
+        "command": command[:500],
+        "decision": decision,
+        "reason": reason[:200],
+        "segments": segments,
+        "session_id": os.environ.get("CLAUDE_SESSION_ID", ""),
+        "base_cmd": " ".join(command.split()[:2]),
+    }
+    append_jsonl(_decisions_log_path(), entry)
 
 
 # Safe command prefixes — read-only / non-destructive.
@@ -159,7 +158,9 @@ SAFE_PREFIXES: frozenset[str] = frozenset(
         "tr",
         # General
         "date",
-        "env",
+        # NOTE: `env` is handled via _is_safe_env() instead of a flat prefix
+        # match because `env -i bash -c '...'` was a recursion-into-shell
+        # bypass. Bare `env` and `env K=V safe_command` are still allowed.
         "which",
         "whereis",
         "type",
@@ -353,6 +354,70 @@ def _is_safe_base_cmd(segment: str) -> bool:
         return _is_conditional_safe(segment, base_cmd)
     if base_cmd == "sqlite3":
         return _is_sqlite3_safe(segment)
+    if base_cmd == "env":
+        return _is_safe_env(segment)
+    return False
+
+
+# Regex matching a shell variable assignment of the form ``KEY=VALUE``. Used
+# by ``_is_safe_env`` to skip past env-var assignments to find the wrapped
+# command. Keys must be valid identifiers; values are unrestricted (we delegate
+# command safety to the recursive safe-prefix check).
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _is_safe_env(segment: str) -> bool:
+    """Return ``True`` for known-safe ``env`` invocations.
+
+    Forms accepted:
+
+    - bare ``env`` (just print the environment) → safe
+    - ``env K=V K=V ...`` (no wrapped command) → safe
+    - ``env K=V K=V ... safe_command [args...]`` → safe iff the wrapped
+      command's prefix is on ``SAFE_PREFIXES`` and is *not* itself ``env``
+      (recursion cap = 1; ``env env ...`` is rejected to bound cost).
+
+    Forms rejected (return ``False``):
+
+    - any flag starting with ``-`` (``env -i``, ``env -u FOO``, ``env -S ...``)
+      because these change shell semantics and ``env -i`` is the canonical
+      way to wrap an RCE.
+    """
+    tokens = segment.split()
+    if not tokens or tokens[0] != "env":
+        return False
+    if len(tokens) == 1:
+        return True
+    rest = tokens[1:]
+    # Reject any flag form unconditionally — env -i / -u / -S are the bypass.
+    if rest[0].startswith("-"):
+        return False
+    # Skip over K=V assignments to reach the wrapped command.
+    i = 0
+    while i < len(rest) and _ENV_ASSIGN_RE.match(rest[i]):
+        i += 1
+    if i == len(rest):
+        # `env K=V` with no wrapped command — safe (just sets env then exits)
+        return True
+    return _is_safe_env_inner(rest[i:])
+
+
+def _is_safe_env_inner(inner_tokens: list[str]) -> bool:
+    """Return ``True`` if the wrapped command under ``env K=V ...`` is safe."""
+    inner_base = inner_tokens[0]
+    # No nested env — keep this single-level to bound recursion cost.
+    if inner_base == "env":
+        return False
+    inner = " ".join(inner_tokens)
+    if has_dangerous_constructs(inner):
+        return False
+    if _matches_prefix(inner, SAFE_PREFIXES):
+        return True
+    # Allow CONDITIONAL_SAFE / sqlite3 wrapped under env too.
+    if inner_base in CONDITIONAL_SAFE:
+        return _is_conditional_safe(inner, inner_base)
+    if inner_base == "sqlite3":
+        return _is_sqlite3_safe(inner)
     return False
 
 
@@ -493,21 +558,16 @@ def queue_denied_command(command: str) -> None:
     """Best-effort append a denied command to the autonomous review queue.
 
     The queue is a JSONL file at ``GUARD_AUTONOMOUS_QUEUE_PATH``; a human can
-    review it after the session ends. I/O failures are swallowed — the hook
-    must never block on logging.
+    review it after the session ends. I/O failures are swallowed by
+    ``append_jsonl`` — the hook must never block on logging.
     """
-    try:
-        entry = {
-            "timestamp": datetime.now(UTC).isoformat(),
-            "command": command[:500],
-            "session_id": os.environ.get("CLAUDE_SESSION_ID", ""),
-        }
-        queue_path = Path(GUARD_AUTONOMOUS_QUEUE_PATH)
-        queue_path.parent.mkdir(parents=True, exist_ok=True)
-        with queue_path.open("a") as f:
-            f.write(json.dumps(entry) + "\n")
-    except OSError as exc:
-        _log_debug(f"queue_denied_command: {exc}")
+    entry = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "command": command[:500],
+        "session_id": os.environ.get("CLAUDE_SESSION_ID", ""),
+    }
+    append_jsonl(GUARD_AUTONOMOUS_QUEUE_PATH, entry)
+    _log_debug(f"queue_denied_command: appended to {GUARD_AUTONOMOUS_QUEUE_PATH}")
 
 
 def get_credential_leak_deny(command: str) -> dict[str, str] | None:
@@ -559,7 +619,7 @@ def _evaluate_segments(
     return _allow(reason)
 
 
-def decide(command: str) -> dict[str, str] | None:
+def decide(command: str) -> dict[str, str] | None:  # noqa: PLR0911 -- top-level dispatcher with intentional early-return branches
     """Decide whether to allow a bash command. ``None`` means passthrough."""
     leak = get_credential_leak_deny(command)
     if leak is not None:
@@ -577,6 +637,16 @@ def decide(command: str) -> dict[str, str] | None:
         log_decision(command, "deny", "always-deny", len(segments))
         return deny
 
+    # === Pre-evaluation: dangerous-construct deny in BOTH modes ===
+    # ``$(...)``, backticks, and process substitution are exfil/RCE primitives
+    # regardless of pipeline depth or interactive/autonomous context. Likewise,
+    # CONDITIONAL_SAFE base commands with denied flags (``find -exec``, etc.)
+    # must deny even for single-segment commands where the segment-walk would
+    # otherwise short-circuit to passthrough.
+    pre_deny = _pre_evaluate_dangerous(command, segments)
+    if pre_deny is not None:
+        return pre_deny
+
     # === Autonomous mode: strict default-deny ===
     # Subagents and other driven-agent contexts have no human at the prompt.
     # Anything not explicitly on the safe-prefix allowlist is denied here so
@@ -593,6 +663,44 @@ def decide(command: str) -> dict[str, str] | None:
         return None
 
     return _evaluate_segments(command, segments, has_comments=has_comments)
+
+
+def _pre_evaluate_dangerous(command: str, segments: list[str]) -> dict[str, str] | None:
+    r"""Pre-deny passes that fire in both interactive and autonomous mode.
+
+    These checks run BEFORE the autonomous strict-mode path and BEFORE the
+    interactive ``no comments / no pipes -> passthrough`` short-circuit. They
+    catch bypasses that the segment walk used to miss for bare commands:
+    ``find . -exec rm {} \;`` and ``cat $(rm -rf /)`` would otherwise return
+    ``None`` (passthrough) on a single-segment, no-comment input.
+
+    Returns a deny envelope if any segment hits a dangerous-construct or a
+    CONDITIONAL_SAFE-with-denied-flag pattern. Returns ``None`` to defer to
+    the normal evaluator.
+    """
+    n_segments = len(segments) or 1
+    for segment in segments:
+        if has_dangerous_constructs(segment):
+            reason = (
+                f"Blocked: `{segment[:80]}` contains a dangerous shell "
+                "construct ($(...), backticks, or process substitution). "
+                "These are exfil/RCE primitives and are denied in both "
+                "interactive and autonomous mode."
+            )
+            log_decision(command, "deny", "dangerous-construct", n_segments)
+            return _deny(reason)
+        tokens = segment.split()
+        base_cmd = tokens[0] if tokens else ""
+        if base_cmd in CONDITIONAL_SAFE and not _is_conditional_safe(segment, base_cmd):
+            denied_flags = sorted(CONDITIONAL_SAFE[base_cmd])
+            reason = (
+                f"Blocked: `{base_cmd}` was invoked with a denied flag "
+                f"(any of {denied_flags}). These flags allow arbitrary "
+                "command execution and are not permitted."
+            )
+            log_decision(command, "deny", f"{base_cmd}-denied-flag", n_segments)
+            return _deny(reason)
+    return None
 
 
 def _matches_autonomous_feedback(segment: str) -> bool:

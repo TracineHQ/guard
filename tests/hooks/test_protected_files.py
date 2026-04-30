@@ -36,9 +36,21 @@ class TestIsProtected:
         # Shouldn't match when 'hooks/' prefix is missing from the suffix
         assert is_protected("/some/path/not_hooks/command_registry.py") is None
 
-    def test_all_patterns_end_with_py(self):
+    def test_all_patterns_end_with_py_or_json(self):
+        # Tranche 1 hardening C6: settings.json patterns added; widen the
+        # invariant to cover both file types.
         for p in PROTECTED_PATTERNS:
-            assert p.endswith(".py")
+            assert p.endswith((".py", ".json"))
+
+    def test_matches_claude_settings_json(self):
+        # Tranche 1 hardening C6: edits to ~/.claude/settings.json must
+        # surface for review (this file is the harness's hook ASK-gate).
+        match = is_protected("/Users/x/.claude/settings.json")
+        assert match == ".claude/settings.json"
+
+    def test_matches_claude_settings_local_json(self):
+        match = is_protected("/Users/x/.claude/settings.local.json")
+        assert match == ".claude/settings.local.json"
 
 
 class TestHook:

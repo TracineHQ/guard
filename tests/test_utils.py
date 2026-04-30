@@ -49,6 +49,7 @@ print(json.dumps(result))
 
 
 def test_parse_hook_input_invalid_json():
+    """Tranche 1 hardening I2: malformed JSON now fail-closed denies (rc=2)."""
     script = f"""
 import sys
 sys.path.insert(0, {SRC_DIR!r})
@@ -64,8 +65,8 @@ print("NONE" if result is None else "NOT_NONE")
         timeout=5,
         check=False,
     )
-    assert result.returncode == 0
-    assert result.stdout.strip() == "NONE"
+    assert result.returncode == 2
+    assert "malformed JSON" in result.stderr
 
 
 def test_parse_hook_input_empty():
@@ -192,6 +193,10 @@ safe_main(my_hook)
 
 
 def test_safe_main_invalid_json_passthrough():
+    """Tranche 1 hardening I2: malformed JSON triggers fail-closed deny (rc=2)
+    via parse_hook_input -> sys.exit(2). safe_main re-raises SystemExit, so
+    the wrapper exits with the same code.
+    """
     hook_script = f"""
 import sys
 sys.path.insert(0, {SRC_DIR!r})
@@ -210,8 +215,8 @@ safe_main(my_hook)
         timeout=5,
         check=False,
     )
-    assert result.returncode == 0
-    assert result.stdout.strip() == ""
+    assert result.returncode == 2
+    assert "malformed JSON" in result.stderr
 
 
 # === DD-17: JSONL path is user-scope (~/.claude/), not plugins/cache ===
@@ -255,6 +260,15 @@ def test_emit_pretooluse_decision_omits_optional_when_none() -> None:
     result = emit_pretooluse_decision("allow", "ok")
     assert "updatedInput" not in result["hookSpecificOutput"]
     assert "additionalContext" not in result["hookSpecificOutput"]
+
+
+def test_emit_pretooluse_decision_ask() -> None:
+    """Advisory hooks (e.g. protected_files) emit 'ask' to surface a prompt."""
+    result = emit_pretooluse_decision("ask", "confirm edit to protected file")
+    hso = result["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PreToolUse"
+    assert hso["permissionDecision"] == "ask"
+    assert hso["permissionDecisionReason"] == "confirm edit to protected file"
 
 
 # === _env_int: malformed/unset handling ===

@@ -3,6 +3,7 @@
 If a future change orphans ALWAYS_DENY (or any specific entry), this test fires.
 Auto-parametrized — adding a Safety.DENY rule to registry.py automatically adds a case.
 """
+
 from __future__ import annotations
 
 import json
@@ -24,13 +25,15 @@ def _run_hook(command: str) -> tuple[int, str, str]:
     env["PYTHONPATH"] = str(REPO / "src")
     proc = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
         [sys.executable, str(HOOK)],
-        input=json.dumps({
-            "session_id": "wiring-test",
-            "tool_name": "Bash",
-            "tool_input": {"command": command},
-            "hook_event_name": "PreToolUse",
-            "cwd": str(REPO),
-        }),
+        input=json.dumps(
+            {
+                "session_id": "wiring-test",
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "hook_event_name": "PreToolUse",
+                "cwd": str(REPO),
+            }
+        ),
         capture_output=True,
         text=True,
         env=env,

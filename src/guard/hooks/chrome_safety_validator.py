@@ -154,10 +154,14 @@ def decide(command: str) -> dict[str, Any] | None:
 
 
 def hook(payload: dict[str, Any]) -> None:
-    """Top-level hook entry point."""
-    if not HAS_CHROME_SAFETY:
-        return
+    """Top-level hook entry point.
 
+    The autonomous-mode deny table at module top is hook-local data, so it
+    fires regardless of whether the optional ``chrome_cli`` package is
+    installed. Only the eval-validation path (``validate_eval_expression``)
+    is gated on ``HAS_CHROME_SAFETY``; everything else (autonomous deny,
+    user-data-dir block) works with stdlib only.
+    """
     tool_name = payload.get("tool_name", "")
     if tool_name != "Bash":
         return

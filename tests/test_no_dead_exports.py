@@ -6,6 +6,7 @@ that's almost always a bug — the rule is being silently bypassed.
 This test enumerates suspicious public exports of `guard.registry` and verifies each
 appears at least once in `src/guard/hooks/**/*.py`.
 """
+
 from __future__ import annotations
 
 import inspect
@@ -67,7 +68,6 @@ def test_no_orphaned_registry_exports() -> None:
                 f"registry.{name} is defined but no hook in src/guard/hooks/ reads it. "
                 f"This is almost always a bug — the rule is being bypassed."
             )
-    assert not orphans, (
-        "Orphaned registry exports detected:\n"
-        + "\n".join(f"  - {k}: {v}" for k, v in orphans.items())
+    assert not orphans, "Orphaned registry exports detected:\n" + "\n".join(
+        f"  - {k}: {v}" for k, v in orphans.items()
     )

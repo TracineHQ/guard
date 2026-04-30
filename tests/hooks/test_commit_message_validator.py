@@ -195,7 +195,9 @@ class TestSubprocessIntegration:
         assert result.stdout.strip() == ""
         assert result.returncode == 0
 
-    def test_malformed_json_passthrough(self):
+    def test_malformed_json_denied(self):
+        # Tranche 1 hardening I2: malformed JSON now fail-closed denies (rc=2).
+        # Renamed from `_passthrough` because the contract has changed.
         result = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
             [sys.executable, str(HOOK_PATH)],
             input="NOT JSON",
@@ -203,5 +205,4 @@ class TestSubprocessIntegration:
             text=True,
             check=False,
         )
-        assert result.stdout.strip() == ""
-        assert result.returncode == 0
+        assert result.returncode == 2

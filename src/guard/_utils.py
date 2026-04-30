@@ -262,20 +262,56 @@ def clear_active_skill(session_id: str) -> None:
 # All hooks should use these instead of reimplementing the boilerplate.
 
 
-def parse_hook_input() -> dict[str, Any] | None:
-    """Read and parse the stdin JSON payload.
+_STDIN_LIMIT = 1 << 20  # 1 MiB
+_JSONL_RECORD_MAX = 4096  # POSIX O_APPEND atomicity envelope on Linux
 
-    Returns the parsed dict on success, or ``None`` on any error (empty
-    stdin, invalid JSON, IO error). Hooks should return silently
-    (passthrough) when this returns ``None``.
+
+def parse_hook_input() -> dict[str, Any] | None:
+    """Read and parse hook stdin JSON, capped at 1 MiB.
+
+    Returns ``None`` on missing/non-dict payload (fail-open). Exits with code 2
+    on oversized stdin or malformed JSON (fail-closed deny). The 1 MiB cap
+    matches the threat model: hook stdin is attacker-influenceable, so we bound
+    regex cost and prevent soft-DoS.
     """
     try:
-        data = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError, OSError):
+        raw = sys.stdin.buffer.read(_STDIN_LIMIT + 1)
+    except OSError:
         return None
-    if not isinstance(data, dict):
+    if len(raw) > _STDIN_LIMIT:
+        sys.stderr.write("guard: stdin exceeds 1 MiB; denying.\n")
+        sys.exit(2)
+    if not raw:
         return None
-    return data
+    try:
+        data = json.loads(raw.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, ValueError):
+        sys.stderr.write("guard: malformed JSON on stdin; denying.\n")
+        sys.exit(2)
+    return data if isinstance(data, dict) else None
+
+
+def append_jsonl(path: str | Path, entry: dict[str, Any]) -> None:
+    """Atomically append a JSONL record, capped at 4096 bytes.
+
+    Uses ``os.write()`` on an ``O_APPEND`` fd for true single-syscall
+    atomicity per POSIX. Truncates to the 4 KiB envelope before write. Fails
+    open (silently) on ``OSError`` per the "guardrails not walls" doctrine —
+    a logging failure must never block legitimate work.
+    """
+    line = (json.dumps(entry, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(line) > _JSONL_RECORD_MAX:
+        line = line[: _JSONL_RECORD_MAX - 1] + b"\n"
+    try:
+        path_str = str(path)
+        Path(path_str).parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path_str, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, line)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def make_decision(decision: str, reason: str) -> str:
@@ -299,7 +335,7 @@ def make_decision(decision: str, reason: str) -> str:
 
 
 def emit_pretooluse_decision(
-    decision: Literal["allow", "deny"],
+    decision: Literal["allow", "deny", "ask"],
     reason: str,
     *,
     updated_input: dict[str, Any] | None = None,
@@ -308,7 +344,10 @@ def emit_pretooluse_decision(
     """Build a PreToolUse decision envelope per DD-16/R3.
 
     Args:
-        decision: ``"allow"`` or ``"deny"``.
+        decision: ``"allow"``, ``"deny"``, or ``"ask"``. ``"ask"`` is permitted
+            because advisory hooks (e.g. ``protected_files``) exist precisely
+            to surface a permission prompt; the DD-16 narrowing applied to
+            authoritative validators only.
         reason: Human-readable rationale surfaced to the user/agent.
         updated_input: Optional rewritten tool input merged into the envelope.
         additional_context: Optional extra context string for the agent.

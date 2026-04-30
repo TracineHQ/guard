@@ -10,11 +10,12 @@ changes to the hook infrastructure are surfaced for review.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any
 
-from guard._utils import make_decision, safe_main
+from guard._utils import emit_pretooluse_decision, safe_main
 
 # Files that define security policy for all Claude Code sessions.
 # Changes to these affect every repo and every agent.
@@ -29,6 +30,10 @@ PROTECTED_PATTERNS: list[str] = [
     "guard/hooks/subagent_scope.py",
     "guard/registry.py",
     "guard/_utils.py",
+    # Claude Code harness configuration — these are the ASK-gate that
+    # decides whether guard hooks even fire. Edits must surface for review.
+    ".claude/settings.json",
+    ".claude/settings.local.json",
     # Backwards-compat patterns for repos that vendor the original layout
     "hooks/command_registry.py",
     "hooks/bash_command_validator.py",
@@ -80,7 +85,8 @@ def hook(payload: dict[str, Any]) -> None:
     if matched is None:
         return
 
-    sys.stdout.write(make_decision("ask", f"Protected file: {matched} — confirm edit"))
+    envelope = emit_pretooluse_decision("ask", f"Protected file: {matched} — confirm edit")
+    sys.stdout.write(json.dumps(envelope))
 
 
 if __name__ == "__main__":

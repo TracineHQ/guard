@@ -639,6 +639,62 @@ COMMANDS: list[CommandRule] = [
     ),
     # --- Terraform DENY ---
     CommandRule("terraform destroy", Safety.DENY, "Destroys infrastructure", "terraform-deny"),
+    # --- Catastrophic-deletion DENY ---
+    # Each prefix is matched as an exact-or-followed-by-space token (see
+    # bash_command_validator._match_always_deny). Variants below cover the
+    # common typos / re-orderings that all map to the same outcome.
+    CommandRule(
+        "rm -rf /",
+        Safety.DENY,
+        "Recursive root/home deletion is never allowed.",
+        "rm-deny",
+    ),
+    CommandRule(
+        "rm -rf /*",
+        Safety.DENY,
+        "Recursive root/home deletion is never allowed.",
+        "rm-deny",
+    ),
+    CommandRule(
+        "rm -rf ~",
+        Safety.DENY,
+        "Recursive root/home deletion is never allowed.",
+        "rm-deny",
+    ),
+    CommandRule(
+        "rm -rf $HOME",
+        Safety.DENY,
+        "Recursive root/home deletion is never allowed.",
+        "rm-deny",
+    ),
+    CommandRule(
+        "rm -fr /",
+        Safety.DENY,
+        "Recursive root/home deletion is never allowed.",
+        "rm-deny",
+    ),
+    CommandRule(
+        "rm -fr ~",
+        Safety.DENY,
+        "Recursive root/home deletion is never allowed.",
+        "rm-deny",
+    ),
+    CommandRule(
+        "rm -rf --no-preserve-root /",
+        Safety.DENY,
+        "Recursive root/home deletion is never allowed.",
+        "rm-deny",
+    ),
+    # --- env -i DENY ---
+    # `env -i` clears the environment and is commonly used to wrap RCE
+    # (e.g. `env -i bash -c '...'`). Always deny — bare `env` and
+    # `env K=V cmd` forms are still routed through _is_safe_env.
+    CommandRule(
+        "env -i",
+        Safety.DENY,
+        "env -i clears the environment and is commonly used to wrap RCE; not allowed.",
+        "env-deny",
+    ),
     # --- Python Package Install (ASK) ---
     CommandRule(
         "pip install",
