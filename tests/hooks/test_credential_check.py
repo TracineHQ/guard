@@ -1,10 +1,16 @@
-"""Tests for credential file permission checker."""
+"""Tests for credential_check hook."""
 
 from __future__ import annotations
+
+import contextlib
+import json
+from pathlib import Path
 
 from guard.hooks.credential_check import (
     check_all,
     check_file_permissions,
+    decide,
+    hook,
 )
 
 
@@ -71,3 +77,101 @@ class TestImports:
     def test_check_credential_imports(self):
         # The top-level import is the contract; this asserts the symbol is callable.
         assert callable(check_file_permissions)
+        assert callable(hook)
+
+
+class TestDecide:
+    def test_edit_aws_credentials_asks(self):
+        result = decide("Edit", {"file_path": "~/.aws/credentials"})
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_edit_normal_file_passes(self):
+        result = decide("Edit", {"file_path": "/repo/src/main.py"})
+        assert result is None
+
+    def test_bash_cat_aws_credentials_asks(self):
+        result = decide("Bash", {"command": "cat ~/.aws/credentials"})
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_bash_ls_la_passes(self):
+        result = decide("Bash", {"command": "ls -la"})
+        assert result is None
+
+    def test_write_pem_asks(self):
+        result = decide("Write", {"file_path": "/tmp/server.pem"})  # noqa: S108
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_edit_dotenv_asks(self):
+        result = decide("Edit", {"file_path": "/repo/.env"})
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_edit_dotenv_local_asks(self):
+        result = decide("Edit", {"file_path": "/repo/.env.local"})
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_edit_ssh_id_rsa_asks(self):
+        result = decide("Edit", {"file_path": "~/.ssh/id_rsa"})
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_other_tool_passes(self):
+        assert decide("Read", {"file_path": "~/.aws/credentials"}) is None
+
+    def test_empty_inputs_pass(self):
+        assert decide("Edit", {}) is None
+        assert decide("Bash", {}) is None
+
+    def test_numeric_inputs_pass(self):
+        with contextlib.suppress(TypeError):
+            decide("Edit", {"file_path": 12345})
+
+
+class TestHookFunction:
+    def test_hook_emits_ask_for_credential_edit(self, capsys, tmp_path, monkeypatch):
+        monkeypatch.setenv("GUARD_DECISIONS_PATH", str(tmp_path / "log.jsonl"))
+        hook(
+            {
+                "tool_name": "Edit",
+                "tool_input": {"file_path": str(Path.home() / ".aws" / "credentials")},
+            }
+        )
+        out = capsys.readouterr().out
+        envelope = json.loads(out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_hook_passes_for_non_credential_edit(self, capsys, tmp_path, monkeypatch):
+        monkeypatch.setenv("GUARD_DECISIONS_PATH", str(tmp_path / "log.jsonl"))
+        hook(
+            {
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "/repo/src/main.py"},
+            }
+        )
+        assert capsys.readouterr().out == ""
+
+    def test_hook_emits_ask_for_credential_bash(self, capsys, tmp_path, monkeypatch):
+        monkeypatch.setenv("GUARD_DECISIONS_PATH", str(tmp_path / "log.jsonl"))
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "cat ~/.aws/credentials"},
+            }
+        )
+        out = capsys.readouterr().out
+        envelope = json.loads(out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_hook_passes_for_benign_bash(self, capsys, tmp_path, monkeypatch):
+        monkeypatch.setenv("GUARD_DECISIONS_PATH", str(tmp_path / "log.jsonl"))
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls -la"},
+            }
+        )
+        assert capsys.readouterr().out == ""

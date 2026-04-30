@@ -10,12 +10,13 @@ import sys
 from pathlib import Path
 from unittest import mock
 
-from guard import _utils
 from guard._utils import (
     GUARD_DECISIONS_PATH,
     _env_int,
     emit_pretooluse_decision,
     is_autonomous_mode,
+    log_decision,
+    sanitize_for_stderr,
 )
 
 SRC_DIR = str(Path(__file__).resolve().parent.parent / "src")
@@ -306,27 +307,113 @@ def test_env_int_malformed_falls_back_to_default() -> None:
         assert _env_int("FAKE_VAR_X", 42) == 42
 
 
-# === Real I/O smoke: circuit breaker file round-trip ===
-# `_utils.py` doesn't expose a JSONL writer (decision logging happens via the
-# downstream hooks themselves), so we exercise a real-I/O path that the module
-# does own: the circuit breaker state file.
+# === log_decision: spec-compliant JSONL writer ===
 
 
-def test_circuit_breaker_round_trip(tmp_path: Path, monkeypatch) -> None:
-    """record_failure writes JSON state; check_circuit reads it; record_success clears it."""
-    circuit_file = tmp_path / "circuit.json"
-    monkeypatch.setattr(_utils, "CIRCUIT_FILE", circuit_file)
+def test_log_decision_writes_all_required_fields(tmp_path: Path, monkeypatch) -> None:
+    """log_decision emits the schema v1 record with every required field."""
+    jsonl = tmp_path / "decisions.jsonl"
+    monkeypatch.setattr("guard._utils.GUARD_DECISIONS_PATH", str(jsonl))
 
-    # Closed when no file
-    assert _utils.check_circuit("hook_a") is True
+    log_decision(
+        hook_id="guard.test_hook",
+        event="PreToolUse",
+        tool_name="Bash",
+        decision="deny",
+        reason="testing",
+        command_excerpt="ls -la",
+        session_id="sess-1",
+        cwd="/tmp/work",  # noqa: S108
+    )
 
-    # One failure: still closed (under threshold)
-    _utils.record_failure("hook_a")
-    assert circuit_file.exists()
-    state = json.loads(circuit_file.read_text())
-    assert state["hook_a"]["failures"] == 1
-    assert _utils.check_circuit("hook_a") is True
+    line = jsonl.read_text().splitlines()[-1]
+    record = json.loads(line)
+    assert record["schema_version"] == 1
+    assert record["hook_id"] == "guard.test_hook"
+    assert record["event"] == "PreToolUse"
+    assert record["tool_name"] == "Bash"
+    assert record["decision"] == "deny"
+    assert record["reason"] == "testing"
+    assert record["command_excerpt"] == "ls -la"
+    assert record["session_id"] == "sess-1"
+    assert record["cwd"] == "/tmp/work"  # noqa: S108
+    # Timestamp must end with Z (UTC) and parse as ISO-8601
+    assert record["timestamp"].endswith("Z")
 
-    # Success clears that hook's entry
-    _utils.record_success("hook_a")
-    assert not circuit_file.exists()
+
+def test_log_decision_omits_optional_fields(tmp_path: Path, monkeypatch) -> None:
+    """When optional fields are None, the record omits them."""
+    jsonl = tmp_path / "decisions.jsonl"
+    monkeypatch.setattr("guard._utils.GUARD_DECISIONS_PATH", str(jsonl))
+
+    log_decision(
+        hook_id="guard.test_hook",
+        event="PreToolUse",
+        tool_name=None,
+        decision="allow",
+        reason="ok",
+    )
+
+    record = json.loads(jsonl.read_text().splitlines()[-1])
+    assert "command_excerpt" not in record
+    assert "cwd" not in record
+    assert record["tool_name"] is None
+    assert record["session_id"] == ""
+
+
+def test_log_decision_truncates_long_reason(tmp_path: Path, monkeypatch) -> None:
+    """Reason is truncated to 1024 chars."""
+    jsonl = tmp_path / "decisions.jsonl"
+    monkeypatch.setattr("guard._utils.GUARD_DECISIONS_PATH", str(jsonl))
+
+    log_decision(
+        hook_id="guard.test_hook",
+        event="PreToolUse",
+        tool_name="Bash",
+        decision="deny",
+        reason="x" * 5000,
+    )
+
+    record = json.loads(jsonl.read_text().splitlines()[-1])
+    assert len(record["reason"]) == 1024
+
+
+def test_log_decision_record_under_4096_bytes(tmp_path: Path, monkeypatch) -> None:
+    """Total record size honours the 4096-byte envelope."""
+    jsonl = tmp_path / "decisions.jsonl"
+    monkeypatch.setattr("guard._utils.GUARD_DECISIONS_PATH", str(jsonl))
+
+    log_decision(
+        hook_id="guard.test_hook",
+        event="PreToolUse",
+        tool_name="Bash",
+        decision="deny",
+        reason="x" * 4000,
+        command_excerpt="y" * 8000,
+    )
+
+    raw = jsonl.read_bytes().splitlines()[-1] + b"\n"
+    assert len(raw) <= 4096
+
+
+# === sanitize_for_stderr: strip control characters ===
+
+
+def test_sanitize_for_stderr_strips_ansi() -> None:
+    """ANSI escape sequences are replaced with '?'."""
+    text = "hello\x1b[31mRED\x1b[0mworld"
+    result = sanitize_for_stderr(text)
+    assert "\x1b" not in result
+    assert "?" in result
+
+
+def test_sanitize_for_stderr_truncates() -> None:
+    """Output is capped at max_len."""
+    result = sanitize_for_stderr("a" * 500, max_len=100)
+    assert len(result) == 100
+
+
+def test_sanitize_for_stderr_preserves_normal_text() -> None:
+    """Normal printable text passes through unchanged."""
+    text = "ls -la /tmp/foo"
+    assert sanitize_for_stderr(text) == text

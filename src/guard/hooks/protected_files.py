@@ -15,7 +15,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from guard._utils import emit_pretooluse_decision, safe_main
+from guard._utils import emit_pretooluse_decision, log_decision, safe_main
+
+_HOOK_ID = "guard.protected_files"
 
 # Files that define security policy for all Claude Code sessions.
 # Changes to these affect every repo and every agent.
@@ -85,7 +87,19 @@ def hook(payload: dict[str, Any]) -> None:
     if matched is None:
         return
 
-    envelope = emit_pretooluse_decision("ask", f"Protected file: {matched} — confirm edit")
+    reason = f"Protected file: {matched} — confirm edit"
+    envelope = emit_pretooluse_decision("ask", reason)
+    cwd = payload.get("cwd")
+    log_decision(
+        hook_id=_HOOK_ID,
+        event="PreToolUse",
+        tool_name=tool_name,
+        decision="ask",
+        reason=reason,
+        command_excerpt=file_path,
+        session_id=str(payload.get("session_id", "")),
+        cwd=cwd if isinstance(cwd, str) else None,
+    )
     sys.stdout.write(json.dumps(envelope))
 
 

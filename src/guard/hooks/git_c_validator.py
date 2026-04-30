@@ -19,7 +19,9 @@ import shlex
 import sys
 from typing import Any
 
-from guard._utils import emit_pretooluse_decision, safe_main
+from guard._utils import emit_pretooluse_decision, log_decision, safe_main
+
+_HOOK_ID = "guard.git_c_validator"
 
 # Read-only git subcommands — safe to auto-allow
 ALLOWED_SUBCOMMANDS: frozenset[str] = frozenset(
@@ -203,8 +205,21 @@ def hook(payload: dict[str, Any]) -> None:
     if envelope is None:
         return
 
+    hso = envelope.get("hookSpecificOutput", {})
+    decision = hso.get("permissionDecision")
+    cwd = payload.get("cwd")
+    if decision in ("allow", "deny", "ask"):
+        log_decision(
+            hook_id=_HOOK_ID,
+            event="PreToolUse",
+            tool_name="Bash",
+            decision=decision,
+            reason=hso.get("permissionDecisionReason", ""),
+            command_excerpt=command,
+            session_id=str(payload.get("session_id", "")),
+            cwd=cwd if isinstance(cwd, str) else None,
+        )
     sys.stdout.write(json.dumps(envelope))
-    decision = envelope.get("hookSpecificOutput", {}).get("permissionDecision")
     if decision == "deny":
         sys.exit(2)
 

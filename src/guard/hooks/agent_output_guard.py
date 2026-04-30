@@ -15,10 +15,16 @@ import re
 import sys
 from typing import Any
 
-from guard._utils import emit_pretooluse_decision, safe_main
+from guard._utils import emit_pretooluse_decision, log_decision, safe_main
 
-# Matches agent output file paths produced by Claude Code subagent runs
-AGENT_OUTPUT_PATTERN = re.compile(r"/private/tmp/claude-\d+/.*/tasks/.*\.output")
+_HOOK_ID = "guard.agent_output_guard"
+
+# Matches agent output file paths produced by Claude Code subagent runs.
+# macOS form:   /private/tmp/claude-<pid>/.../tasks/<id>.output
+# Linux form:   /tmp/claude-<pid>/.../tasks/<id>.output
+# Anchored at end so we don't false-match unrelated paths containing
+# ``.output`` mid-string.
+AGENT_OUTPUT_PATTERN = re.compile(r"/(?:private/)?tmp/claude-\d+/.*/tasks/.*\.output\b")
 
 _DENY_REASON = (
     "Direct reads on agent output files are not allowed — "
@@ -60,6 +66,26 @@ def hook(payload: dict[str, Any]) -> None:
     if envelope is None:
         return  # Passthrough
 
+    command_excerpt: str | None = None
+    if tool_name == "Bash":
+        cmd = tool_input.get("command", "")
+        if isinstance(cmd, str):
+            command_excerpt = cmd
+    elif tool_name == "Read":
+        fp = tool_input.get("file_path", "")
+        if isinstance(fp, str):
+            command_excerpt = fp
+    cwd = payload.get("cwd")
+    log_decision(
+        hook_id=_HOOK_ID,
+        event="PreToolUse",
+        tool_name=tool_name if isinstance(tool_name, str) else None,
+        decision="deny",
+        reason=_DENY_REASON,
+        command_excerpt=command_excerpt,
+        session_id=str(payload.get("session_id", "")),
+        cwd=cwd if isinstance(cwd, str) else None,
+    )
     sys.stdout.write(json.dumps(envelope))
 
 

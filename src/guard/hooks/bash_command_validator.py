@@ -32,18 +32,22 @@ import os
 import re
 import sys
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from guard._utils import (
     GUARD_AUTONOMOUS_QUEUE_PATH,
-    GUARD_DECISIONS_PATH,
     _log_debug,
     append_jsonl,
     is_autonomous_mode,
     safe_main,
+    sanitize_for_stderr,
+)
+from guard._utils import (
+    log_decision as _log_decision_spec,
 )
 from guard.registry import ALWAYS_DENY, AUTONOMOUS_FEEDBACK, COMMANDS, Safety
+
+_HOOK_ID = "guard.bash_command_validator"
 
 # Corrupted internal tokens — always a bug, never valid user input
 CORRUPTED_TOKEN = re.compile(r"__NEW_LINE_[0-9a-f]+__")
@@ -63,31 +67,35 @@ SHELL_FRAGMENTS: frozenset[str] = frozenset(
 )
 
 
-def _decisions_log_path() -> Path:
-    return Path(GUARD_DECISIONS_PATH)
+_SPEC_DECISION_MAP: dict[str, Literal["allow", "deny", "ask", "pass"]] = {
+    "allow": "allow",
+    "deny": "deny",
+    "ask": "ask",
+    "passthrough": "pass",
+}
 
 
 def log_decision(
     command: str,
     decision: str,
     reason: str,
-    segments: int,
+    segments: int,  # noqa: ARG001 -- kept for callsite compatibility
 ) -> None:
     """Append a decision row to the JSONL log. Best-effort, never raises.
 
-    Delegates to ``append_jsonl`` for atomic O_APPEND semantics and the 4 KiB
-    record cap (POSIX atomicity envelope).
+    Delegates to ``guard._utils.log_decision`` (the spec-compliant writer per
+    ``docs/output-format.md`` schema v1).
     """
-    entry = {
-        "ts": datetime.now(UTC).isoformat(),
-        "command": command[:500],
-        "decision": decision,
-        "reason": reason[:200],
-        "segments": segments,
-        "session_id": os.environ.get("CLAUDE_SESSION_ID", ""),
-        "base_cmd": " ".join(command.split()[:2]),
-    }
-    append_jsonl(_decisions_log_path(), entry)
+    spec_decision = _SPEC_DECISION_MAP.get(decision, "pass")
+    _log_decision_spec(
+        hook_id=_HOOK_ID,
+        event="PreToolUse",
+        tool_name="Bash",
+        decision=spec_decision,
+        reason=reason,
+        command_excerpt=command,
+        session_id=os.environ.get("CLAUDE_SESSION_ID", ""),
+    )
 
 
 # Safe command prefixes — read-only / non-destructive.
@@ -749,7 +757,9 @@ _LOOP_RE = re.compile(r"^(for|while)\s+")
 def _hard_deny_check(command: str) -> None:
     """Exit 2 if the command contains a corrupted token or bare shell fragment."""
     if CORRUPTED_TOKEN.search(command):
-        sys.stderr.write(f"BLOCKED: corrupted internal token in command: {command[:100]}\n")
+        sys.stderr.write(
+            f"BLOCKED: corrupted internal token in command: {sanitize_for_stderr(command)}\n"
+        )
         sys.exit(2)
 
     cleaned = strip_comments(command)
@@ -757,10 +767,10 @@ def _hard_deny_check(command: str) -> None:
         return
     stripped = cleaned.strip()
     if stripped in SHELL_FRAGMENTS:
-        sys.stderr.write(f"BLOCKED: bare shell fragment: {stripped}\n")
+        sys.stderr.write(f"BLOCKED: bare shell fragment: {sanitize_for_stderr(stripped)}\n")
         sys.exit(2)
     if _LOOP_RE.match(stripped) and "; do" not in stripped and "\ndo" not in stripped:
-        sys.stderr.write(f"BLOCKED: incomplete loop (no body): {stripped[:100]}\n")
+        sys.stderr.write(f"BLOCKED: incomplete loop (no body): {sanitize_for_stderr(stripped)}\n")
         sys.exit(2)
 
 

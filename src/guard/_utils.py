@@ -1,46 +1,48 @@
 """Shared utilities for Claude Code guard hooks.
 
 Provides:
-- Rotating log handler for hook debugging
-- Circuit breaker to skip hooks after repeated failures
-- Skill state tracking for active session skills
+
 - Standard stdin parsing and PreToolUse decision helpers
-- JSONL decision logging at ``~/.claude/guard-decisions.jsonl``
+- Atomic JSONL append for the decision log at
+  ``~/.claude/guard-decisions.jsonl`` (schema v1, see
+  ``docs/output-format.md``)
+- ``log_decision()`` — the single canonical writer hooks call when they
+  emit an allow/deny/ask decision
+- ``is_autonomous_mode()`` — driven-agent context detection
+- ``sanitize_for_stderr()`` — strip control chars before writing user input
+  to stderr
 
 Usage in hooks::
 
     from guard._utils import (
-        check_circuit,
-        get_hook_logger,
-        record_failure,
-        record_success,
+        emit_pretooluse_decision,
+        log_decision,
+        safe_main,
     )
 
-    def main() -> None:
-        if not check_circuit("session_hook"):
-            return  # Circuit open, skip
-
-        logger = get_hook_logger("session_hook")
-        try:
-            # ... hook logic
-            record_success("session_hook")
-        except Exception:
-            record_failure("session_hook")
-            logger.exception("Hook failed")
+    def hook(payload):
+        # ... decide ...
+        log_decision(
+            hook_id="guard.my_hook",
+            event="PreToolUse",
+            tool_name="Bash",
+            decision="deny",
+            reason="...",
+            session_id=payload.get("session_id", ""),
+            cwd=payload.get("cwd"),
+        )
+        print(json.dumps(emit_pretooluse_decision("deny", "...")))
 """
 
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TracineHQ contributors
 from __future__ import annotations
 
-import contextlib
 import json
-import logging
 import os
+import re
 import sys
-import time
 from datetime import UTC, datetime
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -48,10 +50,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 # Storage locations
-TOOLKIT_HOME = Path(os.environ.get("GUARD_DATA_DIR", str(Path.home() / ".claude" / "guard")))
-LOG_DIR = TOOLKIT_HOME / "logs"
-CIRCUIT_FILE = TOOLKIT_HOME / ".hook_circuit.json"
-SKILL_STATE_DIR = TOOLKIT_HOME / ".skill_state"
+GUARD_HOME = Path(os.environ.get("GUARD_DATA_DIR", str(Path.home() / ".claude" / "guard")))
 
 # Decision JSONL log (env-overridable for tests)
 GUARD_DECISIONS_PATH = os.environ.get(
@@ -65,10 +64,6 @@ GUARD_AUTONOMOUS_QUEUE_PATH: str = os.environ.get(
     "GUARD_AUTONOMOUS_QUEUE_PATH",
     str(Path("~/.claude/guard-autonomous-queue.jsonl").expanduser()),
 )
-
-# Circuit breaker settings
-MAX_FAILURES = 3
-RESET_TIMEOUT_SECONDS = 300  # 5 minutes
 
 
 def _env_int(name: str, default: int) -> int:
@@ -106,155 +101,6 @@ LOOP_DETECTION_WINDOW_MINUTES = _env_int("GUARD_LOOP_WINDOW", 10)
 # Context budget settings
 CONTEXT_BUDGET_WARN_BYTES = _env_int("GUARD_CONTEXT_WARN", 500_000)
 CONTEXT_BUDGET_HARD_BYTES = _env_int("GUARD_CONTEXT_HARD", 1_000_000)
-
-# Output truncation settings
-OUTPUT_TRUNCATION_THRESHOLD = _env_int("GUARD_OUTPUT_TRUNCATION", 50_000)
-OUTPUT_STORE_DIR = Path(os.environ.get("GUARD_OUTPUT_DIR", str(TOOLKIT_HOME / "outputs")))
-OUTPUT_RETENTION_HOURS = _env_int("GUARD_OUTPUT_RETENTION", 24)
-
-
-def get_hook_logger(name: str) -> logging.Logger:
-    """Get a logger for hook debugging.
-
-    Logs are written to ``$GUARD_DATA_DIR/logs/hooks.log`` with rotation.
-
-    Args:
-        name: Hook name (e.g., ``session_hook``, ``session_start_hook``).
-
-    Returns:
-        Configured logger instance.
-    """
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-    logger = logging.getLogger(f"hook.{name}")
-
-    # Only add handler if not already configured
-    if not logger.handlers:
-        handler = RotatingFileHandler(
-            LOG_DIR / "hooks.log",
-            maxBytes=1_000_000,  # 1MB
-            backupCount=3,
-        )
-        handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
-        logger.addHandler(handler)
-        logger.setLevel(logging.DEBUG)
-
-    return logger
-
-
-def check_circuit(hook_name: str = "") -> bool:
-    """Check if a specific hook should execute.
-
-    Returns ``True`` if the circuit is closed (hook should run) or ``False`` if
-    the circuit is open (hook should skip).
-
-    After ``MAX_FAILURES`` consecutive failures for this hook, its circuit
-    opens for ``RESET_TIMEOUT_SECONDS``. Other hooks are unaffected.
-    """
-    if not CIRCUIT_FILE.exists():
-        return True
-
-    try:
-        data = json.loads(CIRCUIT_FILE.read_text())
-    except (json.JSONDecodeError, OSError):
-        return True
-
-    hook_data = data.get(hook_name, {}) if isinstance(data, dict) else {}
-    failures = int(hook_data.get("failures", 0))
-    last_failure = float(hook_data.get("last_failure", 0))
-
-    if failures >= MAX_FAILURES:
-        return time.time() - last_failure > RESET_TIMEOUT_SECONDS
-    return True
-
-
-def record_success(hook_name: str = "") -> None:
-    """Record a successful hook execution.
-
-    Removes this hook's entry from the circuit breaker state. Other hooks'
-    state is preserved.
-    """
-    try:
-        if not CIRCUIT_FILE.exists():
-            return
-        data = json.loads(CIRCUIT_FILE.read_text())
-        if hook_name in data:
-            del data[hook_name]
-        if data:
-            CIRCUIT_FILE.write_text(json.dumps(data))
-        else:
-            CIRCUIT_FILE.unlink()
-    except (json.JSONDecodeError, OSError):
-        pass
-
-
-def record_failure(hook_name: str = "") -> None:
-    """Record a failed hook execution for a specific hook.
-
-    Increments this hook's failure count. After ``MAX_FAILURES``, only this
-    hook's circuit opens.
-    """
-    try:
-        data: dict[str, Any] = {}
-        if CIRCUIT_FILE.exists():
-            with contextlib.suppress(json.JSONDecodeError):
-                data = json.loads(CIRCUIT_FILE.read_text())
-
-        hook_data = data.get(hook_name, {"failures": 0, "last_failure": 0})
-        hook_data["failures"] = hook_data.get("failures", 0) + 1
-        hook_data["last_failure"] = time.time()
-        data[hook_name] = hook_data
-
-        CIRCUIT_FILE.parent.mkdir(parents=True, exist_ok=True)
-        CIRCUIT_FILE.write_text(json.dumps(data))
-    except OSError:
-        pass
-
-
-SKILL_STATE_MAX_AGE_SECONDS = 3600  # 1 hour
-
-
-def get_active_skill(session_id: str) -> str | None:
-    """Read the current active skill from a session state file.
-
-    Returns ``None`` if no state file exists, the file is stale (>1 hour),
-    or it is unreadable.
-    """
-    state_path = SKILL_STATE_DIR / f"{session_id}.json"
-    if not state_path.exists():
-        return None
-    try:
-        mtime = state_path.stat().st_mtime
-        if time.time() - mtime > SKILL_STATE_MAX_AGE_SECONDS:
-            state_path.unlink(missing_ok=True)
-            return None
-        state = json.loads(state_path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
-
-    skill_name = state.get("skill_name") if isinstance(state, dict) else None
-    if isinstance(skill_name, str):
-        return skill_name
-    return None
-
-
-def set_active_skill(session_id: str, skill_name: str) -> None:
-    """Set the active skill for a session via a state file."""
-    SKILL_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    state_path = SKILL_STATE_DIR / f"{session_id}.json"
-    state = {
-        "skill_name": skill_name,
-        "started_at": datetime.now(UTC).isoformat(),
-    }
-    with contextlib.suppress(OSError):
-        state_path.write_text(json.dumps(state))
-
-
-def clear_active_skill(session_id: str) -> None:
-    """Clear the active skill state file for a session."""
-    state_path = SKILL_STATE_DIR / f"{session_id}.json"
-    with contextlib.suppress(OSError):
-        state_path.unlink(missing_ok=True)
 
 
 # === Shared Hook Utilities ===
@@ -314,6 +160,52 @@ def append_jsonl(path: str | Path, entry: dict[str, Any]) -> None:
         pass
 
 
+def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output-format.md
+    *,
+    hook_id: str,
+    event: str,
+    tool_name: str | None,
+    decision: Literal["allow", "deny", "ask", "pass", "defer"],
+    reason: str,
+    command_excerpt: str | None = None,
+    session_id: str = "",
+    cwd: str | None = None,
+) -> None:
+    """Append a spec-compliant decision record to the JSONL log.
+
+    Conforms to ``docs/output-format.md`` schema v1. Truncates
+    ``command_excerpt`` to 4096 chars and ``reason`` to 1024 chars to fit
+    within the 4 KiB record envelope. Fail-safe: never raises; logging
+    failures are silent.
+
+    Args:
+        hook_id: Namespaced hook id, e.g. ``"guard.bash_command_validator"``.
+        event: Claude Code event name (typically ``"PreToolUse"``).
+        tool_name: ``Bash``/``Edit``/``Read``/etc., or ``None``.
+        decision: One of ``allow``/``deny``/``ask``/``pass``/``defer``.
+        reason: Human-readable rationale (truncated to 1024 chars).
+        command_excerpt: Optional bash-command excerpt (truncated to 4096).
+        session_id: Claude Code session id.
+        cwd: Optional working directory string.
+    """
+    timestamp = datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    record: dict[str, Any] = {
+        "schema_version": 1,
+        "timestamp": timestamp,
+        "hook_id": hook_id,
+        "event": event,
+        "tool_name": tool_name,
+        "decision": decision,
+        "reason": reason[:1024],
+        "session_id": session_id,
+    }
+    if command_excerpt is not None:
+        record["command_excerpt"] = command_excerpt[:4096]
+    if cwd is not None:
+        record["cwd"] = cwd
+    append_jsonl(GUARD_DECISIONS_PATH, record)
+
+
 def make_decision(decision: str, reason: str) -> str:
     """Build a ``hookSpecificOutput`` JSON string for PreToolUse decisions.
 
@@ -367,6 +259,19 @@ def emit_pretooluse_decision(
     if additional_context is not None:
         envelope["hookSpecificOutput"]["additionalContext"] = additional_context
     return envelope
+
+
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def sanitize_for_stderr(text: str, *, max_len: int = 200) -> str:
+    """Strip control characters and truncate text for safe stderr output.
+
+    Replaces ASCII/C1 control chars with ``?`` so attacker-controlled command
+    fragments cannot inject ANSI escape sequences, terminal title-setters, or
+    other control sequences into developer terminals.
+    """
+    return _CONTROL_CHARS_RE.sub("?", text)[:max_len]
 
 
 def safe_main(hook_fn: Callable[[dict[str, Any]], None]) -> None:

@@ -76,6 +76,28 @@ class TestDecide:
         reason = result["hookSpecificOutput"]["permissionDecisionReason"]
         assert "ai-toolkit" not in reason.lower()
 
+    def test_linux_path_read_denied(self):
+        """Linux subagent output dir is /tmp/claude-<pid>/... (no /private prefix)."""
+        result = decide(
+            "Read",
+            {"file_path": "/tmp/claude-12345/proj/sess/tasks/abc.output"},  # noqa: S108
+        )
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_linux_path_cat_denied(self):
+        result = decide(
+            "Bash",
+            {"command": "cat /tmp/claude-99/proj/sess/tasks/abc.output"},
+        )
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_unrelated_dot_output_passes(self):
+        """Paths containing .output mid-string outside /tasks/ must not match."""
+        assert decide("Read", {"file_path": "/Users/dev/x.output.bak"}) is None
+        assert decide("Read", {"file_path": "/var/log/foo.output_old"}) is None
+
 
 class TestDecideRobustness:
     def test_numeric_file_path(self):

@@ -28,7 +28,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from guard._utils import emit_pretooluse_decision, safe_main
+from guard._utils import emit_pretooluse_decision, log_decision, safe_main
+
+_HOOK_ID = "guard.subagent_scope"
 
 
 def load_scope(cwd: str) -> dict[str, Any] | None:
@@ -144,6 +146,17 @@ def hook(payload: dict[str, Any]) -> None:
         f"If you need to modify other files, the task scope needs updating."
     )
     envelope = emit_pretooluse_decision("deny", reason)
+    tool_name = payload.get("tool_name", "")
+    log_decision(
+        hook_id=_HOOK_ID,
+        event="PreToolUse",
+        tool_name=tool_name if isinstance(tool_name, str) else None,
+        decision="deny",
+        reason=reason,
+        command_excerpt=file_path,
+        session_id=str(payload.get("session_id", "")),
+        cwd=cwd,
+    )
     sys.stdout.write(json.dumps(envelope))
 
 
