@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# venv
+.venv/
+venv/
+.python-version
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Local Claude Code state (dev-loop progress, scope files, checkpoints)
+.claude/
+
+# uv
+uv.lock
