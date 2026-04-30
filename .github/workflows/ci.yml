@@ -23,3 +23,5 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy src/
       - run: uv run pytest
+      - name: E2E plugin install smoke test
+        run: uv run pytest tests/integration/test_plugin_e2e.py -v

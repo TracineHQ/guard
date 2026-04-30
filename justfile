@@ -19,5 +19,8 @@ typecheck:
 test:
     uv run pytest
 
+test-e2e:
+    uv run pytest tests/integration/test_plugin_e2e.py -v
+
 test-cov:
     uv run pytest --cov=src/guard --cov-report=term-missing
