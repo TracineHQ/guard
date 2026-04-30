@@ -59,9 +59,9 @@
 ## 7. Examples
 
 ```json
-{"schema_version":1,"timestamp":"2026-04-29T14:32:11.123456Z","hook_id":"guard.bash_command_validator","event":"PreToolUse","tool_name":"Bash","decision":"allow","reason":"Read-only command","command_excerpt":"ls -la","session_id":"abc-123","cwd":"/Users/dev/project"}
-{"schema_version":1,"timestamp":"2026-04-29T14:32:12.987654Z","hook_id":"guard.bash_command_validator","event":"PreToolUse","tool_name":"Bash","decision":"deny","reason":"git add -A is denied: stages all files indiscriminately","command_excerpt":"git add -A","session_id":"abc-123","cwd":"/Users/dev/project"}
-{"schema_version":1,"timestamp":"2026-04-29T14:32:13.456789Z","hook_id":"guard.protected_files","event":"PreToolUse","tool_name":"Edit","decision":"ask","reason":"Edit to .env requires user confirmation","command_excerpt":null,"session_id":"abc-123","cwd":"/Users/dev/project"}
+{"schema_version":1,"timestamp":"2026-04-29T14:32:11.123456Z","hook_id":"guard.bash_command_validator","event":"PreToolUse","tool_name":"Bash","decision":"allow","reason":"Read-only command","command_excerpt":"ls -la","session_id":"abc-123","cwd":"/home/alice/project"}
+{"schema_version":1,"timestamp":"2026-04-29T14:32:12.987654Z","hook_id":"guard.bash_command_validator","event":"PreToolUse","tool_name":"Bash","decision":"deny","reason":"git add -A is denied: stages all files indiscriminately","command_excerpt":"git add -A","session_id":"abc-123","cwd":"/home/alice/project"}
+{"schema_version":1,"timestamp":"2026-04-29T14:32:13.456789Z","hook_id":"guard.protected_files","event":"PreToolUse","tool_name":"Edit","decision":"ask","reason":"Edit to .env requires user confirmation","command_excerpt":null,"session_id":"abc-123","cwd":"/home/alice/project"}
 ```
 
 ## 8. Versioning
