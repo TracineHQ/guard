@@ -152,6 +152,68 @@ class TestDecideIntegration:
         assert decide("git status") is None
 
 
+class TestFileBasedMessage:
+    def test_file_message_with_ai_attribution_denied(self, tmp_path):
+        msg_file = tmp_path / "msg.txt"
+        msg_file.write_text("Co-Authored-By: Claude <noreply@anthropic.com>\n", encoding="utf-8")
+        result = decide(f"git commit -F {msg_file}")
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_file_message_clean_passes(self, tmp_path):
+        msg_file = tmp_path / "msg.txt"
+        msg_file.write_text("Add feature\n", encoding="utf-8")
+        assert decide(f"git commit -F {msg_file}") is None
+
+    def test_file_message_long_form_flag(self, tmp_path):
+        msg_file = tmp_path / "msg.txt"
+        msg_file.write_text("Co-Authored-By: Claude <noreply@anthropic.com>\n", encoding="utf-8")
+        result = decide(f"git commit --file={msg_file}")
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_file_message_long_form_with_space(self, tmp_path):
+        msg_file = tmp_path / "msg.txt"
+        msg_file.write_text("Generated with Claude Code\n", encoding="utf-8")
+        result = decide(f"git commit --file {msg_file}")
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_file_message_short_flag_equals(self, tmp_path):
+        msg_file = tmp_path / "msg.txt"
+        msg_file.write_text("Co-Authored-By: Claude <noreply@anthropic.com>\n", encoding="utf-8")
+        result = decide(f"git commit -F={msg_file}")
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_file_message_relative_path_resolved_to_cwd(self, tmp_path):
+        msg_file = tmp_path / "msg.txt"
+        msg_file.write_text("Co-Authored-By: Claude <noreply@anthropic.com>\n", encoding="utf-8")
+        result = decide("git commit -F msg.txt", cwd=str(tmp_path))
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_file_message_missing_file_passes(self):
+        assert decide("git commit -F /nonexistent/path/to/msg.txt") is None
+
+    def test_file_message_oversized_file_passes(self, tmp_path):
+        msg_file = tmp_path / "huge.txt"
+        msg_file.write_text("x" * (200 * 1024), encoding="utf-8")
+        # No AI attribution; oversize cap means we skip the file entirely.
+        assert decide(f"git commit -F {msg_file}") is None
+
+    def test_file_message_oversized_with_ai_text_passes(self, tmp_path):
+        # Even if a huge file contains AI attribution, the cap protects from
+        # regex DoS — we ignore the file rather than scan it. Caller's
+        # `git commit` will succeed (or fail) on its own; this hook stays out.
+        msg_file = tmp_path / "huge.txt"
+        msg_file.write_text(
+            "Co-Authored-By: Claude <noreply@anthropic.com>\n" + ("x" * (200 * 1024)),
+            encoding="utf-8",
+        )
+        assert decide(f"git commit -F {msg_file}") is None
+
+
 def _run_hook(command):
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
     result = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path

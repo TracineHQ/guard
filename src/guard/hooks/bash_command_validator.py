@@ -66,6 +66,11 @@ SHELL_FRAGMENTS: frozenset[str] = frozenset(
     {"do", "done", "then", "else", "fi", "elif", "esac", "in"}
 )
 
+# HTTP-fetch CLIs that, when piped into a shell, form the classic
+# ``curl ... | sh`` RCE pattern. Denied unconditionally regardless of mode.
+_HTTP_FETCH_CMDS: frozenset[str] = frozenset({"curl", "wget", "fetch", "http", "httpie", "https"})
+_PIPE_SHELL_CMDS: frozenset[str] = frozenset({"sh", "bash", "zsh", "dash", "fish", "ksh", "ash"})
+
 
 _SPEC_DECISION_MAP: dict[str, Literal["allow", "deny", "ask", "pass"]] = {
     "allow": "allow",
@@ -673,6 +678,36 @@ def decide(command: str) -> dict[str, str] | None:  # noqa: PLR0911 -- top-level
     return _evaluate_segments(command, segments, has_comments=has_comments)
 
 
+def _is_pipe_to_shell(segments: list[str]) -> bool:
+    """Detect ``curl|wget|... | sh|bash|...`` pipelines.
+
+    The segments list is what ``split_pipeline`` produced — already split on
+    pipe boundaries — so consecutive entries represent producer/consumer pairs.
+    Returns ``True`` if any HTTP-fetch segment feeds directly into a shell
+    interpreter segment.
+    """
+    if len(segments) < 2:  # noqa: PLR2004 -- "two segments minimum to form a producer|consumer pair"
+        return False
+    for i in range(len(segments) - 1):
+        producer = segments[i].strip()
+        consumer = segments[i + 1].strip()
+        if not producer or not consumer:
+            continue
+        prod_token = producer.split(maxsplit=1)[0]
+        cons_token = consumer.split(maxsplit=1)[0]
+        if prod_token in _HTTP_FETCH_CMDS and cons_token in _PIPE_SHELL_CMDS:
+            return True
+    return False
+
+
+_PIPE_TO_SHELL_REASON = (
+    "Blocked: piping HTTP fetch output (curl/wget/...) directly into a shell "
+    "(sh/bash/zsh/...) is a classic remote-code-execution pattern with no "
+    "legitimate use in an agent context. Download to a file first, inspect "
+    "it, then run it explicitly if you really mean to."
+)
+
+
 def _pre_evaluate_dangerous(command: str, segments: list[str]) -> dict[str, str] | None:
     r"""Pre-deny passes that fire in both interactive and autonomous mode.
 
@@ -687,6 +722,9 @@ def _pre_evaluate_dangerous(command: str, segments: list[str]) -> dict[str, str]
     the normal evaluator.
     """
     n_segments = len(segments) or 1
+    if _is_pipe_to_shell(segments):
+        log_decision(command, "deny", "pipe-to-shell", n_segments)
+        return _deny(_PIPE_TO_SHELL_REASON)
     for segment in segments:
         if has_dangerous_constructs(segment):
             reason = (

@@ -12,12 +12,18 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import sys
+from pathlib import Path
 from typing import Any
 
-from guard._utils import emit_pretooluse_decision, log_decision, safe_main
+from guard._utils import _log_debug, emit_pretooluse_decision, log_decision, safe_main
 
 _HOOK_ID = "guard.commit_message_validator"
+
+# Cap on commit-message file reads. Real commit messages are tiny; anything
+# bigger is either accidental or a soft-DoS attempt against the regex pipeline.
+_FILE_MESSAGE_MAX_BYTES = 64 * 1024
 
 # Layer 1: Known AI tool emails (high confidence, zero false positives)
 AI_EMAILS: list[str] = [
@@ -94,12 +100,72 @@ def check_generated_footers(message: str) -> str | None:
     return m.group(0) if m else None
 
 
-def extract_commit_message(command: str) -> str | None:
+def _read_message_file(path: str, cwd: str | None) -> str | None:
+    """Read a commit-message file safely, returning its text or ``None``.
+
+    Resolves ``~`` and, for relative paths, joins against ``cwd`` (the hook
+    payload's reported working directory). Caps reads at
+    ``_FILE_MESSAGE_MAX_BYTES`` so an attacker-supplied huge file cannot
+    soft-DoS the regex pipeline. Any I/O failure returns ``None`` — git will
+    surface the underlying error to the user when the commit runs.
+    """
+    if not path:
+        return None
+    p = Path(path).expanduser()
+    if not p.is_absolute() and cwd:
+        p = Path(cwd) / p
+    try:
+        with p.open("rb") as fh:
+            raw = fh.read(_FILE_MESSAGE_MAX_BYTES + 1)
+    except OSError as exc:
+        _log_debug(f"commit_message_validator: cannot read {path!r}: {exc}")
+        return None
+    if len(raw) > _FILE_MESSAGE_MAX_BYTES:
+        _log_debug(
+            f"commit_message_validator: {path!r} exceeds {_FILE_MESSAGE_MAX_BYTES} bytes; ignoring"
+        )
+        return None
+    return raw.decode("utf-8", errors="replace")
+
+
+def _extract_file_flag_path(command: str) -> str | None:
+    """Return the path argument to ``-F`` / ``--file=`` / ``-F=``, or ``None``.
+
+    Tokenizes via ``shlex`` so quoted paths and embedded spaces are handled.
+    Falls back to ``None`` if the command can't be parsed (unbalanced quotes
+    etc.) — the caller treats that as "no file flag," and the eventual
+    ``git commit`` will fail on its own terms.
+    """
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in ("-F", "--file"):
+            if i + 1 < len(tokens):
+                return tokens[i + 1]
+            return None
+        if tok.startswith("--file="):
+            return tok[len("--file=") :]
+        if tok.startswith("-F="):
+            return tok[len("-F=") :]
+        i += 1
+    return None
+
+
+def extract_commit_message(command: str, cwd: str | None = None) -> str | None:
     """Extract the commit message from a ``git commit`` command string.
 
     Handles ``-m "msg"``, ``-m 'msg'``, ``-am "msg"``, ``--message="msg"``,
-    ``--message "msg"``, and heredoc ``$(cat <<'EOF' ... EOF)`` patterns.
-    Returns the message text or ``None`` if not a ``git commit -m`` form.
+    ``--message "msg"``, heredoc ``$(cat <<'EOF' ... EOF)``, and
+    ``-F <path>`` / ``--file=<path>`` (file-backed messages).
+
+    For file-backed messages, the file is read from ``cwd`` (or absolute /
+    home-relative paths) and capped at ``_FILE_MESSAGE_MAX_BYTES``. Returns
+    the message text or ``None`` if the command isn't a recognized
+    message-bearing ``git commit`` form (or the file can't be read).
     """
     if not command or "git commit" not in command:
         return None
@@ -129,6 +195,10 @@ def extract_commit_message(command: str) -> str | None:
     if short_flag_match:
         return short_flag_match.group(2)
 
+    file_path = _extract_file_flag_path(command)
+    if file_path is not None:
+        return _read_message_file(file_path, cwd)
+
     return None
 
 
@@ -139,9 +209,9 @@ _BLOCK_REASON_PREFIX = (
 )
 
 
-def decide(command: str) -> dict[str, Any] | None:
+def decide(command: str, cwd: str | None = None) -> dict[str, Any] | None:
     """Return a deny envelope if AI attribution is found, else ``None``."""
-    message = extract_commit_message(command)
+    message = extract_commit_message(command, cwd=cwd)
     if message is None:
         return None
 
@@ -166,12 +236,13 @@ def hook(payload: dict[str, Any]) -> None:
     if not isinstance(command, str) or "git commit" not in command:
         return
 
-    envelope = decide(command)
+    cwd = payload.get("cwd")
+    cwd_str = cwd if isinstance(cwd, str) else None
+    envelope = decide(command, cwd=cwd_str)
     if envelope is None:
         return
 
     hso = envelope.get("hookSpecificOutput", {})
-    cwd = payload.get("cwd")
     log_decision(
         hook_id=_HOOK_ID,
         event="PreToolUse",
@@ -180,7 +251,7 @@ def hook(payload: dict[str, Any]) -> None:
         reason=hso.get("permissionDecisionReason", ""),
         command_excerpt=command,
         session_id=str(payload.get("session_id", "")),
-        cwd=cwd if isinstance(cwd, str) else None,
+        cwd=cwd_str,
     )
     sys.stdout.write(json.dumps(envelope))
     sys.exit(2)
