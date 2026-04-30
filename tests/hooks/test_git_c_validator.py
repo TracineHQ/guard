@@ -167,3 +167,26 @@ class TestPassthrough:
     def test_non_git_passes_through(self):
         decision, _ = _run("ls -la")
         assert decision == "passthrough"
+
+
+class TestCommitMessageReuse:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git commit -C HEAD",
+            "git commit -CHEAD",
+            "git commit -C HEAD~1 -m oops",
+            "git commit --reuse-message=HEAD",
+            "git commit --reuse-message HEAD",
+            "git commit -a -C HEAD",
+        ],
+    )
+    def test_reuse_is_denied(self, command):
+        decision, code = _run(command)
+        assert decision == "deny"
+        assert code == 2
+
+    def test_lowercase_c_passes_through(self):
+        # `git commit -c HEAD` opens an editor with template; not silent reuse.
+        decision, _ = _run("git commit -c HEAD")
+        assert decision == "passthrough"
