@@ -15,6 +15,7 @@ from guard._utils import (
     GUARD_DECISIONS_PATH,
     _env_int,
     emit_pretooluse_decision,
+    is_autonomous_mode,
 )
 
 SRC_DIR = str(Path(__file__).resolve().parent.parent / "src")
@@ -257,6 +258,22 @@ def test_emit_pretooluse_decision_omits_optional_when_none() -> None:
 
 
 # === _env_int: malformed/unset handling ===
+
+
+def test_is_autonomous_mode_when_unset() -> None:
+    with mock.patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("CLAUDE_AUTONOMOUS", None)
+        assert is_autonomous_mode() is False
+
+
+def test_is_autonomous_mode_when_set() -> None:
+    with mock.patch.dict(os.environ, {"CLAUDE_AUTONOMOUS": "1"}):
+        assert is_autonomous_mode() is True
+
+
+def test_is_autonomous_mode_when_set_to_zero() -> None:
+    with mock.patch.dict(os.environ, {"CLAUDE_AUTONOMOUS": "0"}):
+        assert is_autonomous_mode() is False
 
 
 def test_env_int_unset_returns_default() -> None:

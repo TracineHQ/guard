@@ -20,6 +20,7 @@ from guard.hooks.bash_command_validator import (
     strip_comments,
     strip_inline_comment,
 )
+from guard.registry import AUTONOMOUS_FEEDBACK
 
 HOOK_PATH = (
     Path(__file__).resolve().parents[2] / "src" / "guard" / "hooks" / "bash_command_validator.py"
@@ -376,3 +377,62 @@ class TestRobustness:
         )
         assert result.returncode == 0
         assert result.stdout.strip() == ""
+
+
+class TestAutonomousMode:
+    """Direct decide() calls under CLAUDE_AUTONOMOUS=1.
+
+    Locks in the strict-mode contract for subagents / driven agents at the
+    unit level (no subprocess overhead).
+    """
+
+    def test_unknown_command_denied(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("CLAUDE_AUTONOMOUS", "1")
+        monkeypatch.setenv("GUARD_DECISIONS_PATH", str(tmp_path / "log.jsonl"))
+        monkeypatch.setenv("GUARD_AUTONOMOUS_QUEUE_PATH", str(tmp_path / "queue.jsonl"))
+        result = decide("flarbnoz --gronk")
+        assert result is not None
+        assert result["permissionDecision"] == "deny"
+
+    def test_safe_command_allowed(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("CLAUDE_AUTONOMOUS", "1")
+        monkeypatch.setenv("GUARD_DECISIONS_PATH", str(tmp_path / "log.jsonl"))
+        result = decide("ls -la")
+        assert result is not None
+        assert result["permissionDecision"] == "allow"
+
+    def test_autonomous_feedback_message_used(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("CLAUDE_AUTONOMOUS", "1")
+        monkeypatch.setenv("GUARD_DECISIONS_PATH", str(tmp_path / "log.jsonl"))
+        monkeypatch.setenv("GUARD_AUTONOMOUS_QUEUE_PATH", str(tmp_path / "queue.jsonl"))
+        # `rm` is in AUTONOMOUS_FEEDBACK
+        result = decide("rm somefile")
+        assert result is not None
+        assert result["permissionDecision"] == "deny"
+        assert result["permissionDecisionReason"] == AUTONOMOUS_FEEDBACK["rm"]
+
+    def test_default_deny_for_unregistered(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("CLAUDE_AUTONOMOUS", "1")
+        monkeypatch.setenv("GUARD_DECISIONS_PATH", str(tmp_path / "log.jsonl"))
+        monkeypatch.setenv("GUARD_AUTONOMOUS_QUEUE_PATH", str(tmp_path / "queue.jsonl"))
+        result = decide("noexist --flag")
+        assert result is not None
+        assert result["permissionDecision"] == "deny"
+        assert "autonomous mode" in result["permissionDecisionReason"].lower()
+
+    def test_git_status_allowed_autonomous(self, monkeypatch, tmp_path):
+        # `git status` is on SAFE_PREFIXES — must allow even in autonomous mode.
+        monkeypatch.setenv("CLAUDE_AUTONOMOUS", "1")
+        monkeypatch.setenv("GUARD_DECISIONS_PATH", str(tmp_path / "log.jsonl"))
+        result = decide("git status")
+        assert result is not None
+        assert result["permissionDecision"] == "allow"
+
+    def test_git_push_denied_autonomous(self, monkeypatch, tmp_path):
+        # `git push` is in AUTONOMOUS_FEEDBACK — must deny.
+        monkeypatch.setenv("CLAUDE_AUTONOMOUS", "1")
+        monkeypatch.setenv("GUARD_DECISIONS_PATH", str(tmp_path / "log.jsonl"))
+        monkeypatch.setenv("GUARD_AUTONOMOUS_QUEUE_PATH", str(tmp_path / "queue.jsonl"))
+        result = decide("git push origin main")
+        assert result is not None
+        assert result["permissionDecision"] == "deny"

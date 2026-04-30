@@ -35,8 +35,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from guard._utils import GUARD_DECISIONS_PATH, safe_main
-from guard.registry import ALWAYS_DENY, COMMANDS, Safety
+from guard._utils import (
+    GUARD_AUTONOMOUS_QUEUE_PATH,
+    GUARD_DECISIONS_PATH,
+    _log_debug,
+    is_autonomous_mode,
+    safe_main,
+)
+from guard.registry import ALWAYS_DENY, AUTONOMOUS_FEEDBACK, COMMANDS, Safety
 
 # Corrupted internal tokens — always a bug, never valid user input
 CORRUPTED_TOKEN = re.compile(r"__NEW_LINE_[0-9a-f]+__")
@@ -350,16 +356,22 @@ def _is_safe_base_cmd(segment: str) -> bool:
     return False
 
 
-def is_safe_command(segment: str, *, is_piped: bool = False) -> bool:
-    """Return ``True`` if a segment matches a known-safe prefix."""
+def is_safe_command(segment: str, *, is_piped: bool = False, autonomous: bool = False) -> bool:
+    """Return ``True`` if a segment matches a known-safe prefix.
+
+    In autonomous mode, git segments are NOT deferred to git_c_validator —
+    we must evaluate them here so the strict default-deny path can fire.
+    """
     if not segment:
         return True
     if has_dangerous_constructs(segment):
         return False
     if is_piped:
         return _matches_prefix(segment, SAFE_PIPE_COMMANDS)
-    # Defer git segments to git_c_validator.
-    if segment.startswith("git ") or segment == "git":
+    # In interactive mode, defer git segments to git_c_validator. In autonomous
+    # mode, fall through so SAFE_PREFIXES (e.g. `git status`, `git log`) is
+    # consulted directly — anything not on the read-only allowlist is denied.
+    if not autonomous and (segment.startswith("git ") or segment == "git"):
         return True
     if _matches_prefix(segment, SAFE_PREFIXES):
         return True
@@ -452,6 +464,52 @@ def _get_always_deny(segments: list[str]) -> dict[str, str] | None:
     return None
 
 
+# === Autonomous-mode strict safety net ===
+# When CLAUDE_AUTONOMOUS=1, there is no human at the prompt to answer a
+# permission ask. Anything not on the safe-prefix allowlist is denied with
+# either an AUTONOMOUS_FEEDBACK message (if the prefix is registered) or a
+# generic default-deny.
+
+DEFAULT_AUTONOMOUS_DENY = (
+    "This command is not on the safe-prefix allowlist. In autonomous mode "
+    "(CLAUDE_AUTONOMOUS=1) guard default-denies anything not explicitly safe. "
+    "If this is a known-safe command, add a rule to guard's registry."
+)
+
+
+def get_autonomous_deny(segment: str) -> dict[str, str]:
+    """Return a deny envelope for an autonomous-mode segment.
+
+    Matches the segment against ``AUTONOMOUS_FEEDBACK`` (longest prefix wins).
+    Falls back to ``DEFAULT_AUTONOMOUS_DENY`` when no specific feedback exists.
+    """
+    for prefix, feedback in sorted(AUTONOMOUS_FEEDBACK.items(), key=lambda kv: -len(kv[0])):
+        if segment == prefix or segment.startswith(prefix + " "):
+            return _deny(feedback)
+    return _deny(DEFAULT_AUTONOMOUS_DENY)
+
+
+def queue_denied_command(command: str) -> None:
+    """Best-effort append a denied command to the autonomous review queue.
+
+    The queue is a JSONL file at ``GUARD_AUTONOMOUS_QUEUE_PATH``; a human can
+    review it after the session ends. I/O failures are swallowed — the hook
+    must never block on logging.
+    """
+    try:
+        entry = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "command": command[:500],
+            "session_id": os.environ.get("CLAUDE_SESSION_ID", ""),
+        }
+        queue_path = Path(GUARD_AUTONOMOUS_QUEUE_PATH)
+        queue_path.parent.mkdir(parents=True, exist_ok=True)
+        with queue_path.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError as exc:
+        _log_debug(f"queue_denied_command: {exc}")
+
+
 def get_credential_leak_deny(command: str) -> dict[str, str] | None:
     """Return a deny dict for commands that print live credentials, else ``None``."""
     for pattern, label in CREDENTIAL_LEAK_PATTERNS:
@@ -510,10 +568,7 @@ def decide(command: str) -> dict[str, str] | None:
         return leak
 
     cleaned = strip_comments(command)
-    if not cleaned:
-        return None
-
-    segments = split_pipeline(cleaned)
+    segments = split_pipeline(cleaned) if cleaned else []
     if not segments:
         return None
 
@@ -521,6 +576,14 @@ def decide(command: str) -> dict[str, str] | None:
     if deny is not None:
         log_decision(command, "deny", "always-deny", len(segments))
         return deny
+
+    # === Autonomous mode: strict default-deny ===
+    # Subagents and other driven-agent contexts have no human at the prompt.
+    # Anything not explicitly on the safe-prefix allowlist is denied here so
+    # the agent gets a structured rejection (with feedback) instead of a
+    # silent passthrough that would otherwise hang waiting for permission.
+    if is_autonomous_mode():
+        return _evaluate_autonomous(command, segments)
 
     has_comments = command.strip() != cleaned
     has_pipes = len(segments) > 1
@@ -530,6 +593,46 @@ def decide(command: str) -> dict[str, str] | None:
         return None
 
     return _evaluate_segments(command, segments, has_comments=has_comments)
+
+
+def _matches_autonomous_feedback(segment: str) -> bool:
+    """Return True if the segment matches an AUTONOMOUS_FEEDBACK prefix.
+
+    AUTONOMOUS_FEEDBACK entries are commands that need explicit human approval
+    in driven-agent contexts, so they must NOT be allowed by SAFE_PREFIXES
+    coverage (e.g. `git branch -d` falls under the broader `git branch` safe
+    prefix, but is registered separately as feedback-required).
+    """
+    for prefix in AUTONOMOUS_FEEDBACK:
+        if segment == prefix or segment.startswith(prefix + " "):
+            return True
+    return False
+
+
+def _evaluate_autonomous(command: str, segments: list[str]) -> dict[str, str]:
+    """Walk every segment under autonomous strict-mode rules.
+
+    Returns deny on first non-safe segment (with optional AUTONOMOUS_FEEDBACK
+    message), or allow if every segment is on the safe-prefix allowlist.
+
+    AUTONOMOUS_FEEDBACK matches take priority over SAFE_PREFIXES — a command
+    explicitly registered as feedback-required is denied even if a broader
+    safe prefix would otherwise cover it.
+    """
+    n_segments = len(segments)
+    for i, segment in enumerate(segments):
+        if not _matches_autonomous_feedback(segment) and is_safe_command(
+            segment, is_piped=(i > 0), autonomous=True
+        ):
+            continue
+        result = get_autonomous_deny(segment)
+        reason = result["permissionDecisionReason"]
+        log_decision(command, "deny", reason, n_segments)
+        queue_denied_command(command)
+        return result
+    reason = "All command segments are safe (autonomous mode)"
+    log_decision(command, "allow", reason, n_segments)
+    return _allow(reason)
 
 
 _LOOP_RE = re.compile(r"^(for|while)\s+")

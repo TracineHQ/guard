@@ -58,6 +58,14 @@ GUARD_DECISIONS_PATH = os.environ.get(
     "GUARD_DECISIONS_PATH", str(Path("~/.claude/guard-decisions.jsonl").expanduser())
 )
 
+# Autonomous-mode denial queue (env-overridable for tests). Mirrors the
+# GUARD_DECISIONS_PATH pattern — driven-agent contexts append denied commands
+# here so a human can review them after the session ends.
+GUARD_AUTONOMOUS_QUEUE_PATH: str = os.environ.get(
+    "GUARD_AUTONOMOUS_QUEUE_PATH",
+    str(Path("~/.claude/guard-autonomous-queue.jsonl").expanduser()),
+)
+
 # Circuit breaker settings
 MAX_FAILURES = 3
 RESET_TIMEOUT_SECONDS = 300  # 5 minutes
@@ -78,6 +86,17 @@ def _log_debug(msg: str) -> None:
     """Emit a debug line to stderr when ``GUARD_DEBUG=1``."""
     if os.environ.get("GUARD_DEBUG") == "1":
         sys.stderr.write(f"[guard] {msg}\n")
+
+
+def is_autonomous_mode() -> bool:
+    """Return True when running in non-interactive / driven-agent context.
+
+    Triggered by ``CLAUDE_AUTONOMOUS=1``. Set automatically by Claude Code when
+    running subagents or any context where there's no human at the prompt to
+    answer a permission ask. Hooks consult this to decide between strict
+    default-deny mode and pass-through-to-user mode.
+    """
+    return os.environ.get("CLAUDE_AUTONOMOUS", "") == "1"
 
 
 # Loop detection settings
