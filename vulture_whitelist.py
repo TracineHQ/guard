@@ -71,3 +71,12 @@ _utils.make_decision
 # reads it via the function signature; vulture sees an unused argument.
 description = None
 description
+
+# --- Pytest side-effect fixtures ---
+# These fixtures activate their behavior via test-function parameters that
+# pytest injects but the test body never references — vulture sees an unused
+# variable. The fixtures live in tests/conftest.py.
+autonomous_env = None
+autonomous_env
+decision_log_env = None
+decision_log_env
