@@ -27,5 +27,3 @@ venv/
 # Local Claude Code state (per-session progress, scope files, checkpoints)
 .claude/
 
-# uv
-uv.lock
