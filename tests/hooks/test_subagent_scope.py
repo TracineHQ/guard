@@ -159,11 +159,11 @@ class TestSubagentScope:
         assert task_name in envelope["hookSpecificOutput"]["permissionDecisionReason"]
 
 
-# === F7 — subagent_scope plain pattern matching only inside cwd ===
+# === Plain-pattern matching is anchored to cwd ===
 #
-# Previously ``_matches_plain`` fell through to ``abs_path.endswith("/" + pattern)``
-# which matched anywhere on disk. A plain allowlist entry like ``src/safe.py``
-# would silently allow ``/totally_unrelated/src/safe.py``.
+# Earlier versions fell through to ``abs_path.endswith("/" + pattern)`` which
+# matched anywhere on disk: a plain allowlist entry like ``src/safe.py`` would
+# silently allow ``/totally_unrelated/src/safe.py``. Match strictly within cwd.
 
 
 class TestSubagentScopeF7:

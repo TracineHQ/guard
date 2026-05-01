@@ -40,7 +40,8 @@ PROTECTED_PATTERNS: list[str] = [
     # decides whether guard hooks even fire. Edits must surface for review.
     ".claude/settings.json",
     ".claude/settings.local.json",
-    # Backwards-compat patterns for repos that vendor the original layout
+    # Compatibility patterns for users who installed earlier hook scripts
+    # under ``~/.claude/hooks/`` rather than via the plugin layout.
     "hooks/command_registry.py",
     "hooks/bash_command_validator.py",
     "hooks/git_c_validator.py",
@@ -75,14 +76,14 @@ def is_protected(file_path: str) -> str | None:
 
 
 # Bash redirect / file-write commands and their target-extracting regex / token
-# index. Used by ``_bash_targets_protected`` (B8) as a best-effort second line
-# of defense — the primary path is the Edit/Write tool guard above.
+# index. Used by ``_bash_targets_protected`` as a best-effort second line of
+# defense — the primary path is the Edit/Write tool guard above.
 _BASH_REDIRECT_RE = re.compile(r"(?:^|\s)>>?\s*(\S+)")
 _BASH_DD_OF_RE = re.compile(r"(?:^|\s)of=(\S+)")
 
 
 def _bash_target_paths(command: str) -> list[str]:
-    """Return likely write-target paths from a bash command (B8).
+    """Return likely write-target paths from a bash command.
 
     Best-effort: scans for output redirects (``>``, ``>>``), ``tee``,
     ``cp``, ``mv``, ``ln -sf``, ``install``, and ``dd of=`` targets.

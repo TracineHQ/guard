@@ -91,7 +91,7 @@ SHELL_FRAGMENTS: frozenset[str] = frozenset(
 # Commands that, when piped into a shell, form the classic ``curl ... | sh``
 # RCE pattern. Denied unconditionally regardless of mode. Anything that
 # produces bytes followed by ``| <shell>`` is always a deliberate RCE in an
-# agent context — the producer set is intentionally broad (B5).
+# agent context — the producer set is intentionally broad.
 _PIPE_SHELL_CMDS: frozenset[str] = frozenset(DANGEROUS_SHELL_WRAPPERS)
 
 
@@ -144,7 +144,7 @@ DANGEROUS_PATTERNS = re.compile(
     r"|`"  # Backtick substitution `...`
     r"|<\("  # Process substitution <(...)
     r"|>\("  # Process substitution >(...)
-    r"|<<<"  # Here-string redirection (B4 — input is attacker-supplied)
+    r"|<<<"  # Here-string redirection — input is attacker-supplied
     r"|>\s*\S"  # Output redirect > file (but not 2>&1)
     r"|>>"  # Append redirect >> file
     r")"
@@ -207,7 +207,7 @@ def _split_on_operators(line: str) -> list[str]:  # noqa: C901 -- single-pass qu
 
     Ignores operator characters that appear inside single- or double-quoted
     strings so an attacker cannot smuggle a deny-list-evading prefix by
-    embedding ``;`` inside a quoted argument (F1 family).
+    embedding ``;`` inside a quoted argument.
     """
     segments: list[str] = []
     buf: list[str] = []
@@ -264,7 +264,7 @@ _GROUP_CLOSE_RE = re.compile(r"[;){}!\s]+$")
 
 
 def _strip_group_wrappers(segment: str) -> str:
-    """Strip leading ``(`` / ``{`` / ``!`` and trailing ``)`` / ``}`` (B4).
+    """Strip leading ``(`` / ``{`` / ``!`` and trailing ``)`` / ``}``.
 
     ``( rm -rf / )`` and ``{ rm -rf /; }`` are subshell / brace groups. After
     pipeline splitting the segments are ``( rm -rf /`` etc.; stripping the
@@ -287,11 +287,11 @@ def split_pipeline(command: str) -> list[str]:
     """Split a command into segments on pipe/operator/newline boundaries.
 
     Operator splitting is quote-aware so semicolons / pipes embedded inside
-    quoted strings are preserved (closes the F1 family of bypasses where
+    quoted strings are preserved (closes bypasses where
     ``python3'  '-c '1; __import__(...)'`` was being torn at the ``;``).
 
     Each split segment also has subshell-paren / brace-group / leading-bang
-    wrappers stripped (B4) so ``( rm -rf / )`` and ``{ rm -rf /; }`` and
+    wrappers stripped so ``( rm -rf / )`` and ``{ rm -rf /; }`` and
     ``! rm -rf /`` are evaluated against the deny matchers.
     """
     segments: list[str] = []
@@ -567,7 +567,7 @@ def _normalize_segment(segment: str) -> str:
     return " ".join(flat)
 
 
-# === Pre-deny canonicalization helpers (F2, F5, F6) ===
+# === Pre-deny canonicalization helpers (env prefix, git globals, whitespace) ===
 
 # Unicode whitespace classes that should fold to ASCII space.
 # Spelled with \u escapes so the file itself contains no ambiguous unicode
@@ -742,7 +742,7 @@ def _strip_git_global_options(normalized: str) -> str | None:
     return "git " + " ".join(tokens[i:]) if i < len(tokens) else "git"
 
 
-# === Runner / shell-wrapper prefix stripping (B1) ===
+# === Runner / shell-wrapper prefix stripping ===
 
 # Shell-wrapper -c style flags that pass the next argument as a script body.
 _SHELL_C_FLAGS_RE = re.compile(r"^-[a-zA-Z]*c$")
@@ -956,7 +956,7 @@ def _strip_runner_prefix(segment: str) -> str | None:
     return None
 
 
-# === F3 — non-canonical interpreter detection ===
+# === Non-canonical interpreter detection ===
 
 # Compile a regex that matches each registry-listed interpreter basename with
 # an optional version suffix (``python3.11``). The set is the source of truth
@@ -1008,7 +1008,7 @@ def _is_dangerous_interpreter(normalized: str) -> bool:
     return _interpreter_uses_eval_flag(tokens)
 
 
-# === F4 — dangerous rm shapes ===
+# === Dangerous rm shapes ===
 
 
 def _rm_is_recursive(flags: list[str]) -> bool:
@@ -1112,10 +1112,10 @@ def _candidate_forms(segment: str) -> list[str]:
     "peelings" before the deny matchers fire:
 
     - normalized (quote/whitespace-folded)
-    - leading ``K=V`` env / ``env K=V ...`` prefix stripped (F2)
-    - leading git global options stripped (F5)
-    - runner / shell wrapper prefix stripped (B1: ``bash -c "..."``,
-      ``sudo``, ``timeout 5 ...`` etc.)
+    - leading ``K=V`` env / ``env K=V ...`` prefix stripped
+    - leading git global options stripped
+    - runner / shell wrapper prefix stripped (``bash -c "..."``, ``sudo``,
+      ``timeout 5 ...`` etc.)
 
     Triple-stacked forms like ``sudo -E env FOO=1 python3 -c "pass"`` need
     multiple peels: sudo -> env -> bare interpreter. We iterate to a fixpoint
@@ -1236,7 +1236,7 @@ def _normalize_git_config_key(key: str) -> str:
 
 
 def _git_config_key_is_sink(key: str) -> bool:
-    """Return True if a git config key is a command-execution sink (B2)."""
+    """Return True if a git config key is a command-execution sink."""
     norm = _normalize_git_config_key(key)
     if norm in GIT_CONFIG_EXEC_SINKS:
         return True
@@ -1247,7 +1247,7 @@ def _git_config_key_is_sink(key: str) -> bool:
 
 
 def _is_git_config_injection(normalized: str) -> bool:  # noqa: C901 -- linear scan of -c key=value tokens, branches mirror flag forms
-    """Return True for ``git -c <sink>=<v>`` or ``git config <sink> ...`` (B2).
+    """Return True for ``git -c <sink>=<v>`` or ``git config <sink> ...``.
 
     The bypass: ``git -c alias.x='!rm -rf /' x`` — git executes the alias as
     a shell command. Same for ``core.pager=!rm`` and ``mergetool.foo.cmd``.
@@ -1296,7 +1296,7 @@ _VAR_HEAD_RE = re.compile(r"^\$[A-Za-z_{]")
 
 
 def _has_var_expanded_head(normalized: str) -> bool:
-    """Return True if the head token starts with an unquoted ``$`` (B3).
+    """Return True if the head token starts with an unquoted ``$``.
 
     ``R=rm; $R -rf /`` becomes, after pipeline split on ``;``, two segments,
     the second of which is ``$R -rf /``. The head token is ``$R``. There is
@@ -1333,8 +1333,8 @@ def _is_shell_wrapper_invocation(segment: str) -> bool:
 
 # Per-candidate-form matchers: run once per entry in ``_candidate_forms`` so
 # env / git / runner-wrapper bypasses are evaluated against the same matchers
-# as their bare forms. Order matters: F1/F2 must fire before peeling would
-# discard the head token.
+# as their bare forms. Order matters: eval-builtin and env-sink matchers must
+# fire before peeling would discard the head token.
 _PER_FORM_MATCHERS: tuple[tuple[Callable[[str], bool], str], ...] = (
     (_is_eval_builtin_invocation, _SYNTH_EVAL_BUILTIN_DENY),
     (_has_dangerous_env_sink, _SYNTH_DANGEROUS_ENV_DENY),
@@ -1347,10 +1347,10 @@ _PER_FORM_MATCHERS: tuple[tuple[Callable[[str], bool], str], ...] = (
 def _match_synthetic_deny(segment: str) -> str | None:
     """Return a synthetic-deny label if matchers fire, else ``None``.
 
-    Covers F3 (non-canonical interpreters), F4 (dangerous rm shapes), and the
-    git config-injection sinks (B2). Iterates ``_candidate_forms(segment)``
-    so env / git / runner-wrapper bypasses are evaluated against the same
-    matchers as their bare forms.
+    Covers non-canonical interpreters, dangerous rm shapes, and the git
+    config-injection sinks. Iterates ``_candidate_forms(segment)`` so env /
+    git / runner-wrapper bypasses are evaluated against the same matchers
+    as their bare forms.
     """
     if not segment:
         return None
@@ -1359,15 +1359,15 @@ def _match_synthetic_deny(segment: str) -> str | None:
         for matcher, label in _PER_FORM_MATCHERS:
             if matcher(cand):
                 return label
-    # Variable-expanded head token (B3): only the raw normalized form is
-    # what matters; runner stripping would just hide the ``$VAR`` head.
+    # Variable-expanded head token: only the raw normalized form is what
+    # matters; runner stripping would just hide the ``$VAR`` head.
     if _has_var_expanded_head(forms[0]):
         return _SYNTH_VAR_EXPAND_DENY
-    # Shell-wrapper invocations (B1): deny outright regardless of payload.
+    # Shell-wrapper invocations: deny outright regardless of payload.
     if _is_shell_wrapper_invocation(segment):
         return _SYNTH_SHELL_WRAPPER_DENY
-    # Wrapper-stacking past the unwrap cap (C2): if no per-form matcher fired
-    # and the peel cascade would still strip another layer, the segment is a
+    # Wrapper-stacking past the unwrap cap: if no per-form matcher fired and
+    # the peel cascade would still strip another layer, the segment is a
     # deliberate bypass attempt.
     if _exceeds_unwrap_cap(segment):
         return _SYNTH_WRAPPER_STACKING_DENY
@@ -1398,10 +1398,10 @@ def _get_always_deny(segments: list[str]) -> dict[str, str] | None:
     """Return a deny envelope if any segment hits the ALWAYS_DENY set, else ``None``.
 
     Checks both registry literals (via ``_match_always_deny``) and synthetic
-    matchers for non-canonical interpreter binaries (F3) and catastrophic rm
-    shapes (F4) that the literal list cannot cover exhaustively. For shell-
-    wrapper invocations (``bash -c "..."``), recursively re-evaluates the
-    inner payload as a full pipeline.
+    matchers for non-canonical interpreter binaries and catastrophic rm
+    shapes that the literal list cannot cover exhaustively. For shell-wrapper
+    invocations (``bash -c "..."``), recursively re-evaluates the inner
+    payload as a full pipeline.
     """
     queue: list[str] = list(segments)
     seen: set[str] = set()
@@ -1423,7 +1423,7 @@ def _get_always_deny(segments: list[str]) -> dict[str, str] | None:
         if synth is not None:
             reason = f"Blocked: `{seg[:80]}` — {_SYNTH_DENY_REASONS[synth]}"
             return _deny(reason)
-        # B1: shell-wrapper recursion. ``bash -c "rm -rf /; other"`` has
+        # Shell-wrapper recursion: ``bash -c "rm -rf /; other"`` has
         # operators inside the payload that the outer split missed.
         queue.extend(_expand_runner_payload_segments(seg))
     return None
@@ -1523,9 +1523,9 @@ def _evaluate_segments(
 
 def decide(command: str) -> dict[str, str] | None:  # noqa: PLR0911 -- top-level dispatcher with intentional early-return branches
     """Decide whether to allow a bash command. ``None`` means passthrough."""
-    # F6: fold POSIX line continuations and unicode whitespace before any
-    # other processing so downstream pipeline split / normalization sees a
-    # canonical ASCII form.
+    # Fold POSIX line continuations and unicode whitespace before any other
+    # processing so downstream pipeline split / normalization sees a canonical
+    # ASCII form.
     command = _canonicalize(command)
 
     leak = get_credential_leak_deny(command)

@@ -5,7 +5,7 @@ a decision. Verifies every emitted record has the spec-required fields, the
 expected ``hook_id``, and stays within the 4096-byte envelope.
 
 This test exists to catch any future drift between the writer and the
-documented contract (the consumer is TracineHQ/convo)."""
+documented JSONL consumer contract."""
 
 from __future__ import annotations
 
@@ -217,8 +217,8 @@ def test_hook_emits_spec_compliant_record(
 def test_at_least_one_hook_emits_a_real_decision(tmp_path: Path) -> None:
     """Sanity: drive every hook against `git add -A` and assert >=1 decision logged.
 
-    Mirrors the verification command in the Tranche 2 spec — confirms the
-    log_decision wiring isn't silently no-ops across the board.
+    Confirms the ``log_decision`` wiring isn't silently a no-op across the
+    board.
     """
     decisions_path = tmp_path / "decisions.jsonl"
     payload = {

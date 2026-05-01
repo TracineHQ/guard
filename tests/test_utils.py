@@ -49,7 +49,7 @@ print(json.dumps(result))
 
 
 def test_parse_hook_input_invalid_json():
-    """Tranche 1 hardening I2: malformed JSON now fail-closed denies (rc=2)."""
+    """Malformed JSON fails closed with rc=2 instead of silently passing."""
     script = f"""
 import sys
 sys.path.insert(0, {SRC_DIR!r})
@@ -193,9 +193,9 @@ safe_main(my_hook)
 
 
 def test_safe_main_invalid_json_passthrough():
-    """Tranche 1 hardening I2: malformed JSON triggers fail-closed deny (rc=2)
-    via parse_hook_input -> sys.exit(2). safe_main re-raises SystemExit, so
-    the wrapper exits with the same code.
+    """Malformed JSON triggers a fail-closed exit (rc=2) via
+    parse_hook_input -> sys.exit(2). safe_main re-raises SystemExit so the
+    wrapper exits with the same code.
     """
     hook_script = f"""
 import sys
@@ -219,7 +219,7 @@ safe_main(my_hook)
     assert "malformed JSON" in result.stderr
 
 
-# === DD-17: JSONL path is user-scope (~/.claude/), not plugins/cache ===
+# === JSONL path is user-scope (~/.claude/), not plugins/cache ===
 
 
 def test_jsonl_path_user_scope() -> None:
@@ -233,7 +233,7 @@ def test_jsonl_path_user_scope() -> None:
     assert resolved.endswith("guard-decisions.jsonl")
 
 
-# === DD-16: emit_pretooluse_decision modern envelope shape ===
+# === emit_pretooluse_decision envelope shape ===
 
 
 def test_emit_pretooluse_decision_modern_shape() -> None:

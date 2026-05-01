@@ -114,7 +114,7 @@ _STREAM_PATH_PREFIXES: tuple[str, ...] = ("/dev/fd/", "/proc/self/fd/")
 
 
 def _looks_like_stream_path(path: str) -> bool:
-    """Return True for stdin / fd / fifo / chardev paths (B6)."""
+    """Return True for stdin / fd / fifo / chardev paths."""
     if path in _STREAM_LITERAL_PATHS:
         return True
     if path.startswith(_STREAM_PATH_PREFIXES):
@@ -144,7 +144,7 @@ def _read_message_file(path: str, cwd: str | None) -> str | None:
 
     If the path is a stream / FIFO / character device / fd, returns the
     sentinel ``STREAM_FILE_SENTINEL`` so the caller can deny with a clear
-    message rather than silently passing through (B6).
+    message rather than silently passing through.
     """
     if not path:
         return None
@@ -199,12 +199,12 @@ def _extract_file_flag_path(command: str) -> str | None:  # noqa: PLR0911 -- lin
 
 
 def _extract_all_messages(command: str) -> list[str]:
-    """Return every ``-m`` / ``--message`` payload in ``command`` (B6).
+    """Return every ``-m`` / ``--message`` payload in ``command``.
 
-    Multi-``-m`` is the bypass: ``git commit -m "fix" -m "Co-Authored-By: ..."``
-    used to be matched by ``re.search`` returning only the first hit, so the
-    second message escaped the AI-attribution detector. We run ``re.findall``
-    over both the long and short flag forms and return them in order.
+    Multi-``-m`` is the bypass shape: ``git commit -m "fix" -m "Co-Authored-By: ..."``
+    where a naive ``re.search`` returns only the first hit and the second
+    message escapes the AI-attribution detector. We run ``re.findall`` over
+    both the long and short flag forms and return them in order.
     """
     messages: list[str] = [
         m.group(2) for m in re.finditer(r"""--message[= ]\s*(['"])(.*?)\1""", command, re.DOTALL)

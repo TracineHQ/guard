@@ -2,15 +2,14 @@
 # Copyright 2026 TracineHQ contributors
 """Single source of truth for command safety classifications.
 
-Used by:
-- bash_command_validator.py (imports SAFE_PREFIXES, AUTONOMOUS_FEEDBACK, etc.)
-- generate_settings.py (generates settings.json permissions from registry)
+Imported by ``bash_command_validator`` for ``SAFE_PREFIXES``,
+``AUTONOMOUS_FEEDBACK`` and the synthetic-deny lookup tables.
 """
-# Verbatim port from upstream registry (AD-6): the COMMANDS table is the contract,
-# so we suppress purely-cosmetic lints that would force restructuring/edits.
+# The COMMANDS table is the contract for this module. Lints that would force
+# restructuring it are silenced:
 #   D101: Safety/CommandRule are self-describing; docstrings would just restate names.
 #   E501: a few autonomous_feedback strings are slightly over 100 chars; rewriting
-#         them changes the user-visible message and is out of scope for this port.
+#         them changes the user-visible message.
 # ruff: noqa: D101, E501
 
 from __future__ import annotations

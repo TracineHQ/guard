@@ -150,8 +150,8 @@ def test_autonomous_allows_neutral_safe_prefix(tmp_path: Path) -> None:
 def test_interactive_unchanged_for_unknown_command(tmp_path: Path) -> None:
     """Interactive mode (CLAUDE_AUTONOMOUS=0) must still passthrough unknown commands.
 
-    The inverted-default in C1 only changes autonomous mode; the interactive
-    32+16 verifier suite must continue to behave identically.
+    The inverted-default behavior is autonomous-mode-only; interactive mode
+    is unchanged and continues to passthrough unknown commands.
     """
     _rc, stdout, _stderr = _run(
         "flarbnoz --gronk", autonomous=False, decisions_path=tmp_path / "log.jsonl"

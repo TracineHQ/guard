@@ -72,11 +72,11 @@ class TestDecide:
         assert decide("Read", {}) is None
         assert decide("Bash", {}) is None
 
-    def test_no_ai_toolkit_branding_in_message(self):
+    def test_deny_message_is_tool_neutral(self):
         result = decide("Read", {"file_path": "/private/tmp/claude-1/x/tasks/y.output"})
         assert result is not None
         reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-        assert "ai-toolkit" not in reason.lower()
+        assert "agent output files" in reason.lower()
 
     def test_linux_path_read_denied(self):
         """Linux subagent output dir is /tmp/claude-<pid>/... (no /private prefix)."""
@@ -102,7 +102,7 @@ class TestDecide:
 
 
 class TestExpandedReaderCoverage:
-    """B7 — expanded file-reader coverage beyond cat/head/tail."""
+    """File-reader coverage beyond cat/head/tail."""
 
     @pytest.mark.parametrize(
         "command",
@@ -183,7 +183,7 @@ class TestSubprocess:
         assert result.stdout.strip() == ""
 
     def test_malformed_json(self):
-        # Tranche 1 hardening I2: malformed JSON now fail-closed denies (rc=2).
+        # Malformed JSON fails closed with rc=2 instead of silently passing.
         result = self._run_hook("not json at all")
         assert result.returncode == 2
 

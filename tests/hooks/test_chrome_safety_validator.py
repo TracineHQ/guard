@@ -86,8 +86,8 @@ class TestExtractors:
 class TestProfileIsolation:
     """User-data-dir denial does not require chrome_cli (handled in-hook).
 
-    Tranche 1 hardening C7 removed the early ``HAS_CHROME_SAFETY`` short-circuit
-    so the in-hook denials still fire when the optional dep is missing.
+    The in-hook denials fire even when the optional ``chrome_cli`` dependency
+    is missing — there is no early short-circuit.
     """
 
     def test_user_data_dir_blocked(self):
@@ -139,8 +139,8 @@ class TestNonChromePassthrough:
 
 
 class TestAutonomousMode:
-    """Tranche 1 hardening C7: autonomous denial uses the in-hook
-    ``_AUTONOMOUS_DENY`` table; no longer gated on ``HAS_CHROME_SAFETY``."""
+    """Autonomous denial uses the in-hook ``_AUTONOMOUS_DENY`` table; not
+    gated on the optional ``chrome_cli`` dependency."""
 
     @pytest.mark.parametrize(
         "cmd",
@@ -192,7 +192,7 @@ class TestSubprocessSmoke:
         assert result.stdout.strip() == ""
 
     def test_malformed_json(self):
-        # Tranche 1 hardening I2: malformed JSON now fail-closed denies (rc=2).
+        # Malformed JSON fails closed with rc=2 instead of silently passing.
         result = subprocess.run(
             [sys.executable, str(HOOK_PATH)],
             input="not json",

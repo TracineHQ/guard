@@ -229,7 +229,7 @@ def _run_hook(command):
 
 
 class TestMultiMessageBypass:
-    """B6 — multi-``-m`` and ``-F /dev/stdin`` (and friends) bypasses."""
+    """Multi-``-m`` and ``-F /dev/stdin`` (and friends) bypass shapes."""
 
     def test_multi_dash_m_second_message_caught(self):
         # Footer hidden in the second -m used to escape detection.
@@ -301,8 +301,7 @@ class TestSubprocessIntegration:
         assert result.returncode == 0
 
     def test_malformed_json_denied(self):
-        # Tranche 1 hardening I2: malformed JSON now fail-closed denies (rc=2).
-        # Renamed from `_passthrough` because the contract has changed.
+        # Malformed JSON fails closed with rc=2 instead of silently passing.
         result = subprocess.run(
             [sys.executable, str(HOOK_PATH)],
             input="NOT JSON",

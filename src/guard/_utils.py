@@ -245,13 +245,13 @@ def emit_pretooluse_decision(
     updated_input: dict[str, Any] | None = None,
     additional_context: str | None = None,
 ) -> dict[str, Any]:
-    """Build a PreToolUse decision envelope per DD-16/R3.
+    """Build a PreToolUse decision envelope.
 
     Args:
         decision: ``"allow"``, ``"deny"``, or ``"ask"``. ``"ask"`` is permitted
             because advisory hooks (e.g. ``protected_files``) exist precisely
-            to surface a permission prompt; the DD-16 narrowing applied to
-            authoritative validators only.
+            to surface a permission prompt; authoritative validators stick to
+            ``"allow"``/``"deny"``.
         reason: Human-readable rationale surfaced to the user/agent.
         updated_input: Optional rewritten tool input merged into the envelope.
         additional_context: Optional extra context string for the agent.

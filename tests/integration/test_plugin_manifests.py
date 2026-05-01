@@ -1,4 +1,4 @@
-"""T2: plugin manifest integrity + self-containment.
+"""Plugin manifest integrity + self-containment.
 
 Verifies the plugin's manifests JSON-parse, declare the right shape, and
 all hook command paths resolve to existing files inside the plugin root.
@@ -20,7 +20,7 @@ REPO = Path(__file__).resolve().parents[2]
 def test_plugin_json_parses_and_pins_version() -> None:
     data = json.loads((REPO / ".claude-plugin" / "plugin.json").read_text())
     assert data["name"] == "guard"
-    assert data["version"] == "1.0.0", "version must be pinned (DD-15 / research finding #4)"
+    assert data["version"] == "1.0.0", "version must be pinned"
     assert data["license"] == "Apache-2.0"
     assert data["hooks"] == "./hooks/hooks.json"
 

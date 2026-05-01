@@ -1,7 +1,7 @@
-"""Tranche 1 safety-hardening regression tests.
+"""Safety-hardening regression tests.
 
-Each test pins a specific bypass that was caught by QA. Removing the fix
-re-breaks the corresponding test.
+Each test pins a specific bypass shape. Removing the corresponding fix
+re-breaks the matching test.
 """
 
 from __future__ import annotations

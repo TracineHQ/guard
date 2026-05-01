@@ -57,7 +57,7 @@ def _resolve_paths(file_path: str, cwd: str) -> tuple[str, str, bool]:
 
     ``inside_cwd`` is ``True`` when ``abs_path`` is the same as ``cwd`` or a
     descendant of it. When ``False`` the file is somewhere else on disk and
-    relative-path patterns must NOT match (F7 — closes "endswith /pattern"
+    relative-path patterns must NOT match (closes the "endswith /pattern"
     bypass that matched anywhere on the filesystem).
 
     On any resolution error we fall back to the raw input strings and treat
@@ -111,10 +111,10 @@ def _matches_glob(pattern: str, abs_path: str, rel_path: str, *, inside_cwd: boo
 def _matches_plain(pattern: str, abs_path: str, rel_path: str, *, inside_cwd: bool) -> bool:
     """Plain-path match anchored to cwd.
 
-    F7: previously fell through to ``abs_path.endswith("/" + pattern)`` which
-    matched anywhere on disk. Now strict — relative patterns must equal the
-    relative path or be a directory ancestor of it. Absolute patterns match
-    the absolute path exactly.
+    Strict matching: relative patterns must equal the relative path or be a
+    directory ancestor of it. Absolute patterns match the absolute path
+    exactly. (Earlier versions fell through to a filesystem-wide
+    ``abs_path.endswith("/" + pattern)`` check, which is no longer used.)
     """
     if pattern.startswith("/"):
         return abs_path == pattern

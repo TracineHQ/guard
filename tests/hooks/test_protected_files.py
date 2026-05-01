@@ -37,14 +37,14 @@ class TestIsProtected:
         assert is_protected("/some/path/not_hooks/command_registry.py") is None
 
     def test_all_patterns_end_with_py_or_json(self):
-        # Tranche 1 hardening C6: settings.json patterns added; widen the
-        # invariant to cover both file types.
+        # Patterns now include both .py hook files and .json settings files;
+        # widen the invariant to cover both.
         for p in PROTECTED_PATTERNS:
             assert p.endswith((".py", ".json"))
 
     def test_matches_claude_settings_json(self):
-        # Tranche 1 hardening C6: edits to ~/.claude/settings.json must
-        # surface for review (this file is the harness's hook ASK-gate).
+        # Edits to ~/.claude/settings.json must surface for review — that
+        # file is the harness's hook ASK-gate.
         match = is_protected("/Users/x/.claude/settings.json")
         assert match == ".claude/settings.json"
 
@@ -112,7 +112,7 @@ class TestHook:
 
 
 class TestExpandedToolCoverage:
-    """B8 — extra tools (MultiEdit, NotebookEdit) and Bash write targets."""
+    """Coverage for MultiEdit, NotebookEdit, and Bash write targets."""
 
     def test_multi_edit_protected_asks(self, capsys):
         hook(
