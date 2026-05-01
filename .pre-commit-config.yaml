@@ -22,3 +22,11 @@ repos:
     hooks:
       - id: vulture
         args: ["--min-confidence=80", "src/guard", "tests", "vulture_whitelist.py"]
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.46.0
+    hooks:
+      - id: typos

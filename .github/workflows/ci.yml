@@ -10,6 +10,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Lint and format
@@ -105,7 +108,7 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Run bandit
-        run: uv run --with bandit bandit -r src/ -ll
+        run: uv run --with bandit bandit -c pyproject.toml -r src/
 
   vulture:
     name: Dead-code sweep
@@ -132,3 +135,23 @@ jobs:
         run: uv export --format requirements-txt --no-hashes --no-emit-project --extra dev > requirements-audit.txt
       - name: Run pip-audit
         run: uv run --with pip-audit pip-audit -r requirements-audit.txt --strict
+
+  zizmor:
+    name: Workflow security audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: zizmorcore/zizmor-action@b1d7e1fb5de872772f31590499237e7cce841e8e  # v0.5.3
+
+  pinact:
+    name: Action SHA pin enforcement
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: suzuki-shunsuke/pinact-action@cf51507d80d4d6522a07348e3d58790290eaf0b6  # v2.0.0
+        with:
+          verify_only: true

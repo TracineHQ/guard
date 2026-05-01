@@ -172,7 +172,7 @@ def _format_recent_decisions(decisions_path: str, limit: int = 3) -> list[str]:
         try:
             rec = json.loads(raw)
         except (json.JSONDecodeError, ValueError):
-            lines.append(f"  (unparseable line) {raw.strip()[:80]}")
+            lines.append(f"  (unparsable line) {raw.strip()[:80]}")
             continue
         ts = str(rec.get("timestamp", "?"))
         decision = str(rec.get("decision", "?"))
