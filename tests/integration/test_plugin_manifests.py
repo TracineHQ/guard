@@ -79,7 +79,6 @@ def test_skill_md_exists_with_frontmatter() -> None:
         "credential_check",
         "commit_message_validator",
         "agent_output_guard",
-        "chrome_safety_validator",
         "subagent_scope",
         "protected_files",
     ],

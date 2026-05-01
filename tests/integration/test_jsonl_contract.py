@@ -116,16 +116,6 @@ _HOOK_CASES: list[tuple[str, dict[str, Any]]] = [
         },
     ),
     (
-        "chrome_safety_validator",
-        {
-            "session_id": "sess-1",
-            "tool_name": "Bash",
-            "tool_input": {"command": "chrome eval"},
-            "hook_event_name": "PreToolUse",
-            "cwd": "/tmp/work",
-        },
-    ),
-    (
         "subagent_scope",
         {
             "session_id": "sess-1",
@@ -234,7 +224,6 @@ def test_at_least_one_hook_emits_a_real_decision(tmp_path: Path) -> None:
         "credential_check",
         "commit_message_validator",
         "agent_output_guard",
-        "chrome_safety_validator",
         "subagent_scope",
         "protected_files",
     ):

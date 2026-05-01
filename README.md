@@ -22,7 +22,6 @@ Guardrails not walls: guard catches the obvious foot-guns at the Claude Code hoo
 | credential_check | hardcoded credentials in tool inputs |
 | commit_message_validator | malformed/missing commit messages |
 | agent_output_guard | oversized raw-data reads in subagent output |
-| chrome_safety_validator | dangerous chrome operations (JS eval, profile isolation) |
 | protected_files | edits to user-marked protected files |
 | subagent_scope | subagent edits outside declared scope |
 

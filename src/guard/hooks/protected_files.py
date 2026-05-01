@@ -32,7 +32,6 @@ PROTECTED_PATTERNS: list[str] = [
     "guard/hooks/protected_files.py",
     "guard/hooks/commit_message_validator.py",
     "guard/hooks/agent_output_guard.py",
-    "guard/hooks/chrome_safety_validator.py",
     "guard/hooks/subagent_scope.py",
     "guard/registry.py",
     "guard/_utils.py",

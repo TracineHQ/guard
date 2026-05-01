@@ -31,7 +31,6 @@ EXPECTED_HOOK_FILES = {
     "bash_command_validator.py",
     "git_c_validator.py",
     "commit_message_validator.py",
-    "chrome_safety_validator.py",
     "agent_output_guard.py",
     "credential_check.py",
     "protected_files.py",

@@ -21,7 +21,6 @@ HOOK_NAMES = [
     "credential_check",
     "commit_message_validator",
     "agent_output_guard",
-    "chrome_safety_validator",
     "subagent_scope",
     "protected_files",
 ]

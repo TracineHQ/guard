@@ -9,7 +9,6 @@ def test_critical_imports_resolve() -> None:
     from guard.hooks import (
         agent_output_guard,
         bash_command_validator,
-        chrome_safety_validator,
         commit_message_validator,
         credential_check,
         git_c_validator,
@@ -21,7 +20,6 @@ def test_critical_imports_resolve() -> None:
     for module in (
         agent_output_guard,
         bash_command_validator,
-        chrome_safety_validator,
         commit_message_validator,
         credential_check,
         git_c_validator,

@@ -142,37 +142,6 @@ transcripts that waste context. Use the appropriate query CLI for this data.
 
 ---
 
-## chrome_safety_validator
-
-- **Matcher:** `Bash`
-- **Source:** `src/guard/hooks/chrome_safety_validator.py`
-
-### What it checks
-
-Validates `chrome` CLI invocations:
-
-- `chrome eval` — JS expressions are checked against `chrome_cli.safety`
-  patterns (when `chrome_cli` is installed) so the hook stays in sync with
-  the CLI's own deny list.
-- `chrome fetch` — flagged because the browser session may carry
-  credentials.
-- `chrome launch --user-data-dir <path>` — denied to enforce profile
-  isolation.
-- In autonomous mode, write-tier subcommands (`launch`, `stop`,
-  `navigate`, `click`, `fill`, `eval`, `fetch`, `open`, `close`, `reload`,
-  `wait`) are denied with a queued-for-session-end message.
-
-When `chrome_cli` is not installed the hook degrades to silent passthrough
-and the autonomous-mode deny table still applies.
-
-### Example block
-
-```
-JS eval requires human review. Describe the intent.
-```
-
----
-
 ## protected_files
 
 - **Matcher:** `Edit | Write`

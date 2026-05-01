@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [1.0.0] - 2026-04-30
 
-First stable release. Guard ships eight stdlib-only `PreToolUse` hooks that
+First stable release. Guard ships seven stdlib-only `PreToolUse` hooks that
 sit between Claude Code and the tool surface, denying high-risk actions
 before they reach the host. The hook contract, decision-log schema, and
 autonomous-mode behavior are now considered stable for the 1.x line.
@@ -26,8 +26,6 @@ autonomous-mode behavior are now considered stable for the 1.x line.
   notices, named tool branding).
 - `agent_output_guard` — denies direct reads of dispatched-subagent
   output transcripts so context is preserved for the orchestrator.
-- `chrome_safety_validator` — gates `chrome-cli` actions: blocks unsafe
-  JS eval patterns and enforces profile isolation (`--user-data-dir`).
 - `protected_files` — forces an ASK confirmation on edits to guard's
   own validator files and to the Claude Code settings files that
   govern hook activation.

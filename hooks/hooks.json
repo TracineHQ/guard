@@ -6,8 +6,7 @@
         "hooks": [
           { "type": "command", "command": "python3 ${CLAUDE_PLUGIN_ROOT}/src/guard/hooks/bash_command_validator.py" },
           { "type": "command", "command": "python3 ${CLAUDE_PLUGIN_ROOT}/src/guard/hooks/git_c_validator.py" },
-          { "type": "command", "command": "python3 ${CLAUDE_PLUGIN_ROOT}/src/guard/hooks/commit_message_validator.py" },
-          { "type": "command", "command": "python3 ${CLAUDE_PLUGIN_ROOT}/src/guard/hooks/chrome_safety_validator.py" }
+          { "type": "command", "command": "python3 ${CLAUDE_PLUGIN_ROOT}/src/guard/hooks/commit_message_validator.py" }
         ]
       },
       {

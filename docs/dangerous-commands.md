@@ -122,10 +122,6 @@ taint|untaint`, `terraform workspace new|select|delete`.
 
 `pip install`, `pip uninstall`, `uv pip install`, `make install`.
 
-### Chrome CLI writes
-
-`chrome launch|stop|navigate|click|fill|eval|wait|fetch|open|close|reload`.
-
 ## Adding to the registry
 
 To add a new dangerous prefix:

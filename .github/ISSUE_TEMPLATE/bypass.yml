@@ -15,9 +15,8 @@ body:
         **In scope:**
 
         - Pattern-evasion in `bash_command_validator`, `git_c_validator`,
-          `commit_message_validator`, `chrome_safety_validator`,
-          `credential_check`, `protected_files`, `subagent_scope`,
-          `agent_output_guard`.
+          `commit_message_validator`, `credential_check`, `protected_files`,
+          `subagent_scope`, `agent_output_guard`.
         - Argument shapes that bypass an existing rule (encoded forms,
           unicode quirks, path normalisation, env-prefix tricks, etc.).
         - Decision-log records that misrepresent what was allowed.
