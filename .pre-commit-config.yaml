@@ -30,3 +30,24 @@ repos:
     rev: v1.46.0
     hooks:
       - id: typos
+  - repo: local
+    hooks:
+      - id: pytest-on-push
+        name: pytest (full suite)
+        entry: uv run pytest -x
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+      - id: bandit-on-push
+        name: bandit (security lint)
+        entry: uv run --with bandit bandit -c pyproject.toml -r src/
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+      - id: zizmor-on-push
+        name: zizmor (workflow audit)
+        entry: uv run --with zizmor zizmor .
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+        files: ^\.github/workflows/.*\.ya?ml$
