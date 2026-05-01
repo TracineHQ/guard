@@ -33,7 +33,10 @@ import re
 import shlex
 import sys
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from guard._utils import (
     GUARD_AUTONOMOUS_QUEUE_PATH,
@@ -690,141 +693,173 @@ def _shlex_tokens(segment: str) -> list[str]:
         return segment.split()
 
 
-def _strip_runner_prefix(segment: str) -> str | None:  # noqa: C901, PLR0911, PLR0912, PLR0915 -- linear strip dispatch; extracting helpers harms readability
+def _strip_shell_wrapper(tokens: list[str]) -> str | None:
+    """Strip ``bash -c``/``sh -c``/``zsh -c``/``/bin/sh -lc`` etc.
+
+    Returns the literal payload (single shlex token) or ``None`` if the head
+    is not a known shell wrapper or no ``-c``-style flag is present.
+    """
+    if _basename(tokens[0]) not in DANGEROUS_SHELL_WRAPPERS:
+        return None
+    for i in range(1, len(tokens)):
+        if _SHELL_C_FLAGS_RE.match(tokens[i]):
+            if i + 1 < len(tokens):
+                return tokens[i + 1]
+            return None
+        if not tokens[i].startswith("-"):
+            # Inline script arg (busybox-style ``sh script.sh``) — not RCE.
+            return None
+    return None
+
+
+def _strip_sudo(tokens: list[str]) -> str | None:
+    """Strip ``sudo`` (with optional ``-E``/``-H``/``-u USER`` flags).
+
+    Recurses through ``_strip_runner_prefix`` so ``sudo bash -c "..."`` peels
+    both wrappers. Returns the inner command, or ``None`` if not sudo.
+    """
+    if _basename(tokens[0]) != "sudo":
+        return None
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in ("-E", "-H", "-S", "-i", "-s", "-n", "--"):
+            i += 1
+            continue
+        if tok in ("-u", "-g") and i + 1 < len(tokens):
+            i += 2
+            continue
+        break
+    if i >= len(tokens):
+        return None
+    # Re-quote so a recursive call sees the same token boundaries (otherwise
+    # ``sudo bash -c "rm -rf /"`` collapses to a whitespace blob).
+    requoted = " ".join(shlex.quote(t) for t in tokens[i:])
+    deeper = _strip_runner_prefix(requoted)
+    return deeper if deeper is not None else requoted
+
+
+def _strip_simple_runner(tokens: list[str]) -> str | None:
+    """Strip a plain pre-execution wrapper with no flag block.
+
+    Covers ``command``, ``exec``, ``time``, ``nohup``, ``setsid``,
+    ``unbuffer`` (the registry's ``PLAIN_RUNNER_PREFIXES``).
+    """
+    if _basename(tokens[0]) not in PLAIN_RUNNER_PREFIXES or len(tokens) <= 1:
+        return None
+    return " ".join(tokens[1:])
+
+
+def _strip_timeout(tokens: list[str]) -> str | None:
+    """Strip ``timeout N <cmd>``, ``nice -n 10 <cmd>``, ``ionice -c 3 <cmd>``."""
+    head = _basename(tokens[0])
+    if head not in _TIMING_RUNNERS:
+        return None
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in ("-n", "-c", "-p", "-s") and i + 1 < len(tokens):
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        # First non-flag token is either the duration (``5``) or the command.
+        if head == "timeout" and re.match(r"^\d+(?:\.\d+)?[smhd]?$", tok):
+            i += 1
+            continue
+        break
+    if i < len(tokens):
+        return " ".join(tokens[i:])
+    return None
+
+
+def _strip_xargs(tokens: list[str]) -> str | None:
+    """Strip ``xargs [-I{}] [-n N] <cmd>``."""
+    if _basename(tokens[0]) != "xargs":
+        return None
+    i = 1
+    while i < len(tokens) and tokens[i].startswith("-"):
+        tok = tokens[i]
+        # ``-I{}`` is fused; ``-I {}`` is split.
+        if tok in ("-I", "-n", "-P", "-d", "-s", "-L") and i + 1 < len(tokens):
+            i += 2
+            continue
+        i += 1
+    if i < len(tokens):
+        return " ".join(tokens[i:])
+    return None
+
+
+def _strip_parallel(tokens: list[str]) -> str | None:
+    """Strip ``parallel [flags] <cmd> ::: <args>``.
+
+    Args after ``:::`` are the operands the command runs against, so they're
+    substituted into ``{}`` (or appended) so the deny matchers see the real
+    shape (``rm -rf /``, not ``rm -rf {}``).
+    """
+    if _basename(tokens[0]) != "parallel":
+        return None
+    i = 1
+    while i < len(tokens) and tokens[i].startswith("-"):
+        i += 1
+    if i >= len(tokens):
+        return None
+    end = i
+    while end < len(tokens) and tokens[end] != ":::":
+        end += 1
+    cmd_tokens = tokens[i:end]
+    if not cmd_tokens:
+        return None
+    args = tokens[end + 1 :] if end < len(tokens) else []
+    if not args:
+        return " ".join(cmd_tokens)
+    substituted = [args[0] if t == "{}" else t for t in cmd_tokens]
+    if "{}" not in cmd_tokens:
+        substituted = substituted + args
+    return " ".join(substituted)
+
+
+def _strip_script(tokens: list[str]) -> str | None:
+    """Strip ``script <output> -c "<cmd>"``."""
+    if _basename(tokens[0]) != "script" or len(tokens) < _SCRIPT_C_MIN_TOKENS:
+        return None
+    for i in range(2, len(tokens) - 1):
+        if _SHELL_C_FLAGS_RE.match(tokens[i]):
+            return tokens[i + 1] if i + 1 < len(tokens) else None
+    return None
+
+
+# Order matters: shell wrappers must run before simple-runner so ``bash -c``
+# isn't accidentally treated as a plain runner; sudo must run before shell so
+# ``sudo bash -c`` peels both. Beyond that the helpers are mutually exclusive
+# on head-token basename, so order between them doesn't matter.
+_RUNNER_STRIPPERS: tuple[Callable[[list[str]], str | None], ...] = (
+    _strip_shell_wrapper,
+    _strip_sudo,
+    _strip_simple_runner,
+    _strip_timeout,
+    _strip_xargs,
+    _strip_parallel,
+    _strip_script,
+)
+
+
+def _strip_runner_prefix(segment: str) -> str | None:
     """Strip a leading runner / shell-wrapper prefix from ``segment``.
 
     Returns the remainder (still bash-shaped) so the deny matchers can be
     re-applied to the inner command. Returns ``None`` when no recognised
-    prefix is present.
-
-    Handles:
-
-    - shell wrappers with ``-c``/``-lc``/``-eic``: ``bash -c "rm -rf /"`` →
-      ``rm -rf /``. Basename match so ``/bin/sh -c`` works too. Tokenization
-      is shlex-aware so the quoted payload comes through as a single arg.
-    - ``sudo`` (with optional ``-E``/``-H``/``-u USER`` flags). Recurses so
-      ``sudo bash -c "..."`` peels both wrappers.
-    - plain runners: ``command``, ``exec``, ``time``, ``nohup``, ``setsid``,
-      ``unbuffer``, ``busybox``, ``toybox``.
-    - ``timeout 5 cmd``, ``nice -n 10 cmd``, ``ionice -c 3 cmd``.
-    - ``xargs ... cmd``, ``parallel ... cmd ::: <args>``.
-    - ``script /dev/null -c "..."``.
+    prefix is present. Dispatches to per-shape helpers; see those for the
+    individual runner families covered.
     """
     tokens = _shlex_tokens(segment)
     if not tokens:
         return None
-    head = _basename(tokens[0])
-
-    # Shell wrappers with -c / -lc / -eic and so on. Find the first -c-style
-    # flag (no equals form for shells) and return the next token (which is
-    # the literal payload thanks to shlex tokenization).
-    if head in DANGEROUS_SHELL_WRAPPERS:
-        for i in range(1, len(tokens)):
-            if _SHELL_C_FLAGS_RE.match(tokens[i]):
-                if i + 1 < len(tokens):
-                    return tokens[i + 1]
-                return None
-            if not tokens[i].startswith("-"):
-                # Inline script arg (busybox-style ``sh script.sh``) — not RCE.
-                return None
-        return None
-
-    # ``sudo`` — skip its own flag block. Recurse so wrapped shells peel too.
-    if head == "sudo":
-        i = 1
-        while i < len(tokens):
-            tok = tokens[i]
-            if tok in ("-E", "-H", "-S", "-i", "-s", "-n", "--"):
-                i += 1
-                continue
-            if tok in ("-u", "-g") and i + 1 < len(tokens):
-                i += 2
-                continue
-            break
-        if i < len(tokens):
-            # Re-quote so a recursive call sees the same token boundaries
-            # (otherwise ``sudo bash -c "rm -rf /"`` collapses to a single
-            # whitespace blob and the inner shell-wrapper detector misses).
-            requoted = " ".join(shlex.quote(t) for t in tokens[i:])
-            deeper = _strip_runner_prefix(requoted)
-            return deeper if deeper is not None else requoted
-        return None
-
-    # Plain pre-execution wrappers (no flag block).
-    if head in PLAIN_RUNNER_PREFIXES and len(tokens) > 1:
-        return " ".join(tokens[1:])
-
-    # `timeout 5 cmd`, `timeout 5s cmd`, `nice -n 10 cmd`, `ionice -c 3 cmd`.
-    if head in _TIMING_RUNNERS:
-        i = 1
-        while i < len(tokens):
-            tok = tokens[i]
-            if tok in ("-n", "-c", "-p", "-s") and i + 1 < len(tokens):
-                i += 2
-                continue
-            if tok.startswith("-"):
-                i += 1
-                continue
-            # First non-flag token is either the duration (``5``) or the
-            # command itself. Heuristic: if it's purely numeric / ends in a
-            # time suffix, treat as duration and skip; otherwise it's the cmd.
-            if head == "timeout" and re.match(r"^\d+(?:\.\d+)?[smhd]?$", tok):
-                i += 1
-                continue
-            break
-        if i < len(tokens):
-            return " ".join(tokens[i:])
-        return None
-
-    # `xargs [-I{}] [-n N] cmd`. Skip flags; first non-flag is the command.
-    if head == "xargs":
-        i = 1
-        while i < len(tokens) and tokens[i].startswith("-"):
-            tok = tokens[i]
-            # ``-I{}`` is fused; ``-I {}`` is split.
-            if tok in ("-I", "-n", "-P", "-d", "-s", "-L") and i + 1 < len(tokens):
-                i += 2
-                continue
-            i += 1
-        if i < len(tokens):
-            return " ".join(tokens[i:])
-        return None
-
-    # ``parallel [flags] cmd ::: args``. Skip flags; cmd runs until ``:::``.
-    # Args after ``:::`` ARE the operands the command runs against, so append
-    # them to the inner command (substituting ``{}`` if present, otherwise
-    # appending) so the deny matchers see ``rm -rf /``, not ``rm -rf {}``.
-    if head == "parallel":
-        i = 1
-        while i < len(tokens) and tokens[i].startswith("-"):
-            i += 1
-        if i >= len(tokens):
-            return None
-        end = i
-        while end < len(tokens) and tokens[end] != ":::":
-            end += 1
-        cmd_tokens = tokens[i:end]
-        if not cmd_tokens:
-            return None
-        args = tokens[end + 1 :] if end < len(tokens) else []
-        if not args:
-            return " ".join(cmd_tokens)
-        # Substitute ``{}`` placeholder with the first arg (treat each arg as
-        # an iteration; we only need to detect the dangerous shape).
-        substituted = [args[0] if t == "{}" else t for t in cmd_tokens]
-        if "{}" not in cmd_tokens:
-            substituted = substituted + args
-        return " ".join(substituted)
-
-    # ``script /dev/null -c "..."``. Treat like a shell wrapper after the
-    # output-file argument.
-    if head == "script" and len(tokens) >= _SCRIPT_C_MIN_TOKENS:
-        # tokens: script <output> -c <cmd...>
-        for i in range(2, len(tokens) - 1):
-            if _SHELL_C_FLAGS_RE.match(tokens[i]):
-                return tokens[i + 1] if i + 1 < len(tokens) else None
-        return None
-
+    for stripper in _RUNNER_STRIPPERS:
+        result = stripper(tokens)
+        if result is not None:
+            return result
     return None
 
 
