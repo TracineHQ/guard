@@ -74,10 +74,6 @@ Tail and pretty-print:
 tail -f ~/.claude/guard-decisions.jsonl | jq
 ```
 
-## Optional dependencies
-
-- `chrome_cli` — when installed, `chrome_safety_validator` uses its shared safety patterns for richer `chrome eval` / `chrome fetch` checks. Without it, the hook degrades gracefully and `ask` rules in settings still apply.
-
 ## Development
 
 ```

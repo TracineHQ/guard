@@ -8,8 +8,8 @@ credential file (``~/.aws/credentials``, ``~/.ssh/id_*``, ``.env``, ``*.pem``,
 before the agent reads or modifies the file.
 
 This module also exposes a permissions-audit utility
-(``check_file_permissions`` / ``check_all``) used by future ``guard-doctor``
-tooling. The audit utility is independent of the hook entry point.
+(``check_file_permissions`` / ``check_all``) for future diagnostic-CLI use.
+The audit utility is independent of the hook entry point.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from guard._utils import emit_pretooluse_decision, log_decision, safe_main
 
 _HOOK_ID = "guard.credential_check"
 
-# === Permissions-audit utility (kept for future guard-doctor CLI) ===
+# === Permissions-audit utility (used by the future diagnostic CLI) ===
 
 CREDENTIAL_FILES: list[Path] = [
     Path.home() / ".claude" / "credentials" / "auth0.json",

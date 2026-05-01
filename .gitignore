@@ -20,7 +20,7 @@ venv/
 # OS
 .DS_Store
 
-# Local Claude Code state (dev-loop progress, scope files, checkpoints)
+# Local Claude Code state (per-session progress, scope files, checkpoints)
 .claude/
 
 # uv

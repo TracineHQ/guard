@@ -1,7 +1,7 @@
 # guard JSONL decision log — output format v1
 
 **Status:** stable contract. Breaking changes require schema version bump.
-**Audience:** consumers of `~/.claude/guard-decisions.jsonl` (notably TracineHQ/convo).
+**Audience:** any consumer that tails or imports `~/.claude/guard-decisions.jsonl` (observability pipelines, audit tools).
 **Specifies:** path, format, schema, writer guarantees, consumer responsibilities.
 
 ## 1. Path
@@ -37,7 +37,7 @@
 - Monotonic int. Currently `1`.
 - **Additive changes** (new optional fields) keep the version.
 - **Breaking changes** (rename, removal, type change, semantic change) require a version bump.
-- Consumers (notably convo) MUST quarantine records with unknown `schema_version` and log a warning. Consumers MUST NOT crash on unknown versions.
+- Consumers MUST quarantine records with unknown `schema_version` and log a warning. Consumers MUST NOT crash on unknown versions.
 
 ## 5. Atomic-append writer policy
 
@@ -53,8 +53,7 @@
 ## 6. Rotation policy
 
 - **Writer (guard) does NOT rotate.** It appends indefinitely.
-- **Consumer (convo) owns retention, rotation, and compaction.** Consumers are expected to tail-and-trim, ship to a durable store, or apply their own age/size policies.
-- A future v1.1 may ship a manual `guard-doctor truncate` CLI subcommand for operators. v1 ships no automatic rotation.
+- **Consumers own retention, rotation, and compaction.** Tail-and-trim, ship to a durable store, or apply your own age/size policies.
 
 ## 7. Examples
 
