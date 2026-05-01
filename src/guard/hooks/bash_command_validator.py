@@ -684,6 +684,12 @@ _SHELL_C_FLAGS_RE = re.compile(r"^-[a-zA-Z]*c$")
 # duration; nice/ionice take optional ``-n N`` / ``-c N``).
 _TIMING_RUNNERS: frozenset[str] = frozenset({"timeout", "nice", "ionice"})
 
+# Token-count minimums for runner shapes; defined here so they live next to
+# the helpers that consume them (otherwise we forward-reference them).
+_UVX_MIN_TOKENS = 2  # `uvx <interpreter>`
+_PIPX_RUN_MIN_TOKENS = 3  # `pipx run <interpreter>`
+_SCRIPT_C_MIN_TOKENS = 4  # `script <output> -c <cmd>`
+
 
 def _shlex_tokens(segment: str) -> list[str]:
     """Tokenize ``segment`` via shlex, falling back to whitespace split."""
@@ -830,10 +836,11 @@ def _strip_script(tokens: list[str]) -> str | None:
     return None
 
 
-# Order matters: shell wrappers must run before simple-runner so ``bash -c``
-# isn't accidentally treated as a plain runner; sudo must run before shell so
-# ``sudo bash -c`` peels both. Beyond that the helpers are mutually exclusive
-# on head-token basename, so order between them doesn't matter.
+# Helpers are mutually exclusive on head-token basename, so dispatch order
+# between them is irrelevant. Double-peel cases like ``sudo bash -c '...'`` are
+# handled because each helper returns the inner segment, and `is_safe_command`
+# / `_match_synthetic_deny` re-canonicalise + re-strip on the result, recursing
+# through the dispatcher again until no helper matches.
 _RUNNER_STRIPPERS: tuple[Callable[[list[str]], str | None], ...] = (
     _strip_shell_wrapper,
     _strip_sudo,
@@ -874,9 +881,6 @@ _INTERPRETER_BASENAME_RE = re.compile(
 )
 
 
-_UVX_MIN_TOKENS = 2  # `uvx <interpreter>`
-_PIPX_RUN_MIN_TOKENS = 3  # `pipx run <interpreter>`
-_SCRIPT_C_MIN_TOKENS = 4  # `script <output> -c <cmd>`
 _PIPELINE_PRODUCER_CONSUMER_MIN = 2  # producer | consumer pairs
 
 
