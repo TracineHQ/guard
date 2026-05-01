@@ -22,16 +22,18 @@ autonomous-mode behavior are now considered stable for the 1.x line.
 - `credential_check` — scans tool inputs for API keys, tokens, private
   keys, and provider-specific secret shapes before they leave the agent.
 - `commit_message_validator` — rejects commit messages that leak
-  attribution metadata or reference internal tooling by name.
-- `agent_output_guard` — strips/denies risky shapes the model emits in
-  reasoning output (e.g. exfiltration prompts).
-- `chrome_safety_validator` — gates `chrome-cli` actions, blocking
-  unsafe `eval` patterns and form submissions to non-allowlisted hosts.
-- `protected_files` — denies writes to credentials, SSH keys, shell
-  rc files, and other host-sensitive paths.
+  AI-tool attribution markers (Co-Authored-By footers, generated-with
+  notices, named tool branding).
+- `agent_output_guard` — denies direct reads of dispatched-subagent
+  output transcripts so context is preserved for the orchestrator.
+- `chrome_safety_validator` — gates `chrome-cli` actions: blocks unsafe
+  JS eval patterns and enforces profile isolation (`--user-data-dir`).
+- `protected_files` — forces an ASK confirmation on edits to guard's
+  own validator files and to the Claude Code settings files that
+  govern hook activation.
 - `subagent_scope` — restricts what a dispatched subagent can read or
   modify based on a per-task allowlist.
-- JSONL decision log (schema v1) at `~/.claude/guard/decisions.jsonl`
+- JSONL decision log (schema v1) at `~/.claude/guard-decisions.jsonl`
   for after-the-fact audit of every allow/deny.
 - Autonomous-mode strict default-deny: when `CLAUDE_AUTONOMOUS=1` is set
   the hooks switch to fail-closed semantics for ambiguous inputs.
