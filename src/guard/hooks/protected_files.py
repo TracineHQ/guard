@@ -77,6 +77,39 @@ def is_protected(file_path: str) -> str | None:
     return None
 
 
+def is_protected_parent_dir(dir_path: str) -> str | None:
+    """Return the matched protected pattern when ``dir_path`` is an ancestor.
+
+    Used for write shapes that target a directory rather than a file (e.g.
+    ``tar -xf foo.tar -C <dir>``). If any protected pattern's directory
+    prefix is a child of ``dir_path``, an extraction into ``dir_path`` could
+    overwrite the protected file.
+    """
+    if not dir_path:
+        return None
+    try:
+        resolved = Path(dir_path).resolve()
+    except (ValueError, OSError):
+        return None
+
+    resolved_str = str(resolved).rstrip("/")
+    for pattern in PROTECTED_PATTERNS:
+        # ``pattern`` is the suffix path of a protected file. An extraction
+        # into ``resolved_str`` could write to ``<resolved_str>/<tail>`` for
+        # some suffix ``tail``. We consider the dir risky if it sits anywhere
+        # along the protected pattern's directory chain — checking each
+        # progressively shallower prefix catches both a deep extraction
+        # (``-C <repo>/src/guard/hooks/``) and a shallow one
+        # (``-C <repo>/src/`` extracting an archive that contains
+        # ``guard/hooks/...``).
+        parts = pattern.split("/")
+        for j in range(1, len(parts)):
+            prefix = "/".join(parts[:j])
+            if resolved_str.endswith("/" + prefix):
+                return pattern
+    return None
+
+
 # Bash redirect / file-write commands and their target-extracting regex / token
 # index. Used by ``bash_write_targets`` as a best-effort second line of
 # defense — the primary path is the Edit/Write tool guard above.
@@ -129,7 +162,94 @@ def bash_write_targets(command: str) -> list[str]:
     # ``awk -i inplace`` / ``gawk -i inplace``. Each rewrites its file
     # operands without going through redirect / cp shapes.
     targets.extend(_inplace_editor_targets(tokens))
+
+    # Truncators / patchers / archive extractors. Each rewrites or creates
+    # files at a path argument that doesn't go through ``>`` / ``cp`` /
+    # ``tee`` / in-place editor shapes.
+    targets.extend(_truncate_patch_tar_targets(tokens))
     return targets
+
+
+def _truncate_patch_tar_targets(tokens: list[str]) -> list[str]:
+    """Extract write targets from ``truncate``, ``patch``, and ``tar -x ... -C``."""
+    out: list[str] = []
+    for i, tok in enumerate(tokens):
+        head = tok.rsplit("/", 1)[-1]
+        rest = tokens[i + 1 :]
+        if head == "truncate":
+            # ``truncate -s 0 file [file ...]`` — every non-flag positional
+            # arg is a write target. Skip the value of ``-s`` / ``--size``.
+            out.extend(_positional_args_skipping_value(rest, {"-s", "--size", "-r", "--reference"}))
+        elif head == "patch":
+            # ``patch <path> [opts...]`` — the first non-flag positional is
+            # the file to be patched. Other shapes (``patch -p1 < x.diff``)
+            # don't expose a path arg, so we skip them.
+            for t in rest:
+                if t.startswith("-"):
+                    continue
+                out.append(t)
+                break
+        elif head == "tar":
+            extract_dir = _tar_extract_dir(rest)
+            if extract_dir is not None:
+                out.append(extract_dir)
+    return out
+
+
+def _positional_args_skipping_value(tokens: list[str], flags_with_value: set[str]) -> list[str]:
+    """Yield non-flag positional args, skipping the value after a ``flags_with_value`` flag."""
+    out: list[str] = []
+    skip_next = False
+    for t in tokens:
+        if skip_next:
+            skip_next = False
+            continue
+        if t in flags_with_value:
+            skip_next = True
+            continue
+        if t.startswith("-"):
+            # Inline ``--size=0`` etc. — no value to skip
+            continue
+        out.append(t)
+    return out
+
+
+def _tar_is_extract(tokens: list[str]) -> bool:
+    """Return True if ``tar`` arg list indicates extract mode (``x[fz]?`` or ``--extract``).
+
+    Recognises three forms:
+    - GNU long: ``--extract`` / ``--get``
+    - Short flag(s): ``-x``, ``-xf``, ``-xzf``, ``-xvf`` (any short cluster
+      starting with ``-`` and containing ``x``). Mode-bundle clusters that
+      do NOT contain ``x`` (``-cf``, ``-czf``, ``-tvf``) are not extract.
+    - Legacy bundle (no leading ``-``): the FIRST token is the mode bundle,
+      e.g. ``tar xf foo.tar`` or ``tar cz foo.tar``. We inspect only that
+      first token; later positional tokens are file/path args.
+    """
+    if not tokens:
+        return False
+    first = tokens[0]
+    if not first.startswith("-"):
+        # Legacy mode bundle.
+        return "x" in first
+    for tok in tokens:
+        if tok in ("-x", "--extract", "--get"):
+            return True
+        if tok.startswith("-") and not tok.startswith("--") and len(tok) > 1 and "x" in tok[1:]:
+            return True
+    return False
+
+
+def _tar_extract_dir(rest: list[str]) -> str | None:
+    """Return the ``-C <dir>`` / ``--directory=<dir>`` target for a ``tar -x...``, else ``None``."""
+    if not _tar_is_extract(rest):
+        return None
+    for i, tok in enumerate(rest):
+        if tok in ("-C", "--directory") and i + 1 < len(rest):
+            return rest[i + 1]
+        if tok.startswith("--directory="):
+            return tok[len("--directory=") :]
+    return None
 
 
 def _has_inplace_flag(flags: list[str]) -> bool:
@@ -172,6 +292,24 @@ def _bash_first_protected_match(command: str) -> str | None:
     """Return the first protected pattern matched by a bash write target."""
     for target in bash_write_targets(command):
         matched = is_protected(target)
+        if matched is not None:
+            return matched
+
+    # Tar extract-dir is a directory write target — check whether it sits
+    # anywhere on a protected file's directory chain (an extraction there
+    # could overwrite the protected file).
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = []
+    for i, tok in enumerate(tokens):
+        head = tok.rsplit("/", 1)[-1]
+        if head != "tar":
+            continue
+        extract_dir = _tar_extract_dir(tokens[i + 1 :])
+        if extract_dir is None:
+            continue
+        matched = is_protected_parent_dir(extract_dir)
         if matched is not None:
             return matched
     return None

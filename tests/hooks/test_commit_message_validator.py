@@ -288,12 +288,37 @@ class TestOpaqueMessageSources:
             # Process substitution -F <(...)
             "git commit -F <(echo 'Co-Authored-By: Claude')",
             "git commit --file <(printf 'fix\\n\\nCo-Authored-By: Claude')",
+            # Command substitution $(...) in the message slot — opaque, the
+            # shell expands after the hook runs so attribution can be smuggled.
+            "git commit -m \"$(printf %s 'Co-Authored-By: Claude')\"",
+            'git commit -m "$(cat /tmp/msg)"',
+            "git commit --message=\"$(echo 'Co-Authored-By: Claude')\"",
+            "git commit -m $(printf %s fix)",
         ],
     )
     def test_opaque_message_shape_denied(self, cmd):
         result = decide(cmd)
         assert result is not None, f"opaque shape not denied: {cmd!r}"
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_literal_message_still_passes(self):
+        """Regression: ordinary literal -m must not match the opaque regex."""
+        assert decide('git commit -m "fix bug"') is None
+        assert decide("git commit -m 'fix bug'") is None
+        assert decide('git commit --message="fix bug"') is None
+
+    def test_heredoc_still_extractable(self):
+        """The recognised heredoc shape is NOT opaque — body is inspectable."""
+        cmd = (
+            "git commit -m \"$(cat <<'EOF'\nfix bug\n\n"
+            'Co-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)"\n'
+        )
+        result = decide(cmd)
+        # Should deny via attribution detector, not via opaque-source reason.
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "AI attribution" in reason
 
 
 class TestExtendedAttribution:

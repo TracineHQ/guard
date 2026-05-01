@@ -181,6 +181,132 @@ class TestExpandedToolCoverage:
         assert capsys.readouterr().out == ""
 
 
+class TestTruncatePatchTar:
+    """Truncate / patch / tar-extract write shapes must surface ASK."""
+
+    def test_truncate_protected_asks(self, capsys):
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": (
+                        "truncate -s 0 "
+                        "/Users/dev/develop/guard/src/guard/hooks/bash_command_validator.py"
+                    )
+                },
+            }
+        )
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_truncate_size_after_path_asks(self, capsys):
+        # ``truncate file -s 0`` — flag after path
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": ("truncate /Users/dev/develop/guard/src/guard/registry.py -s 0")
+                },
+            }
+        )
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_truncate_unrelated_passes(self, capsys):
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "truncate -s 0 /tmp/scratch.txt"},
+            }
+        )
+        assert capsys.readouterr().out == ""
+
+    def test_patch_protected_asks(self, capsys):
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": (
+                        "patch /Users/dev/develop/guard/src/guard/hooks/"
+                        "bash_command_validator.py < /tmp/p.patch"
+                    )
+                },
+            }
+        )
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_patch_with_flags_protected_asks(self, capsys):
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": (
+                        "patch -p1 /Users/dev/develop/guard/src/guard/_utils.py < /tmp/p.patch"
+                    )
+                },
+            }
+        )
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_patch_unrelated_passes(self, capsys):
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "patch /tmp/foo.txt < /tmp/p.patch"},
+            }
+        )
+        assert capsys.readouterr().out == ""
+
+    def test_tar_xf_C_protected_dir_asks(self, capsys):
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": ("tar -xf /tmp/x.tar -C /Users/dev/develop/guard/src/guard/hooks/")
+                },
+            }
+        )
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_tar_xzf_directory_long_form_asks(self, capsys):
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": (
+                        "tar xzf /tmp/x.tar.gz --directory=/Users/dev/develop/guard/src/guard"
+                    )
+                },
+            }
+        )
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_tar_extract_unrelated_passes(self, capsys):
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "tar -xf /tmp/x.tar -C /tmp/extract"},
+            }
+        )
+        assert capsys.readouterr().out == ""
+
+    def test_tar_create_does_not_match(self, capsys):
+        # ``tar c`` is read, not write — must not trip the extract-dir matcher.
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": ("tar -cf /tmp/x.tar -C /Users/dev/develop/guard/src/guard/hooks/ .")
+                },
+            }
+        )
+        assert capsys.readouterr().out == ""
+
+
 class TestSubagentScopeFileProtected:
     """`.claude/subagent-scope.json` must surface for review (security L2).
 

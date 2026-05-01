@@ -388,16 +388,25 @@ def _expand_home_var(token: str) -> str | None:
     return None
 
 
-def _iter_strings(value: Any) -> Iterator[str]:  # noqa: ANN401 -- tool_input is genuinely Any
-    """Yield every string contained in ``value`` recursively (dicts/lists/tuples)."""
+def all_strings_in(value: Any) -> Iterator[str]:  # noqa: ANN401 -- tool_input is genuinely Any
+    """Yield every string contained in ``value`` recursively (dicts/lists/tuples).
+
+    Used by hooks that need a verb-agnostic scan over any tool_input shape —
+    matchers can regex-search each yielded string without re-deriving how
+    paths/commands are nested. Complements ``all_paths_in`` (which extracts
+    only the path-like substrings).
+    """
     if isinstance(value, str):
         yield value
     elif isinstance(value, dict):
         for v in value.values():
-            yield from _iter_strings(v)
+            yield from all_strings_in(v)
     elif isinstance(value, (list, tuple)):
         for v in value:
-            yield from _iter_strings(v)
+            yield from all_strings_in(v)
+
+
+_iter_strings = all_strings_in  # backwards-compat alias for in-module callers
 
 
 def all_paths_in(value: Any) -> Iterator[str]:  # noqa: ANN401 -- tool_input is genuinely Any

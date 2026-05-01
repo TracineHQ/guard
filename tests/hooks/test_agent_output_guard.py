@@ -203,6 +203,103 @@ class TestPathAsSignal:
         self._assert_deny(decide("Bash", {"command": command}), label=command)
 
 
+class TestGlobPidBypass:
+    """Glob metacharacters in the pid slot must still match the pattern."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat /private/tmp/claude-*/proj/sess/tasks/*.output",
+            "cat /tmp/claude-*/proj/sess/tasks/abc.output",
+            "cat /private/tmp/claude-?/proj/sess/tasks/abc.output",
+            "cat /private/tmp/claude-12*4/proj/sess/tasks/abc.output",
+        ],
+    )
+    def test_glob_pid_in_command_denied(self, command):
+        result = decide("Bash", {"command": command})
+        assert result is not None, f"glob-pid bypass not denied: {command!r}"
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_glob_pid_via_read_denied(self):
+        result = decide(
+            "Read",
+            {"file_path": "/private/tmp/claude-*/proj/sess/tasks/abc.output"},
+        )
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_numeric_pid_still_matches(self):
+        """Regression: literal digit pids must still match after the regex change."""
+        result = decide(
+            "Read",
+            {"file_path": "/private/tmp/claude-1234/proj/sess/tasks/x.output"},
+        )
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+class TestCwdRelativeBypass:
+    """Relative paths under an agent-session cwd must be resolved + matched."""
+
+    AGENT_CWD = "/private/tmp/claude-1234/proj/sess"
+
+    def test_cwd_relative_cat_denied(self):
+        result = decide(
+            "Bash",
+            {"command": "cat tasks/abc.output"},
+            cwd=self.AGENT_CWD,
+        )
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_cwd_relative_dotslash_cat_denied(self):
+        result = decide(
+            "Bash",
+            {"command": "cat ./tasks/abc.output"},
+            cwd=self.AGENT_CWD,
+        )
+        assert result is not None
+
+    def test_cwd_relative_glob_cat_denied(self):
+        result = decide(
+            "Bash",
+            {"command": "cat tasks/*.output"},
+            cwd=self.AGENT_CWD,
+        )
+        assert result is not None
+
+    def test_cwd_relative_read_denied(self):
+        result = decide(
+            "Read",
+            {"file_path": "tasks/abc.output"},
+            cwd=self.AGENT_CWD,
+        )
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_cwd_relative_linux_form_denied(self):
+        result = decide(
+            "Bash",
+            {"command": "cat tasks/abc.output"},
+            cwd="/tmp/claude-99/proj/sess",
+        )
+        assert result is not None
+
+    def test_cwd_outside_session_passes(self):
+        # Same relative path but cwd is NOT inside an agent session — passes.
+        result = decide(
+            "Bash",
+            {"command": "cat tasks/abc.output"},
+            cwd="/Users/dev/develop/myproj",
+        )
+        assert result is None
+
+    def test_cwd_none_does_not_crash(self):
+        # Default cwd=None must not break anything.
+        result = decide("Bash", {"command": "cat tasks/abc.output"})
+        assert result is None
+
+
 class TestDecideRobustness:
     def test_numeric_file_path(self):
         with contextlib.suppress(TypeError):

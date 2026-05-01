@@ -280,24 +280,39 @@ _STREAM_DENY_REASON = (
 
 _OPAQUE_SOURCE_DENY_REASON = (
     "Commit message uses a shell shape this validator cannot inspect: "
-    "ANSI-C ``$'...'`` quoting, ``$VAR`` / ``${VAR}`` expansion, or process "
-    "substitution ``-F <(...)`` / ``-F <(echo ...)``. The shell expands these "
-    "after the hook runs, so attribution markers can be smuggled past the "
-    "AI-tool checks. Write the message inline as a literal ``-m '...'`` or "
-    "via ``git commit -F <path>`` pointing at a regular file."
+    "ANSI-C ``$'...'`` quoting, ``$VAR`` / ``${VAR}`` expansion, command "
+    "substitution ``$(...)``, or process substitution ``-F <(...)``. The "
+    "shell expands these after the hook runs, so attribution markers can be "
+    "smuggled past the AI-tool checks. Write the message inline as a literal "
+    "``-m '...'`` or via ``git commit -F <path>`` pointing at a regular file."
 )
 
 # ``-m $'...'``, ``--message=$'...'`` ANSI-C quoting; ``$VAR`` / ``${VAR}``
-# variable expansion in the message slot; ``-F <(...)`` process substitution.
+# variable expansion in the message slot; ``$(...)`` command substitution
+# in the message slot; ``-F <(...)`` process substitution. Command sub
+# (``-m "$(printf %s ...)"``, ``-m "$(cat /tmp/msg)"``) is opaque to the
+# hook just like ``<(...)`` — the shell evaluates it after we run.
 _OPAQUE_MESSAGE_RE = re.compile(
-    r"""(?:-m|--message[= ])\s*(?:\$'|"\s*\$[A-Za-z_{]|'\s*\$[A-Za-z_{])"""
-    r"""|(?:-m|--message[= ])\s*\$\{?[A-Za-z_]"""
+    r"""(?:-m|--message[= ])\s*(?:\$'|"\s*\$[A-Za-z_{(]|'\s*\$[A-Za-z_{(])"""
+    r"""|(?:-m|--message[= ])\s*\$[\{(]?[A-Za-z_]"""
+    r"""|(?:-m|--message[= ])\s*["']?\$\("""
     r"""|(?:-F|--file)[= ]\s*<\("""
+)
+
+
+# Recognised heredoc shape ``-m "$(cat <<'EOF' ... EOF)"`` — the hook CAN
+# inspect this because the body is captured between the EOF markers, so it
+# must not be flagged as opaque even though it starts with ``-m "$(``.
+_HEREDOC_MESSAGE_RE = re.compile(
+    r"""-m\s+["']\$\(cat\s+<<'?EOF'?\s*\n(.*?)\nEOF\s*\)["']""",
+    re.DOTALL,
 )
 
 
 def _has_opaque_message_source(command: str) -> bool:
     """Return True for commit shapes whose message body the hook can't read."""
+    if _HEREDOC_MESSAGE_RE.search(command):
+        return False
     return bool(_OPAQUE_MESSAGE_RE.search(command))
 
 
