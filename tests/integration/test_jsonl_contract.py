@@ -204,6 +204,28 @@ def test_hook_emits_spec_compliant_record(
             assert record["cwd"] is None or isinstance(record["cwd"], str)
 
 
+def test_bash_validator_session_id_comes_from_payload(tmp_path: Path) -> None:
+    """``session_id`` in the JSONL record must match the payload, not the env."""
+    decisions_path = tmp_path / "decisions.jsonl"
+    payload = {
+        "session_id": "PAYLOAD-SID-XYZ",
+        "tool_name": "Bash",
+        "tool_input": {"command": "git add -A"},
+        "hook_event_name": "PreToolUse",
+        "cwd": str(tmp_path),
+    }
+    env_overrides = {"CLAUDE_SESSION_ID": "ENV-SID-ABC"}
+    _run_hook(
+        HOOKS_DIR / "bash_command_validator.py",
+        payload,
+        decisions_path,
+        env_overrides=env_overrides,
+    )
+    line = decisions_path.read_text().splitlines()[-1]
+    record = json.loads(line)
+    assert record["session_id"] == "PAYLOAD-SID-XYZ"
+
+
 def test_at_least_one_hook_emits_a_real_decision(tmp_path: Path) -> None:
     """Sanity: drive every hook against `git add -A` and assert >=1 decision logged.
 

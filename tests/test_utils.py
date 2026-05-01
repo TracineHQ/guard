@@ -12,6 +12,7 @@ from unittest import mock
 from guard._utils import (
     GUARD_DECISIONS_PATH,
     _env_int,
+    append_jsonl,
     emit_pretooluse_decision,
     is_autonomous_mode,
     log_decision,
@@ -393,6 +394,58 @@ def test_log_decision_record_under_4096_bytes(tmp_path: Path, monkeypatch) -> No
 
     raw = jsonl.read_bytes().splitlines()[-1] + b"\n"
     assert len(raw) <= 4096
+
+
+def test_log_decision_oversize_record_is_valid_json(tmp_path: Path, monkeypatch) -> None:
+    """Oversize records must remain valid JSON with the truncation marker.
+
+    Spec contract (docs/output-format.md §5): records ≤ 4096 bytes AND parseable
+    as JSON. Field-by-field truncation, never byte-slice.
+    """
+    jsonl = tmp_path / "decisions.jsonl"
+    monkeypatch.setattr("guard._utils.GUARD_DECISIONS_PATH", str(jsonl))
+
+    log_decision(
+        hook_id="guard.test_hook",
+        event="PreToolUse",
+        tool_name="Bash",
+        decision="deny",
+        reason="r" * 4000,
+        command_excerpt="c" * 8000,
+    )
+
+    line = jsonl.read_bytes().splitlines()[-1]
+    record = json.loads(line)  # raises if byte-sliced
+    assert record["decision"] == "deny"
+    assert record["hook_id"] == "guard.test_hook"
+    assert record["schema_version"] == 1
+    assert "timestamp" in record
+    # At least one truncatable field carries the marker.
+    assert any(
+        isinstance(record.get(f), str) and "…[truncated]" in record[f]
+        for f in ("command_excerpt", "reason")
+    )
+
+
+def test_append_jsonl_concurrent_writes_all_parse(tmp_path: Path) -> None:
+    """50-way concurrent writes must all produce valid JSON lines."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    jsonl = tmp_path / "concurrent.jsonl"
+
+    def writer(i: int) -> None:
+        append_jsonl(
+            jsonl,
+            {"schema_version": 1, "decision": "allow", "i": i, "pad": "x" * 200},
+        )
+
+    with ThreadPoolExecutor(max_workers=50) as pool:
+        list(pool.map(writer, range(50)))
+
+    lines = jsonl.read_bytes().splitlines()
+    assert len(lines) == 50
+    for line in lines:
+        json.loads(line)  # raises on any interleaved or truncated record
 
 
 # === sanitize_for_stderr: strip control characters ===

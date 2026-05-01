@@ -112,6 +112,7 @@ _STDIN_LIMIT = 1 << 20  # 1 MiB
 _JSONL_RECORD_MAX = 4096  # POSIX O_APPEND atomicity envelope on Linux
 _REASON_MAX_CHARS = 1024  # schema v1 §3
 _COMMAND_EXCERPT_MAX_CHARS = 4096  # schema v1 §3
+_TRUNCATION_MARKER = "…[truncated]"
 
 
 def token_basename(tok: str) -> str:
@@ -149,17 +150,74 @@ def parse_hook_input() -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _encode_line(entry: dict[str, Any]) -> bytes:
+    return (json.dumps(entry, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _shrink_to_envelope(entry: dict[str, Any]) -> bytes:
+    """Return the encoded JSONL line, ≤ 4 KiB and always valid JSON.
+
+    If the encoded entry exceeds ``_JSONL_RECORD_MAX``, ``command_excerpt`` is
+    truncated first (and tagged with the marker), then ``reason``. Required
+    fields (``decision``, ``hook_id``, ``schema_version``, ``timestamp``,
+    ``tool_name``, ``session_id``) are never modified.
+    """
+    line = _encode_line(entry)
+    if len(line) <= _JSONL_RECORD_MAX:
+        return line
+
+    # Conservative budget: shrink each truncatable field to a length that
+    # leaves room for the marker. We binary-search the field length so the
+    # final encoded line fits the envelope without overshooting.
+    for field in ("command_excerpt", "reason"):
+        if field not in entry or not isinstance(entry[field], str):
+            continue
+        original = entry[field]
+        if not original:
+            continue
+        lo, hi = 0, len(original)
+        best_fit: str | None = None
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            entry[field] = original[:mid] + _TRUNCATION_MARKER
+            candidate = _encode_line(entry)
+            if len(candidate) <= _JSONL_RECORD_MAX:
+                best_fit = entry[field]
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        if best_fit is None:
+            # Field plus marker can't fit — drop the field entirely with marker.
+            entry[field] = _TRUNCATION_MARKER
+        else:
+            entry[field] = best_fit
+        line = _encode_line(entry)
+        if len(line) <= _JSONL_RECORD_MAX:
+            return line
+
+    # Last resort: even a bare marker overflowed — emit a minimal record so
+    # downstream consumers can still parse a JSONL line.
+    minimal = {
+        "schema_version": entry.get("schema_version", 1),
+        "timestamp": entry.get("timestamp", ""),
+        "hook_id": entry.get("hook_id", ""),
+        "decision": entry.get("decision", ""),
+        "reason": _TRUNCATION_MARKER,
+    }
+    return _encode_line(minimal)
+
+
 def append_jsonl(path: str | Path, entry: dict[str, Any]) -> None:
     """Atomically append a JSONL record, capped at 4096 bytes.
 
     Uses ``os.write()`` on an ``O_APPEND`` fd for true single-syscall
-    atomicity per POSIX. Truncates to the 4 KiB envelope before write. Fails
-    open (silently) on ``OSError`` per the "guardrails not walls" doctrine —
-    a logging failure must never block legitimate work.
+    atomicity per POSIX. The encoded record is shrunk by truncating
+    ``command_excerpt`` then ``reason`` (with a ``…[truncated]`` marker) so
+    the line is both valid JSON and ≤ 4 KiB. Fails open (silently) on
+    ``OSError`` per the "guardrails not walls" doctrine — a logging failure
+    must never block legitimate work.
     """
-    line = (json.dumps(entry, separators=(",", ":")) + "\n").encode("utf-8")
-    if len(line) > _JSONL_RECORD_MAX:
-        line = line[: _JSONL_RECORD_MAX - 1] + b"\n"
+    line = _shrink_to_envelope(dict(entry))
     try:
         path_str = str(path)
         Path(path_str).parent.mkdir(parents=True, exist_ok=True)

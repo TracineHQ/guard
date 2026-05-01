@@ -103,6 +103,13 @@ _SPEC_DECISION_MAP: dict[str, Literal["allow", "deny", "ask", "pass"]] = {
 }
 
 
+# Holder for the in-flight payload's session_id and cwd. ``hook()`` updates
+# this at entry; ``_log_local`` (called from ``decide`` and helpers) reads
+# from it. Falls back to ``CLAUDE_SESSION_ID`` env when called outside a
+# ``hook()`` context (e.g. unit tests that drive ``decide`` directly).
+_REQUEST_CONTEXT: dict[str, Any] = {"session_id": "", "cwd": None}
+
+
 def _log_local(command: str, decision: str, reason: str) -> None:
     """Append a decision row to the JSONL log. Best-effort, never raises.
 
@@ -110,6 +117,7 @@ def _log_local(command: str, decision: str, reason: str) -> None:
     onto the spec writer in ``guard._utils.log_decision``.
     """
     spec_decision = _SPEC_DECISION_MAP.get(decision, "pass")
+    session_id = _REQUEST_CONTEXT["session_id"] or os.environ.get("CLAUDE_SESSION_ID", "")
     log_decision(
         hook_id=_HOOK_ID,
         event="PreToolUse",
@@ -117,7 +125,8 @@ def _log_local(command: str, decision: str, reason: str) -> None:
         decision=spec_decision,
         reason=reason,
         command_excerpt=command,
-        session_id=os.environ.get("CLAUDE_SESSION_ID", ""),
+        session_id=session_id,
+        cwd=_REQUEST_CONTEXT["cwd"],
     )
 
 
@@ -1721,6 +1730,10 @@ def hook(payload: dict[str, Any]) -> None:
     command = tool_input.get("command", "")
     if not isinstance(command, str) or not command:
         return
+
+    _REQUEST_CONTEXT["session_id"] = str(payload.get("session_id") or "")
+    cwd = payload.get("cwd")
+    _REQUEST_CONTEXT["cwd"] = cwd if isinstance(cwd, str) else None
 
     _hard_deny_check(command)
 
