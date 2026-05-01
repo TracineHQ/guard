@@ -66,6 +66,10 @@ AI_TOOL_NAMES: list[str] = [
     "amazon q",
     "chatgpt",
     "openai",
+    "sonnet",
+    "opus",
+    "haiku",
+    "anthropic",
 ]
 
 _TRAILER_RE = re.compile(
@@ -88,10 +92,12 @@ def check_ai_trailers(message: str) -> str | None:
     return None
 
 
-# Layer 3: Generated-by footers
+# Layer 3: Generated-by footers. Accept whitespace, hyphen, or trailing colon
+# between "Generated", "by"/"with", and the tool name (``Generated-by: Claude``
+# slips past whitespace-only matchers).
 _GENERATED_RE = re.compile(
-    r"(?:\U0001f916\s*)?Generated\s+(?:with|by)\s+"
-    r"(?:Claude|Devin|AI|Copilot|Cursor|Codex|Gemini|\[Claude)",
+    r"(?:\U0001f916\s*)?Generated[\s\-]+(?:with|by)[\s\-:]+"
+    r"(?:Claude|Devin|AI|Copilot|Cursor|Codex|Gemini|Sonnet|Opus|Haiku|\[Claude)",
     re.IGNORECASE,
 )
 
@@ -272,9 +278,34 @@ _STREAM_DENY_REASON = (
     "`git commit -F <path>`."
 )
 
+_OPAQUE_SOURCE_DENY_REASON = (
+    "Commit message uses a shell shape this validator cannot inspect: "
+    "ANSI-C ``$'...'`` quoting, ``$VAR`` / ``${VAR}`` expansion, or process "
+    "substitution ``-F <(...)`` / ``-F <(echo ...)``. The shell expands these "
+    "after the hook runs, so attribution markers can be smuggled past the "
+    "AI-tool checks. Write the message inline as a literal ``-m '...'`` or "
+    "via ``git commit -F <path>`` pointing at a regular file."
+)
+
+# ``-m $'...'``, ``--message=$'...'`` ANSI-C quoting; ``$VAR`` / ``${VAR}``
+# variable expansion in the message slot; ``-F <(...)`` process substitution.
+_OPAQUE_MESSAGE_RE = re.compile(
+    r"""(?:-m|--message[= ])\s*(?:\$'|"\s*\$[A-Za-z_{]|'\s*\$[A-Za-z_{])"""
+    r"""|(?:-m|--message[= ])\s*\$\{?[A-Za-z_]"""
+    r"""|(?:-F|--file)[= ]\s*<\("""
+)
+
+
+def _has_opaque_message_source(command: str) -> bool:
+    """Return True for commit shapes whose message body the hook can't read."""
+    return bool(_OPAQUE_MESSAGE_RE.search(command))
+
 
 def decide(command: str, cwd: str | None = None) -> dict[str, Any] | None:
     """Return a deny envelope if AI attribution is found, else ``None``."""
+    if _has_opaque_message_source(command):
+        return emit_pretooluse_decision("deny", _OPAQUE_SOURCE_DENY_REASON)
+
     message = extract_commit_message(command, cwd=cwd)
     if message is None:
         return None

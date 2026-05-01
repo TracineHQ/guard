@@ -271,6 +271,51 @@ class TestMultiMessageBypass:
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+class TestOpaqueMessageSources:
+    """Shapes whose message body the hook can't inspect must deny outright."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # ANSI-C quoting
+            "git commit -m $'fix\\n\\nCo-Authored-By: Claude'",
+            "git commit --message=$'fix\\n\\nCo-Authored-By: Claude'",
+            # Variable expansion in the message slot
+            'git commit -m "$MSG"',
+            "git commit -m '$MSG'",
+            "git commit -m ${MSG}",
+            "git commit --message $MSG",
+            # Process substitution -F <(...)
+            "git commit -F <(echo 'Co-Authored-By: Claude')",
+            "git commit --file <(printf 'fix\\n\\nCo-Authored-By: Claude')",
+        ],
+    )
+    def test_opaque_message_shape_denied(self, cmd):
+        result = decide(cmd)
+        assert result is not None, f"opaque shape not denied: {cmd!r}"
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+class TestExtendedAttribution:
+    """Recently-added attribution shapes (model names, hyphenated 'Generated-by')."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            'git commit -m "fix" -m "Co-Authored-By: Sonnet 4"',
+            'git commit -m "fix" -m "Co-Authored-By: Opus 4.7"',
+            'git commit -m "fix" -m "Co-Authored-By: Haiku 4.5"',
+            'git commit -m "fix" -m "Co-Authored-By: Anthropic AI"',
+            'git commit -m "fix" -m "Generated-by: Claude"',
+            'git commit -m "fix" -m "Generated-with-Claude"',
+        ],
+    )
+    def test_extended_attribution_denied(self, cmd):
+        result = decide(cmd)
+        assert result is not None, f"attribution not denied: {cmd!r}"
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 class TestSubprocessIntegration:
     def test_clean_commit_passthrough(self):
         decision, code = _run_hook('git commit -m "fix bug"')

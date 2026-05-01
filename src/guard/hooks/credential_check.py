@@ -101,11 +101,17 @@ _CREDENTIAL_PATH_PATTERNS: list[re.Pattern[str]] = [
 _BASH_CREDENTIAL_HINTS: tuple[str, ...] = (
     "/.aws/credentials",
     "/.aws/config",
+    "/.aws/sso/cache",
     "/.netrc",
-    "/.ssh/id_",
+    "/.ssh",  # whole directory tree: catches id_*, identity, authorized_keys, tar c ~/.ssh
     ".pem",
     ".key",
     "/.config/gh/hosts.yml",
+    "/.kube/config",
+    "/.docker/config.json",
+    "/.gnupg/",
+    ".env",
+    ".env.",
 )
 
 _ASK_REASON = (
