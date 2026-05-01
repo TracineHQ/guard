@@ -1,2 +1,3 @@
 [default.extend-words]
 # add false-positive identifiers as needed
+Nd = "Nd"  # placeholder for "N days" in CLI duration docstrings

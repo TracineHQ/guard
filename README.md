@@ -66,12 +66,23 @@ To disable an individual hook, remove its entry from `~/.claude/settings.json` P
 
 ## Output log
 
-Every decision is appended to `~/.claude/guard-decisions.jsonl` (NDJSON, one record per line). The schema is stable and documented in [docs/output-format.md](docs/output-format.md).
+Every decision is appended to `~/.claude/guard-decisions.jsonl` (NDJSON, one record per line). The schema is stable and documented in [docs/JSONL_FORMAT.md](docs/JSONL_FORMAT.md).
 
 Tail and pretty-print:
 
 ```
 tail -f ~/.claude/guard-decisions.jsonl | jq
+```
+
+Or use the built-in `guard` CLI for read-side queries:
+
+```
+guard status               # installation status + log location + line count
+guard noisy --since 7d     # top hit rules in the last week
+guard silent --since 30d   # rules that haven't fired in 30 days
+guard trace <session-id>   # all records for a single session
+guard test "<command>"     # what would each hook decide?
+guard diff                 # effective merged config (stub)
 ```
 
 ## Development

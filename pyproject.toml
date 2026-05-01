@@ -31,6 +31,9 @@ dev = [
   "vulture>=2.13",
 ]
 
+[project.scripts]
+guard = "guard.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/tracinehq/guard"
 Issues = "https://github.com/tracinehq/guard/issues"

@@ -118,6 +118,11 @@ _REASON_MAX_CHARS = 1024  # schema v1 §3
 _COMMAND_EXCERPT_MAX_CHARS = 4096  # schema v1 §3
 _TRUNCATION_MARKER = "…[truncated]"
 
+# Schema-v1 envelope: every record carries ``v`` (short alias) and ``mode``
+# (effective enforcement posture). See ``docs/JSONL_FORMAT.md``.
+_SCHEMA_V = 1
+_DEFAULT_MODE = "enforce"
+
 
 def token_basename(tok: str) -> str:
     """Return the basename of a shell token treated as a string, not a Path.
@@ -202,7 +207,9 @@ def _shrink_to_envelope(entry: dict[str, Any]) -> bytes:
     # Last resort: even a bare marker overflowed — emit a minimal record so
     # downstream consumers can still parse a JSONL line.
     minimal = {
-        "schema_version": entry.get("schema_version", 1),
+        "v": entry.get("v", _SCHEMA_V),
+        "schema_version": entry.get("schema_version", _SCHEMA_V),
+        "mode": entry.get("mode", _DEFAULT_MODE),
         "timestamp": entry.get("timestamp", ""),
         "hook_id": entry.get("hook_id", ""),
         "decision": entry.get("decision", ""),
@@ -247,9 +254,16 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
 ) -> None:
     """Append a spec-compliant decision record to the JSONL log.
 
-    Conforms to ``docs/output-format.md`` schema v1. Truncates
-    ``command_excerpt`` to 4096 chars and ``reason`` to 1024 chars to fit
-    within the 4 KiB record envelope. Fail-safe: never raises; logging
+    Conforms to ``docs/JSONL_FORMAT.md`` (schema v1). Every record carries:
+
+    - ``v: 1`` — short schema-version alias for fast consumers
+    - ``schema_version: 1`` — long form, kept for backward compatibility
+    - ``mode: "enforce"`` — effective enforcement posture; reserved for
+      ``"shadow"`` / ``"off"`` once config-driven mode lands
+    - ``timestamp`` — ISO-8601 UTC with microsecond precision and ``Z`` suffix
+
+    Truncates ``command_excerpt`` to 4096 chars and ``reason`` to 1024 chars
+    to fit within the 4 KiB record envelope. Fail-safe: never raises; logging
     failures are silent.
 
     Args:
@@ -264,7 +278,9 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
     """
     timestamp = datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
     record: dict[str, Any] = {
-        "schema_version": 1,
+        "v": _SCHEMA_V,
+        "schema_version": _SCHEMA_V,
+        "mode": _DEFAULT_MODE,
         "timestamp": timestamp,
         "hook_id": hook_id,
         "event": event,
