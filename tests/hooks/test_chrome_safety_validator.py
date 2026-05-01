@@ -30,7 +30,7 @@ def _run(command, *, autonomous=False, tool_name="Bash"):
         env["CLAUDE_AUTONOMOUS"] = "1"
     else:
         env.pop("CLAUDE_AUTONOMOUS", None)
-    result = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+    result = subprocess.run(
         [sys.executable, str(HOOK_PATH)],
         input=payload,
         capture_output=True,
@@ -181,7 +181,7 @@ class TestDangerousEvalDeniedWhenChromeSafetyAvailable:
 
 class TestSubprocessSmoke:
     def test_empty_stdin(self):
-        result = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+        result = subprocess.run(
             [sys.executable, str(HOOK_PATH)],
             input="",
             capture_output=True,
@@ -193,7 +193,7 @@ class TestSubprocessSmoke:
 
     def test_malformed_json(self):
         # Tranche 1 hardening I2: malformed JSON now fail-closed denies (rc=2).
-        result = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+        result = subprocess.run(
             [sys.executable, str(HOOK_PATH)],
             input="not json",
             capture_output=True,

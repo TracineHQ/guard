@@ -114,6 +114,16 @@ _REASON_MAX_CHARS = 1024  # schema v1 §3
 _COMMAND_EXCERPT_MAX_CHARS = 4096  # schema v1 §3
 
 
+def token_basename(tok: str) -> str:
+    """Return the basename of a shell token treated as a string, not a Path.
+
+    Hooks operate on user-supplied command strings before any filesystem
+    resolution. ``Path("/usr/bin/python3").name`` works but conflates real
+    filesystem paths with shell tokens that may not exist on disk.
+    """
+    return os.path.basename(tok)  # noqa: PTH119 -- string-token basename, not a real path
+
+
 def parse_hook_input() -> dict[str, Any] | None:
     """Read and parse hook stdin JSON, capped at 1 MiB.
 

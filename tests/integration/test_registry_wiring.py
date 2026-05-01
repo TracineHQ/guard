@@ -23,7 +23,7 @@ HOOK = REPO / "src" / "guard" / "hooks" / "bash_command_validator.py"
 def _run_hook(command: str) -> tuple[int, str, str]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO / "src")
-    proc = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+    proc = subprocess.run(
         [sys.executable, str(HOOK)],
         input=json.dumps(
             {

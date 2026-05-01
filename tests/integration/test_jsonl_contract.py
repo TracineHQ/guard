@@ -49,7 +49,7 @@ def _run_hook(
     env["GUARD_AUTONOMOUS_QUEUE_PATH"] = str(decisions_path.parent / "queue.jsonl")
     if env_overrides:
         env.update(env_overrides)
-    proc = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+    proc = subprocess.run(
         [sys.executable, str(hook_path)],
         input=json.dumps(payload),
         capture_output=True,
@@ -70,7 +70,7 @@ _HOOK_CASES: list[tuple[str, dict[str, Any]]] = [
             "tool_name": "Bash",
             "tool_input": {"command": "git add -A"},
             "hook_event_name": "PreToolUse",
-            "cwd": "/tmp/work",  # noqa: S108
+            "cwd": "/tmp/work",
         },
     ),
     (
@@ -80,7 +80,7 @@ _HOOK_CASES: list[tuple[str, dict[str, Any]]] = [
             "tool_name": "Bash",
             "tool_input": {"command": "git -C /repo clean -fd"},
             "hook_event_name": "PreToolUse",
-            "cwd": "/tmp/work",  # noqa: S108
+            "cwd": "/tmp/work",
         },
     ),
     (
@@ -90,7 +90,7 @@ _HOOK_CASES: list[tuple[str, dict[str, Any]]] = [
             "tool_name": "Edit",
             "tool_input": {"file_path": str(Path.home() / ".aws" / "credentials")},
             "hook_event_name": "PreToolUse",
-            "cwd": "/tmp/work",  # noqa: S108
+            "cwd": "/tmp/work",
         },
     ),
     (
@@ -102,7 +102,7 @@ _HOOK_CASES: list[tuple[str, dict[str, Any]]] = [
                 "command": 'git commit -m "fix\n\nCo-Authored-By: Claude <noreply@anthropic.com>"'
             },
             "hook_event_name": "PreToolUse",
-            "cwd": "/tmp/work",  # noqa: S108
+            "cwd": "/tmp/work",
         },
     ),
     (
@@ -112,7 +112,7 @@ _HOOK_CASES: list[tuple[str, dict[str, Any]]] = [
             "tool_name": "Read",
             "tool_input": {"file_path": "/private/tmp/claude-1/proj/sess/tasks/x.output"},
             "hook_event_name": "PreToolUse",
-            "cwd": "/tmp/work",  # noqa: S108
+            "cwd": "/tmp/work",
         },
     ),
     (
@@ -122,7 +122,7 @@ _HOOK_CASES: list[tuple[str, dict[str, Any]]] = [
             "tool_name": "Bash",
             "tool_input": {"command": "chrome eval"},
             "hook_event_name": "PreToolUse",
-            "cwd": "/tmp/work",  # noqa: S108
+            "cwd": "/tmp/work",
         },
     ),
     (
@@ -142,7 +142,7 @@ _HOOK_CASES: list[tuple[str, dict[str, Any]]] = [
             "tool_name": "Edit",
             "tool_input": {"file_path": "/repo/src/guard/hooks/bash_command_validator.py"},
             "hook_event_name": "PreToolUse",
-            "cwd": "/tmp/work",  # noqa: S108
+            "cwd": "/tmp/work",
         },
     ),
 ]

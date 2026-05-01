@@ -16,7 +16,7 @@ HOOK_PATH = Path(__file__).resolve().parents[2] / "src" / "guard" / "hooks" / "g
 
 def _run(command):
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
-    result = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+    result = subprocess.run(
         [sys.executable, str(HOOK_PATH)],
         input=payload,
         capture_output=True,

@@ -216,7 +216,7 @@ class TestFileBasedMessage:
 
 def _run_hook(command):
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
-    result = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+    result = subprocess.run(
         [sys.executable, str(HOOK_PATH)],
         input=payload,
         capture_output=True,
@@ -259,7 +259,7 @@ class TestMultiMessageBypass:
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "stream" in result["hookSpecificOutput"]["permissionDecisionReason"].lower()
 
-    def test_dash_F_short_form(self):  # noqa: N802 -- spec-named
+    def test_dash_F_short_form(self):
         # ``-F-`` (no space, dash means stdin) — must deny.
         result = decide("git commit -F-")
         assert result is not None
@@ -290,7 +290,7 @@ class TestSubprocessIntegration:
         assert code == 2
 
     def test_empty_stdin_passthrough(self):
-        result = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+        result = subprocess.run(
             [sys.executable, str(HOOK_PATH)],
             input="",
             capture_output=True,
@@ -303,7 +303,7 @@ class TestSubprocessIntegration:
     def test_malformed_json_denied(self):
         # Tranche 1 hardening I2: malformed JSON now fail-closed denies (rc=2).
         # Renamed from `_passthrough` because the contract has changed.
-        result = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+        result = subprocess.run(
             [sys.executable, str(HOOK_PATH)],
             input="NOT JSON",
             capture_output=True,

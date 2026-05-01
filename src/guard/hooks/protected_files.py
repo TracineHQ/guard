@@ -21,6 +21,8 @@ from guard._utils import emit_pretooluse_decision, log_decision, safe_main
 
 _HOOK_ID = "guard.protected_files"
 
+_CP_MV_INSTALL_MIN_OPERANDS = 2  # need both <src> and <dst>
+
 # Files that define security policy for all Claude Code sessions.
 # Changes to these affect every repo and every agent.
 PROTECTED_PATTERNS: list[str] = [
@@ -111,7 +113,7 @@ def _bash_target_paths(command: str) -> list[str]:
             targets.extend(t for t in rest if not t.startswith("-"))
         elif head in {"cp", "mv", "install"}:
             non_flag = [t for t in rest if not t.startswith("-")]
-            if len(non_flag) >= 2:  # noqa: PLR2004 -- need src+dst
+            if len(non_flag) >= _CP_MV_INSTALL_MIN_OPERANDS:
                 targets.append(non_flag[-1])
         elif head == "ln":
             non_flag = [t for t in rest if not t.startswith("-")]

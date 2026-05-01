@@ -92,7 +92,7 @@ def test_f6_nbsp_rm_rf_root() -> None:
 # B5 — any producer | shell pipeline
 
 
-import pytest  # noqa: E402 -- group imports for round-2 cases below
+import pytest
 
 
 @pytest.mark.parametrize(

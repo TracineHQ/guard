@@ -11,13 +11,12 @@ dedicated query CLI instead.
 from __future__ import annotations
 
 import json
-import os
 import re
 import shlex
 import sys
 from typing import Any
 
-from guard._utils import emit_pretooluse_decision, log_decision, safe_main
+from guard._utils import emit_pretooluse_decision, log_decision, safe_main, token_basename
 
 _HOOK_ID = "guard.agent_output_guard"
 
@@ -81,8 +80,7 @@ def _is_file_reader_command(command: str) -> bool:
         tokens = command.strip().split()
     if not tokens:
         return False
-    base = os.path.basename(tokens[0])  # noqa: PTH119 -- string-token basename
-    return base in _FILE_READERS
+    return token_basename(tokens[0]) in _FILE_READERS
 
 
 def decide(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any] | None:

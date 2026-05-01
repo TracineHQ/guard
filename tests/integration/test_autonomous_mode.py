@@ -4,7 +4,6 @@ unsafe segments and surfaces AUTONOMOUS_FEEDBACK custom messages.
 Locks in the strict-mode safety net for subagents / driven agents so it can't
 silently regress again.
 """
-# ruff: noqa: S603 -- explicit interpreter, fixed hook path
 
 from __future__ import annotations
 
@@ -41,7 +40,7 @@ def _run(
                 "tool_name": "Bash",
                 "tool_input": {"command": command},
                 "hook_event_name": "PreToolUse",
-                "cwd": "/tmp",  # noqa: S108 -- hook payload string, not a filesystem op
+                "cwd": "/tmp",
             }
         ),
         capture_output=True,
@@ -127,7 +126,7 @@ def test_autonomous_queue_path_is_writable(tmp_path: Path) -> None:
                 "tool_name": "Bash",
                 "tool_input": {"command": "flarbnoz --gronk"},
                 "hook_event_name": "PreToolUse",
-                "cwd": "/tmp",  # noqa: S108 -- hook payload string, not a filesystem op
+                "cwd": "/tmp",
             }
         ),
         capture_output=True,

@@ -38,7 +38,7 @@ def _run(command, tmp_path=None):
     env = os.environ.copy()
     if tmp_path is not None:
         env["GUARD_DECISIONS_PATH"] = str(tmp_path / "decisions.jsonl")
-    result = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+    result = subprocess.run(
         [sys.executable, str(HOOK_PATH)],
         input=payload,
         capture_output=True,
@@ -250,7 +250,7 @@ class TestSubprocessIntegration:
 class TestAlwaysDeny:
     """Enforce the registry's ALWAYS_DENY set directly via decide()."""
 
-    def test_always_deny_git_add_dash_A(self):  # noqa: N802 -- spec-named test
+    def test_always_deny_git_add_dash_A(self):
         result = decide("git add -A")
         assert result is not None
         assert result["permissionDecision"] == "deny"
@@ -370,7 +370,7 @@ class TestCredentialLeakDeny:
 
 class TestRobustness:
     def test_empty_stdin(self, tmp_path):
-        result = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+        result = subprocess.run(
             [sys.executable, str(HOOK_PATH)],
             input="",
             capture_output=True,
@@ -383,7 +383,7 @@ class TestRobustness:
 
     def test_malformed_json(self, tmp_path):
         # Tranche 1 hardening I2: malformed JSON now fail-closed denies (rc=2).
-        result = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+        result = subprocess.run(
             [sys.executable, str(HOOK_PATH)],
             input="{not valid json",
             capture_output=True,
@@ -655,7 +655,7 @@ def _git_always_deny_literals():
 
 
 @pytest.mark.parametrize("literal", _git_always_deny_literals())
-def test_f5_git_literals_behind_dash_C_denied(literal):  # noqa: N802 -- spec-named
+def test_f5_git_literals_behind_dash_C_denied(literal):
     cmd = literal.replace("git ", "git -C /tmp ", 1)
     assert _is_deny(decide(cmd)), f"F5 not denied: {cmd!r}"
 

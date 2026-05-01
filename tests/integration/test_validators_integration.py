@@ -32,7 +32,7 @@ def _run_hook(hook_path, payload, env_overrides=None):
     env["PYTHONPATH"] = str(REPO / "src")
     if env_overrides:
         env.update(env_overrides)
-    proc = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+    proc = subprocess.run(
         [sys.executable, str(hook_path)],
         input=json.dumps(payload),
         capture_output=True,

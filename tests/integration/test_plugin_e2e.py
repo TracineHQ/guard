@@ -1,4 +1,3 @@
-# ruff: noqa: S108
 """End-to-end plugin install + smoke test.
 
 Stages the guard plugin into a temporary directory the way Claude Code's
@@ -100,7 +99,7 @@ def run_hook(
     env = os.environ.copy()
     env["PYTHONPATH"] = str(staged_root / "src")
     env["GUARD_DECISIONS_PATH"] = str(log_path)
-    proc = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+    proc = subprocess.run(
         [sys.executable, str(hook_path)],
         input=json.dumps(payload),
         capture_output=True,
@@ -370,7 +369,7 @@ def test_hook_commands_resolve_to_real_files(staged: Path) -> None:
     [pytest.param(d, h, p, e, id=d) for d, h, p, e in CASES],
 )
 def test_hook_behavior(  # noqa: PLR0913 -- pytest fixtures + matrix params unavoidable
-    description: str,  # noqa: ARG001 -- used as test id by pytest.param
+    description: str,
     hook_filename: str,
     payload: dict[str, object],
     expected: str,

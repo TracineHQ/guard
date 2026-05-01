@@ -44,6 +44,9 @@ from guard._utils import (
     safe_main,
     sanitize_for_stderr,
 )
+from guard._utils import (
+    token_basename as _basename,
+)
 from guard.registry import (
     ALWAYS_DENY,
     AUTONOMOUS_FEEDBACK,
@@ -815,7 +818,7 @@ def _strip_runner_prefix(segment: str) -> str | None:  # noqa: C901, PLR0911, PL
 
     # ``script /dev/null -c "..."``. Treat like a shell wrapper after the
     # output-file argument.
-    if head == "script" and len(tokens) >= 4:  # noqa: PLR2004 -- shape: script <file> -c <cmd>
+    if head == "script" and len(tokens) >= _SCRIPT_C_MIN_TOKENS:
         # tokens: script <output> -c <cmd...>
         for i in range(2, len(tokens) - 1):
             if _SHELL_C_FLAGS_RE.match(tokens[i]):
@@ -836,13 +839,10 @@ _INTERPRETER_BASENAME_RE = re.compile(
 )
 
 
-def _basename(path: str) -> str:
-    # os.path.basename works on shell tokens (no platform-Path semantics).
-    return os.path.basename(path)  # noqa: PTH119 -- string-token basename, not a real path object
-
-
 _UVX_MIN_TOKENS = 2  # `uvx <interpreter>`
 _PIPX_RUN_MIN_TOKENS = 3  # `pipx run <interpreter>`
+_SCRIPT_C_MIN_TOKENS = 4  # `script <output> -c <cmd>`
+_PIPELINE_PRODUCER_CONSUMER_MIN = 2  # producer | consumer pairs
 
 
 def _interpreter_uses_eval_flag(tokens: list[str]) -> bool:
@@ -1358,7 +1358,7 @@ def _is_pipe_to_shell(segments: list[str]) -> bool:
     regardless of which encoder/decoder/fetcher is on the producing side
     (curl, wget, base64, xxd, openssl, printf, echo, python -c, ...).
     """
-    if len(segments) < 2:  # noqa: PLR2004 -- "two segments minimum to form a producer|consumer pair"
+    if len(segments) < _PIPELINE_PRODUCER_CONSUMER_MIN:
         return False
     for i in range(len(segments) - 1):
         producer = segments[i].strip()

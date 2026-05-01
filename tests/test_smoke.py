@@ -5,8 +5,8 @@ from __future__ import annotations
 
 
 def test_critical_imports_resolve() -> None:
-    from guard import _utils, registry  # noqa: PLC0415
-    from guard.hooks import (  # noqa: PLC0415
+    from guard import _utils, registry
+    from guard.hooks import (
         agent_output_guard,
         bash_command_validator,
         chrome_safety_validator,

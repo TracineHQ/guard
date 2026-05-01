@@ -82,7 +82,7 @@ class TestDecide:
         """Linux subagent output dir is /tmp/claude-<pid>/... (no /private prefix)."""
         result = decide(
             "Read",
-            {"file_path": "/tmp/claude-12345/proj/sess/tasks/abc.output"},  # noqa: S108
+            {"file_path": "/tmp/claude-12345/proj/sess/tasks/abc.output"},
         )
         assert result is not None
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
@@ -169,7 +169,7 @@ class TestHookFunction:
 
 class TestSubprocess:
     def _run_hook(self, stdin_data):
-        return subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+        return subprocess.run(
             [sys.executable, str(HOOK_PATH)],
             input=stdin_data,
             capture_output=True,

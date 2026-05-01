@@ -1,5 +1,4 @@
 """Tests for guard._utils."""
-# ruff: noqa: S603, PTH111
 
 from __future__ import annotations
 
@@ -323,7 +322,7 @@ def test_log_decision_writes_all_required_fields(tmp_path: Path, monkeypatch) ->
         reason="testing",
         command_excerpt="ls -la",
         session_id="sess-1",
-        cwd="/tmp/work",  # noqa: S108
+        cwd="/tmp/work",
     )
 
     line = jsonl.read_text().splitlines()[-1]
@@ -336,7 +335,7 @@ def test_log_decision_writes_all_required_fields(tmp_path: Path, monkeypatch) ->
     assert record["reason"] == "testing"
     assert record["command_excerpt"] == "ls -la"
     assert record["session_id"] == "sess-1"
-    assert record["cwd"] == "/tmp/work"  # noqa: S108
+    assert record["cwd"] == "/tmp/work"
     # Timestamp must end with Z (UTC) and parse as ISO-8601
     assert record["timestamp"].endswith("Z")
 

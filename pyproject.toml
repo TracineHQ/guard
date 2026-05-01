@@ -37,7 +37,19 @@ ignore = ["D203", "D213", "COM812", "ISC001"]
 pydocstyle.convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["S101", "PLR2004", "ANN", "D"]
+"tests/**/*.py" = [
+  "S101",      # asserts are the point of pytest
+  "PLR2004",   # magic numbers in test fixtures are normal
+  "ANN",       # don't require type annotations on test fns
+  "D",         # don't require docstrings on test fns
+  "S603",      # subprocess-without-shell: every hook test spawns the hook script
+  "S108",      # /tmp string literals are payloads, not real fs operations
+  "PLC0415",   # local imports inside test fns / lazy hook imports
+  "N802",      # snake_case test names sometimes mirror spec terms (test_dash_F_short_form)
+  "ARG001",    # unused args used as pytest.param ids
+  "PTH111",    # os.path used in payload strings, not real path objects
+  "E402",      # grouped imports below header sections are intentional
+]
 "src/guard/__init__.py" = ["D104"]
 
 [tool.mypy]

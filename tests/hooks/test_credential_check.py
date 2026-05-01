@@ -100,7 +100,7 @@ class TestDecide:
         assert result is None
 
     def test_write_pem_asks(self):
-        result = decide("Write", {"file_path": "/tmp/server.pem"})  # noqa: S108
+        result = decide("Write", {"file_path": "/tmp/server.pem"})
         assert result is not None
         assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
 

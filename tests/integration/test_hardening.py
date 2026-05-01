@@ -25,7 +25,7 @@ def _run_bash(command: str, *, autonomous: bool = False) -> tuple[int, str, str]
     env["PYTHONPATH"] = str(REPO / "src")
     if autonomous:
         env["CLAUDE_AUTONOMOUS"] = "1"
-    proc = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+    proc = subprocess.run(
         [sys.executable, str(HOOK)],
         input=json.dumps(
             {
@@ -33,7 +33,7 @@ def _run_bash(command: str, *, autonomous: bool = False) -> tuple[int, str, str]
                 "tool_name": "Bash",
                 "tool_input": {"command": command},
                 "hook_event_name": "PreToolUse",
-                "cwd": "/tmp",  # noqa: S108 -- payload string, not a filesystem op
+                "cwd": "/tmp",
             }
         ),
         capture_output=True,
@@ -108,7 +108,7 @@ def test_settings_json_edit_asks() -> None:
     env["PYTHONPATH"] = str(REPO / "src")
     home = Path.home()
     target = home / ".claude" / "settings.json"
-    proc = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+    proc = subprocess.run(
         [sys.executable, str(PROTECTED)],
         input=json.dumps(
             {
@@ -120,7 +120,7 @@ def test_settings_json_edit_asks() -> None:
                     "new_string": "y",
                 },
                 "hook_event_name": "PreToolUse",
-                "cwd": "/tmp",  # noqa: S108 -- payload string, not a filesystem op
+                "cwd": "/tmp",
             }
         ),
         capture_output=True,
@@ -140,7 +140,7 @@ def test_oversized_stdin_denied() -> None:
     payload = json.dumps(
         {"tool_name": "Bash", "tool_input": {"command": big}, "hook_event_name": "PreToolUse"}
     )
-    proc = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+    proc = subprocess.run(
         [sys.executable, str(HOOK)],
         input=payload,
         capture_output=True,
@@ -156,7 +156,7 @@ def test_malformed_json_denied() -> None:
     """Malformed JSON must fail-closed deny (regression: was silent passthrough)."""
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO / "src")
-    proc = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+    proc = subprocess.run(
         [sys.executable, str(HOOK)],
         input="{not valid json",
         capture_output=True,
@@ -206,7 +206,7 @@ def test_git_commit_dash_f_with_ai_attribution_denied(tmp_path: Path) -> None:
     msg_file.write_text("Co-Authored-By: Claude <noreply@anthropic.com>\n", encoding="utf-8")
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO / "src")
-    proc = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+    proc = subprocess.run(
         [sys.executable, str(COMMIT_MSG_HOOK)],
         input=json.dumps(
             {
@@ -233,7 +233,7 @@ def test_git_commit_long_file_flag_with_ai_attribution_denied(tmp_path: Path) ->
     msg_file.write_text("Generated with Claude Code\n", encoding="utf-8")
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO / "src")
-    proc = subprocess.run(  # noqa: S603 -- explicit interpreter, fixed path
+    proc = subprocess.run(
         [sys.executable, str(COMMIT_MSG_HOOK)],
         input=json.dumps(
             {
@@ -327,7 +327,7 @@ def test_interpreter_version_probes_allowed_in_autonomous(cmd: str) -> None:
 
 def test_jsonl_writer_truncates_to_4096_bytes(tmp_path: Path) -> None:
     """Records must be <= 4096 bytes (POSIX O_APPEND atomicity envelope)."""
-    from guard._utils import append_jsonl  # noqa: PLC0415
+    from guard._utils import append_jsonl
 
     target = tmp_path / "log.jsonl"
     huge_reason = "x" * 10000
