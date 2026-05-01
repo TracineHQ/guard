@@ -13,6 +13,11 @@ any ``Edit`` or ``Write`` whose target ``file_path`` does not match an entry
 in ``allowed`` is denied. Missing or malformed scope files cause silent
 passthrough so hook errors never block work.
 
+For ``Bash``, every write-target shape that ``protected_files.bash_write_targets``
+recognises (redirects, ``cp``/``mv`` destinations, ``tee``, ``dd of=``, in-place
+editors) is run through the same scope check. This closes the bypass where a
+subagent with a tight Edit/Write scope shells out to ``echo > /etc/hosts``.
+
 Pattern semantics:
 
 - Trailing slash (``pkg/tests/``) → recursive directory match.
@@ -29,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from guard._utils import emit_pretooluse_decision, log_decision, safe_main
+from guard.hooks.protected_files import bash_write_targets
 
 _HOOK_ID = "guard.subagent_scope"
 
@@ -176,21 +182,15 @@ def _extract_file_and_cwd(payload: dict[str, Any]) -> tuple[str, str] | None:
     return file_path, cwd
 
 
-def hook(payload: dict[str, Any]) -> None:
-    """Top-level hook entry point."""
-    parsed = _extract_file_and_cwd(payload)
-    if parsed is None:
-        return
-    file_path, cwd = parsed
-
-    scope = load_scope(cwd)
-    if scope is None:
-        return
-
-    allowed_raw = scope.get("allowed", [])
-    if not isinstance(allowed_raw, list) or is_allowed(file_path, cwd, allowed_raw):
-        return
-
+def _emit_deny(
+    *,
+    payload: dict[str, Any],
+    file_path: str,
+    cwd: str,
+    scope: dict[str, Any],
+    allowed_raw: list[Any],
+) -> None:
+    """Emit the standard scope-violation deny envelope and exit 2."""
     task = scope.get("task", "current task")
     allowed_list = "\n".join(f"  - {p}" for p in allowed_raw if isinstance(p, str))
     reason = (
@@ -212,6 +212,70 @@ def hook(payload: dict[str, Any]) -> None:
     )
     sys.stdout.write(json.dumps(envelope))
     sys.exit(2)
+
+
+def _handle_bash(payload: dict[str, Any]) -> None:
+    """Enforce scope on Bash write-target shapes (redirects, cp/mv, tee, dd, ...)."""
+    tool_input = payload.get("tool_input", {}) or {}
+    if not isinstance(tool_input, dict):
+        return
+    command = tool_input.get("command", "")
+    if not isinstance(command, str) or not command:
+        return
+    cwd = payload.get("cwd", "")
+    if not isinstance(cwd, str) or not cwd:
+        return
+
+    scope = load_scope(cwd)
+    if scope is None:
+        return
+
+    allowed_raw = scope.get("allowed", [])
+    if not isinstance(allowed_raw, list):
+        return
+
+    for target in bash_write_targets(command):
+        if not target:
+            continue
+        if is_allowed(target, cwd, allowed_raw):
+            continue
+        _emit_deny(
+            payload=payload,
+            file_path=target,
+            cwd=cwd,
+            scope=scope,
+            allowed_raw=allowed_raw,
+        )
+
+
+def hook(payload: dict[str, Any]) -> None:
+    """Top-level hook entry point."""
+    tool_name = payload.get("tool_name")
+
+    if tool_name == "Bash":
+        _handle_bash(payload)
+        return
+
+    parsed = _extract_file_and_cwd(payload)
+    if parsed is None:
+        return
+    file_path, cwd = parsed
+
+    scope = load_scope(cwd)
+    if scope is None:
+        return
+
+    allowed_raw = scope.get("allowed", [])
+    if not isinstance(allowed_raw, list) or is_allowed(file_path, cwd, allowed_raw):
+        return
+
+    _emit_deny(
+        payload=payload,
+        file_path=file_path,
+        cwd=cwd,
+        scope=scope,
+        allowed_raw=allowed_raw,
+    )
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from guard._utils import emit_pretooluse_decision, log_decision, safe_main
+from guard._utils import all_paths_in, emit_pretooluse_decision, log_decision, safe_main
 
 _HOOK_ID = "guard.protected_files"
 
@@ -39,6 +39,9 @@ PROTECTED_PATTERNS: list[str] = [
     # decides whether guard hooks even fire. Edits must surface for review.
     ".claude/settings.json",
     ".claude/settings.local.json",
+    # Subagent scope file — a subagent rewriting its own scope is a TOCTOU
+    # bypass of subagent_scope.py. Force ASK on edits.
+    ".claude/subagent-scope.json",
     # Compatibility patterns for users who installed earlier hook scripts
     # under ``~/.claude/hooks/`` rather than via the plugin layout.
     "hooks/command_registry.py",
@@ -75,19 +78,21 @@ def is_protected(file_path: str) -> str | None:
 
 
 # Bash redirect / file-write commands and their target-extracting regex / token
-# index. Used by ``_bash_targets_protected`` as a best-effort second line of
+# index. Used by ``bash_write_targets`` as a best-effort second line of
 # defense — the primary path is the Edit/Write tool guard above.
 _BASH_REDIRECT_RE = re.compile(r"(?:^|\s)>>?\s*(\S+)")
 _BASH_DD_OF_RE = re.compile(r"(?:^|\s)of=(\S+)")
 
 
-def _bash_target_paths(command: str) -> list[str]:
+def bash_write_targets(command: str) -> list[str]:
     """Return likely write-target paths from a bash command.
 
     Best-effort: scans for output redirects (``>``, ``>>``), ``tee``,
-    ``cp``, ``mv``, ``ln -sf``, ``install``, and ``dd of=`` targets.
-    Used as a backup when an agent uses ``Bash`` to write to a protected
-    path that the Edit/Write hooks would otherwise miss.
+    ``cp``, ``mv``, ``ln -sf``, ``install``, and ``dd of=`` targets, plus
+    in-place editor flags (``sed -i``, ``perl -i``, ``awk -i inplace``).
+
+    Public so other hooks (notably ``subagent_scope``) can reuse the same
+    write-target enumerator instead of duplicating the bash-shape parsing.
     """
     targets: list[str] = []
     targets.extend(_BASH_REDIRECT_RE.findall(command))
@@ -165,14 +170,36 @@ def _inplace_editor_targets(tokens: list[str]) -> list[str]:
 
 def _bash_first_protected_match(command: str) -> str | None:
     """Return the first protected pattern matched by a bash write target."""
-    for target in _bash_target_paths(command):
+    for target in bash_write_targets(command):
         matched = is_protected(target)
         if matched is not None:
             return matched
     return None
 
 
+def _fallthrough_first_protected_match(tool_input: dict[str, Any]) -> str | None:
+    """Scan every path-like token in ``tool_input`` against ``is_protected``.
+
+    Defense-in-depth: any tool we don't have an explicit handler for is run
+    through the universal path scanner. If a future tool (or an existing one
+    invoked with an unexpected payload shape) targets a protected file, we
+    surface ASK rather than miss it.
+    """
+    for token in all_paths_in(tool_input):
+        matched = is_protected(token)
+        if matched is not None:
+            return matched
+    return None
+
+
 _FILE_PATH_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+
+
+def _excerpt_for_fallthrough(tool_input: dict[str, Any]) -> str:
+    """Return a short, human-readable excerpt for a fallthrough match."""
+    for token in all_paths_in(tool_input):
+        return token
+    return ""
 
 
 def hook(payload: dict[str, Any]) -> None:
@@ -199,7 +226,14 @@ def hook(payload: dict[str, Any]) -> None:
         matched = _bash_first_protected_match(command)
         excerpt = command
     else:
-        return
+        # Defense-in-depth: any other tool shape gets the universal path
+        # scanner. Catches shapes we haven't enumerated explicitly (e.g.
+        # Glob/Grep with a write semantic, future tools) without us having
+        # to keep the matcher list in lockstep with the tool taxonomy.
+        matched = _fallthrough_first_protected_match(tool_input)
+        if matched is None:
+            return
+        excerpt = _excerpt_for_fallthrough(tool_input)
 
     if matched is None:
         return

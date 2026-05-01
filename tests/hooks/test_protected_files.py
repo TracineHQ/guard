@@ -89,6 +89,8 @@ class TestHook:
         assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
 
     def test_passes_through_on_non_edit_tool(self, capsys):
+        # ``cat`` has no write-target; the Bash branch produces no candidates
+        # so the hook passes through.
         hook(
             {
                 "tool_name": "Bash",
@@ -97,14 +99,17 @@ class TestHook:
         )
         assert capsys.readouterr().out == ""
 
-    def test_passes_through_on_read_tool(self, capsys):
+    def test_read_protected_now_asks_under_fallthrough(self, capsys):
+        # Defense-in-depth: under the universal path scanner, Read of a
+        # protected file surfaces ASK. Previous behavior was passthrough.
         hook(
             {
                 "tool_name": "Read",
                 "tool_input": {"file_path": "/repo/hooks/command_registry.py"},
             }
         )
-        assert capsys.readouterr().out == ""
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
 
     def test_passes_through_on_missing_file_path(self, capsys):
         hook({"tool_name": "Edit", "tool_input": {}})
@@ -171,6 +176,60 @@ class TestExpandedToolCoverage:
             {
                 "tool_name": "Bash",
                 "tool_input": {"command": "ls /tmp"},
+            }
+        )
+        assert capsys.readouterr().out == ""
+
+
+class TestSubagentScopeFileProtected:
+    """`.claude/subagent-scope.json` must surface for review (security L2).
+
+    A subagent rewriting its own scope is a TOCTOU bypass of subagent_scope.py.
+    """
+
+    def test_subagent_scope_json_edit_asks(self, capsys):
+        hook(
+            {
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "/repo/.claude/subagent-scope.json"},
+            }
+        )
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_subagent_scope_json_bash_redirect_asks(self, capsys):
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": "echo {} > /repo/.claude/subagent-scope.json",
+                },
+            }
+        )
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+class TestFallthroughToolCoverage:
+    """Defense-in-depth: any tool we don't handle explicitly still gets scanned."""
+
+    def test_glob_with_protected_pattern_asks(self, capsys):
+        # A Glob that targets a protected path (defensive — Glob is read-only
+        # today, but the principle is "any tool call should look for the path").
+        hook(
+            {
+                "tool_name": "Glob",
+                "tool_input": {"pattern": "/repo/src/guard/hooks/protected_files.py"},
+            }
+        )
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_unknown_tool_with_safe_path_passes(self, capsys):
+        hook(
+            {
+                "tool_name": "Glob",
+                "tool_input": {"pattern": "/repo/src/myapp/main.py"},
             }
         )
         assert capsys.readouterr().out == ""

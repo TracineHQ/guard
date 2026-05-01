@@ -316,3 +316,93 @@ class TestSubagentScopeF7:
         assert exc.value.code == 2
         envelope = json.loads(capsys.readouterr().out)
         assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+class TestBashWriteTargets:
+    """Bash write-target shapes must be enforced against the scope file.
+
+    Without this, a subagent with a tight Edit/Write scope can shell out to
+    ``echo X > /etc/hosts`` (or cp/tee/dd) and silently bypass the scope.
+    """
+
+    def test_bash_redirect_target_outside_scope_denies(self, tmp_path, capsys):
+        _write_scope(tmp_path, {"task": "T1", "allowed": ["src/"]})
+        with pytest.raises(SystemExit) as exc:
+            hook(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "echo X > /etc/hosts"},
+                    "cwd": str(tmp_path),
+                }
+            )
+        assert exc.value.code == 2
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_bash_cp_dest_outside_scope_denies(self, tmp_path, capsys):
+        _write_scope(tmp_path, {"task": "T1", "allowed": ["src/"]})
+        with pytest.raises(SystemExit) as exc:
+            hook(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "cp local.txt /etc/hosts"},
+                    "cwd": str(tmp_path),
+                }
+            )
+        assert exc.value.code == 2
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_bash_tee_outside_scope_denies(self, tmp_path, capsys):
+        _write_scope(tmp_path, {"task": "T1", "allowed": ["src/"]})
+        with pytest.raises(SystemExit) as exc:
+            hook(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "echo X | tee /etc/hosts"},
+                    "cwd": str(tmp_path),
+                }
+            )
+        assert exc.value.code == 2
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_bash_dd_of_outside_scope_denies(self, tmp_path, capsys):
+        _write_scope(tmp_path, {"task": "T1", "allowed": ["src/"]})
+        with pytest.raises(SystemExit) as exc:
+            hook(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "dd if=/dev/zero of=/etc/hosts"},
+                    "cwd": str(tmp_path),
+                }
+            )
+        assert exc.value.code == 2
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_bash_redirect_inside_scope_passthrough(self, tmp_path, capsys):
+        _write_scope(tmp_path, {"task": "T1", "allowed": ["src/"]})
+        # Use an in-scope target written relative to cwd; the Bash command runs
+        # in cwd so the resolver treats ``src/foo.py`` as ``<cwd>/src/foo.py``.
+        (tmp_path / "src").mkdir()
+        target = tmp_path / "src" / "foo.py"
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": f"echo X > {target}"},
+                "cwd": str(tmp_path),
+            }
+        )
+        assert capsys.readouterr().out == ""
+
+    def test_bash_no_write_targets_passthrough(self, tmp_path, capsys):
+        _write_scope(tmp_path, {"task": "T1", "allowed": ["src/"]})
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo hello"},
+                "cwd": str(tmp_path),
+            }
+        )
+        assert capsys.readouterr().out == ""

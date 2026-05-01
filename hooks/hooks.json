@@ -22,7 +22,7 @@
         ]
       },
       {
-        "matcher": "Edit|Write",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|Glob|Grep|WebFetch",
         "hooks": [
           { "type": "command", "command": "python3 ${CLAUDE_PLUGIN_ROOT}/src/guard/hooks/protected_files.py" },
           { "type": "command", "command": "python3 ${CLAUDE_PLUGIN_ROOT}/src/guard/hooks/subagent_scope.py" }
