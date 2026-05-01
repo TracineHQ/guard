@@ -55,6 +55,16 @@ ALLOWED_SUBCOMMANDS: frozenset[str] = frozenset(
 # Destructive subcommands — hard deny with -C
 DENIED_SUBCOMMANDS: frozenset[str] = frozenset({"clean", "reset"})
 
+# Subcommands that are read-only by default but become destructive with these
+# flags. ``branch -D feature`` deletes a branch; ``tag -d v1`` deletes a tag;
+# ``remote remove origin`` removes a remote. The presence of any flag in the
+# matching set on the otherwise-allowed subcommand flips the decision to deny.
+_DESTRUCTIVE_SUBCOMMAND_FLAGS: dict[str, frozenset[str]] = {
+    "branch": frozenset({"-d", "-D", "-m", "-M", "--delete", "--move", "--force"}),
+    "tag": frozenset({"-d", "--delete"}),
+    "remote": frozenset({"remove", "rm", "rename", "set-url"}),
+}
+
 # Stash sub-subcommands that are destructive
 DENIED_STASH_ACTIONS: frozenset[str] = frozenset({"pop", "drop", "clear"})
 
@@ -156,6 +166,17 @@ def _decide_stash(remaining: list[str]) -> dict[str, Any] | None:
     return None
 
 
+def _has_destructive_subcommand_flag(subcommand: str, remaining: list[str]) -> str | None:
+    """Return the destructive flag/operand that flips an allowed subcommand to deny."""
+    flags = _DESTRUCTIVE_SUBCOMMAND_FLAGS.get(subcommand)
+    if not flags:
+        return None
+    for tok in remaining:
+        if tok in flags:
+            return tok
+    return None
+
+
 def _classify_subcommand(subcommand: str, remaining: list[str]) -> dict[str, Any]:
     """Classify a parsed subcommand into an allow/deny/ask envelope."""
     if subcommand == "config":
@@ -167,6 +188,12 @@ def _classify_subcommand(subcommand: str, remaining: list[str]) -> dict[str, Any
     if subcommand in DENIED_SUBCOMMANDS:
         return emit_pretooluse_decision(
             "deny", f"git -C: '{subcommand}' is destructive and blocked"
+        )
+    destructive_flag = _has_destructive_subcommand_flag(subcommand, remaining)
+    if destructive_flag is not None:
+        return emit_pretooluse_decision(
+            "deny",
+            f"git -C: '{subcommand} {destructive_flag}' is destructive and blocked",
         )
     if subcommand in ALLOWED_SUBCOMMANDS:
         return emit_pretooluse_decision("allow", f"git -C: '{subcommand}' is read-only")
@@ -187,20 +214,56 @@ def _is_reuse_token(tok: str, idx: int, parts: list[str]) -> bool:
     return tok.startswith("--reuse-message=")
 
 
+def _skip_git_global_flags(parts: list[str]) -> int:
+    """Return the index of the first non-global-flag token after ``git``.
+
+    Walks past ``-C <path>``, ``-c <key=val>``, ``--git-dir <path>``,
+    ``--work-tree <path>``, ``--namespace <ns>``, ``--exec-path``, ``-p``,
+    etc. so that ``git -C /tmp commit -C HEAD`` parses as the ``commit`` shape.
+    """
+    if not parts or parts[0] != "git":
+        return 0
+    i = 1
+    n = len(parts)
+    consume_next = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
+    while i < n:
+        tok = parts[i]
+        if tok in consume_next and i + 1 < n:
+            i += 2
+            continue
+        if "=" in tok and tok.split("=", 1)[0] in {"--git-dir", "--work-tree", "--namespace"}:
+            i += 1
+            continue
+        if tok.startswith("-") and not tok.startswith("--"):
+            # Bundled short flags / inline -C/path form are global.
+            i += 1
+            continue
+        if tok.startswith("--") and tok != "--":
+            # Long-form valueless global flags (--no-pager, --bare, --paginate).
+            i += 1
+            continue
+        break
+    return i
+
+
 def _is_commit_reuse(command: str) -> bool:
     """Return ``True`` if the command silently reuses a prior commit message.
 
-    Matches ``git commit -C <ref>`` and ``git commit --reuse-message=<ref>``.
-    These let an agent append to history without authoring a new message,
-    which defeats the audit trail commit_message_validator is meant to enforce.
+    Matches ``git commit -C <ref>`` and ``git commit --reuse-message=<ref>``,
+    including when a ``-C <path>`` / ``--git-dir <path>`` global flag prefixes
+    the ``commit`` subcommand. These let an agent append to history without
+    authoring a new message, which defeats the audit trail commit_message_validator
+    is meant to enforce.
     """
     try:
         parts = shlex.split(command)
     except ValueError:
         return False
-    if len(parts) < _COMMIT_HEAD_TOKENS or parts[0] != "git" or parts[1] != "commit":
+    sub_idx = _skip_git_global_flags(parts)
+    if sub_idx >= len(parts) or parts[sub_idx] != "commit":
         return False
-    return any(_is_reuse_token(tok, i, parts) for i, tok in enumerate(parts[2:], start=2))
+    rest = parts[sub_idx + 1 :]
+    return any(_is_reuse_token(tok, i, rest) for i, tok in enumerate(rest))
 
 
 def decide(command: str) -> dict[str, Any] | None:

@@ -190,3 +190,53 @@ class TestCommitMessageReuse:
         # `git commit -c HEAD` opens an editor with template; not silent reuse.
         decision, _ = _run("git commit -c HEAD")
         assert decision == "passthrough"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git -C /tmp commit -C HEAD",
+            "git -C /tmp commit --reuse-message=HEAD",
+            "git --git-dir=/tmp/.git commit -C HEAD",
+            "git --git-dir /tmp/.git commit --reuse-message HEAD",
+        ],
+    )
+    def test_reuse_with_global_flag_prefix_denied(self, command):
+        decision, code = _run(command)
+        assert decision == "deny", f"reuse with global prefix not denied: {command!r}"
+        assert code == 2
+
+
+class TestDestructiveSubcommandFlags:
+    """``branch -D``, ``tag -d``, ``remote remove`` etc. flip allow→deny."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git -C /tmp branch -D feature",
+            "git -C /tmp branch -d merged",
+            "git -C /tmp branch --delete feature",
+            "git -C /tmp branch -m old new",
+            "git -C /tmp branch -M force-rename",
+            "git -C /tmp tag -d v1.0",
+            "git -C /tmp tag --delete v1.0",
+            "git -C /tmp remote remove origin",
+            "git -C /tmp remote rm origin",
+            "git -C /tmp remote rename old new",
+        ],
+    )
+    def test_destructive_flag_denied(self, command):
+        decision, code = _run(command)
+        assert decision == "deny", f"destructive flag missed: {command!r}"
+        assert code == 2
+
+    def test_branch_listing_still_allowed(self):
+        decision, _ = _run("git -C /tmp branch -a")
+        assert decision == "allow"
+
+    def test_tag_listing_still_allowed(self):
+        decision, _ = _run("git -C /tmp tag -l")
+        assert decision == "allow"
+
+    def test_remote_listing_still_allowed(self):
+        decision, _ = _run("git -C /tmp remote -v")
+        assert decision == "allow"
