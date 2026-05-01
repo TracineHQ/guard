@@ -1050,7 +1050,7 @@ def _is_dangerous_rm(normalized: str) -> bool:
     return any(op in DANGEROUS_RM_OPERANDS for op in operands)
 
 
-_FIXPOINT_MAX_ITERATIONS = 8  # bounded peel depth to cap worst-case cost
+_FIXPOINT_MAX_ITERATIONS = 3  # bounded peel depth: anything deeper trips a synthetic-deny
 
 
 def _peel_one(form: str) -> str | None:
@@ -1074,6 +1074,35 @@ def _peel_one(form: str) -> str | None:
     if git_stripped is not None:
         return git_stripped
     return None
+
+
+def _exceeds_unwrap_cap(segment: str) -> bool:
+    """Return True when ``segment`` would need more than the allowed peel depth.
+
+    Mirrors the fixpoint loop in ``_candidate_forms`` but runs one peel past
+    the cap. If that extra peel still strips something, the segment is a
+    stacked-wrapper bypass attempt (``sudo sudo sudo sudo bash -c ...``,
+    ``env env env env env python3 -c ...``) and is denied outright.
+    """
+    normalized = _normalize_segment(segment)
+    runner_stripped = _strip_runner_prefix(segment)
+    current = _normalize_segment(runner_stripped) if runner_stripped is not None else normalized
+    seen: set[str] = {normalized, current}
+    for _ in range(_FIXPOINT_MAX_ITERATIONS):
+        nxt = _peel_one(current)
+        if nxt is None:
+            return False
+        nxt_norm = _normalize_segment(nxt)
+        if nxt_norm in seen or nxt_norm == current:
+            return False
+        seen.add(nxt_norm)
+        current = nxt_norm
+    # Cap reached. Peek one more layer; if it still strips, we exceeded the cap.
+    nxt = _peel_one(current)
+    if nxt is None:
+        return False
+    nxt_norm = _normalize_segment(nxt)
+    return nxt_norm != current and nxt_norm not in seen
 
 
 def _candidate_forms(segment: str) -> list[str]:
@@ -1152,6 +1181,7 @@ _SYNTH_VAR_EXPAND_DENY = "<variable-expanded head>"
 _SYNTH_SHELL_WRAPPER_DENY = "<shell-wrapper invocation>"
 _SYNTH_EVAL_BUILTIN_DENY = "<shell builtin: eval/source/.>"
 _SYNTH_DANGEROUS_ENV_DENY = "<dangerous env-var sink>"
+_SYNTH_WRAPPER_STACKING_DENY = "<wrapper-stacking>"
 
 _SYNTH_DENY_REASONS: dict[str, str] = {
     _SYNTH_INTERPRETER_DENY: (
@@ -1192,6 +1222,10 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         "GIT_PAGER, LD_PRELOAD, DYLD_*, PYTHONPATH, NODE_PATH, BASH_ENV, ...) "
         "is being set as a K=V command prefix. These are exec / loader / "
         "import-path hijack sinks; refuse to forward them to a subprocess."
+    ),
+    _SYNTH_WRAPPER_STACKING_DENY: (
+        "stacked command wrappers exceed allowed depth (3); split into "
+        "multiple commands or simplify the invocation."
     ),
 }
 
@@ -1297,7 +1331,20 @@ def _is_shell_wrapper_invocation(segment: str) -> bool:
     return False
 
 
-def _match_synthetic_deny(segment: str) -> str | None:  # noqa: PLR0911 -- linear matcher chain; each early-return represents a distinct synthetic deny class
+# Per-candidate-form matchers: run once per entry in ``_candidate_forms`` so
+# env / git / runner-wrapper bypasses are evaluated against the same matchers
+# as their bare forms. Order matters: F1/F2 must fire before peeling would
+# discard the head token.
+_PER_FORM_MATCHERS: tuple[tuple[Callable[[str], bool], str], ...] = (
+    (_is_eval_builtin_invocation, _SYNTH_EVAL_BUILTIN_DENY),
+    (_has_dangerous_env_sink, _SYNTH_DANGEROUS_ENV_DENY),
+    (_is_dangerous_interpreter, _SYNTH_INTERPRETER_DENY),
+    (_is_dangerous_rm, _SYNTH_RM_DENY),
+    (_is_git_config_injection, _SYNTH_GIT_CONFIG_DENY),
+)
+
+
+def _match_synthetic_deny(segment: str) -> str | None:
     """Return a synthetic-deny label if matchers fire, else ``None``.
 
     Covers F3 (non-canonical interpreters), F4 (dangerous rm shapes), and the
@@ -1309,29 +1356,21 @@ def _match_synthetic_deny(segment: str) -> str | None:  # noqa: PLR0911 -- linea
         return None
     forms = _candidate_forms(segment)
     for cand in forms:
-        # F1 — eval/source/. builtins (must fire on raw form before peeling
-        # would discard the head token).
-        if _is_eval_builtin_invocation(cand):
-            return _SYNTH_EVAL_BUILTIN_DENY
-        # F2 — dangerous K=V env sinks (GIT_SSH_COMMAND=, LD_PRELOAD=, ...).
-        if _has_dangerous_env_sink(cand):
-            return _SYNTH_DANGEROUS_ENV_DENY
-        if _is_dangerous_interpreter(cand):
-            return _SYNTH_INTERPRETER_DENY
-        if _is_dangerous_rm(cand):
-            return _SYNTH_RM_DENY
-        # Git config-injection (B2). Now run on every candidate form so a
-        # leading ``sudo``/``env``/etc. wrapper doesn't hide the inner
-        # ``git -c includeIf.*.path=...`` shape.
-        if _is_git_config_injection(cand):
-            return _SYNTH_GIT_CONFIG_DENY
-    # Variable-expanded head token (B3). Same: the raw normalized form is
+        for matcher, label in _PER_FORM_MATCHERS:
+            if matcher(cand):
+                return label
+    # Variable-expanded head token (B3): only the raw normalized form is
     # what matters; runner stripping would just hide the ``$VAR`` head.
     if _has_var_expanded_head(forms[0]):
         return _SYNTH_VAR_EXPAND_DENY
-    # Shell-wrapper invocations (B1). Deny outright regardless of payload.
+    # Shell-wrapper invocations (B1): deny outright regardless of payload.
     if _is_shell_wrapper_invocation(segment):
         return _SYNTH_SHELL_WRAPPER_DENY
+    # Wrapper-stacking past the unwrap cap (C2): if no per-form matcher fired
+    # and the peel cascade would still strip another layer, the segment is a
+    # deliberate bypass attempt.
+    if _exceeds_unwrap_cap(segment):
+        return _SYNTH_WRAPPER_STACKING_DENY
     return None
 
 

@@ -248,6 +248,44 @@ def test_f5_sudo_extra_flags(cmd):
     assert _is_deny(decide(cmd)), f"F5 not denied: {cmd!r}"
 
 
+# === Wrapper-stacking cap (C2) ===
+# The fixpoint peel cap is 3. Anything that would still strip on peel #4 is
+# a synthetic-deny under <wrapper-stacking>. Shallow stacks (1-3) must still
+# deny via the existing per-shape matchers.
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        # 4-deep sudo chain ending in a shell wrapper.
+        "sudo sudo sudo sudo bash -c 'x'",
+        # 4-deep env chain ending in a python interpreter eval.
+        'env A=1 env B=2 env C=3 env D=4 python3 -c "pass"',
+    ],
+)
+def test_c2_wrapper_stacking_denied(cmd):
+    assert _is_deny(decide(cmd)), f"C2 wrapper-stacking not denied: {cmd!r}"
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        # 1-deep
+        "sudo bash -c 'x'",
+        'env A=1 python3 -c "pass"',
+        # 2-deep
+        "sudo sudo bash -c 'x'",
+        'env A=1 env B=2 python3 -c "pass"',
+        # 3-deep (still within cap; existing matchers must still deny)
+        "sudo sudo sudo bash -c 'x'",
+        'env A=1 env B=2 env C=3 python3 -c "pass"',
+    ],
+)
+def test_c2_shallow_stacks_still_denied_by_other_matchers(cmd):
+    """Stacks within the cap must still deny via shell-wrapper / interpreter matchers."""
+    assert _is_deny(decide(cmd)), f"shallow stack not denied by existing matchers: {cmd!r}"
+
+
 def test_f8_inplace_editors_against_protected():
     from guard.hooks.protected_files import _bash_first_protected_match
 
