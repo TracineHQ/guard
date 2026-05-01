@@ -1,0 +1,44 @@
+name: False positive
+description: Guard blocked a command that should have been allowed.
+title: "false-positive: "
+labels: ["false-positive"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template when guard denied a legitimate command. Please
+        include the matching log entry so the maintainers can see exactly
+        which rule fired.
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: The literal command (or tool input) that was incorrectly blocked.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: Why this command should have been allowed.
+    validations:
+      required: true
+  - type: textarea
+    id: log-entry
+    attributes:
+      label: Log entry
+      description: |
+        The matching record from `~/.claude/guard-decisions.jsonl`. Find it
+        with something like `tail ~/.claude/guard-decisions.jsonl`.
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: guard-version
+    attributes:
+      label: Guard version
+      description: Paste the output of `python -m guard status`.
+      render: text
+    validations:
+      required: true

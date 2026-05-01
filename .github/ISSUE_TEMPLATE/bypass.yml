@@ -1,0 +1,76 @@
+name: Bypass report
+description: Report a way to slip a dangerous command past guard.
+title: "bypass: "
+labels: ["bypass", "security"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Scope
+
+        Use this template when you've found a way to **make guard allow a
+        command it should have blocked**, and the issue is safe to discuss
+        in the open.
+
+        **In scope:**
+
+        - Pattern-evasion in `bash_command_validator`, `git_c_validator`,
+          `commit_message_validator`, `chrome_safety_validator`,
+          `credential_check`, `protected_files`, `subagent_scope`,
+          `agent_output_guard`.
+        - Argument shapes that bypass an existing rule (encoded forms,
+          unicode quirks, path normalisation, env-prefix tricks, etc.).
+        - Decision-log records that misrepresent what was allowed.
+
+        **Out of scope (use Private Vulnerability Reporting instead):**
+
+        - Anything that exposes user secrets or arbitrary RCE on the host.
+        - Issues in Claude Code itself, not guard.
+
+        Read [SECURITY.md](https://github.com/tracinehq/guard/blob/main/SECURITY.md)
+        for the threat model and disclosure process. If you are unsure, treat
+        it as security-sensitive and report privately first.
+  - type: textarea
+    id: command
+    attributes:
+      label: Literal command
+      description: Paste the exact command (or tool input) that bypasses guard.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What should guard have done?
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behaviour
+      description: What did guard actually do?
+    validations:
+      required: true
+  - type: textarea
+    id: guard-version
+    attributes:
+      label: Guard version and status
+      description: Paste the output of `python -m guard status`.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: cc-version
+    attributes:
+      label: Claude Code version
+      description: Output of `claude --version` (or "Claude Code" -> About).
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: e.g. macOS 14.5, Ubuntu 24.04, Windows 11 + WSL2.
+    validations:
+      required: true

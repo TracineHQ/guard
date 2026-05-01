@@ -1,7 +1,14 @@
 name: Feature request
-description: Propose a new feature or enhancement for guard
+description: Propose a new feature or enhancement for guard.
+title: "feature: "
 labels: ["enhancement"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Please describe the change clearly. The motivation section is the
+        single most useful field for the maintainers — lead with the user
+        problem, not the solution.
   - type: textarea
     id: motivation
     attributes:
