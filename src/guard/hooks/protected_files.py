@@ -119,7 +119,48 @@ def _bash_target_paths(command: str) -> list[str]:
             non_flag = [t for t in rest if not t.startswith("-")]
             if non_flag:
                 targets.append(non_flag[-1])
+
+    # In-place editors: ``sed -i``, ``perl -i`` / ``-pi`` / ``-Pi``,
+    # ``awk -i inplace`` / ``gawk -i inplace``. Each rewrites its file
+    # operands without going through redirect / cp shapes.
+    targets.extend(_inplace_editor_targets(tokens))
     return targets
+
+
+def _has_inplace_flag(flags: list[str]) -> bool:
+    """Return True if any token in ``flags`` is or contains a ``-i`` form."""
+    for f in flags:
+        if not f.startswith("-") or f.startswith("--"):
+            continue
+        # Short-flag cluster like ``-pi``, ``-iE``, ``-i.bak``.
+        body = f[1:].split(".", 1)[0]
+        if "i" in body:
+            return True
+    return False
+
+
+def _inplace_editor_targets(tokens: list[str]) -> list[str]:
+    """Extract write targets from ``sed -i`` / ``perl -i`` / ``awk -i inplace``."""
+    out: list[str] = []
+    for i, tok in enumerate(tokens):
+        head = tok.rsplit("/", 1)[-1]
+        rest = tokens[i + 1 :]
+        if head == "sed" and _has_inplace_flag([t for t in rest if t.startswith("-")]):
+            out.extend(t for t in rest if not t.startswith("-"))
+        elif head == "perl" and _has_inplace_flag([t for t in rest if t.startswith("-")]):
+            # perl: skip the `-e <script>` token after the script body
+            non_flag = [t for t in rest if not t.startswith("-")]
+            if non_flag:
+                out.extend(non_flag[1:])  # drop the script body, keep file operands
+        elif head in {"awk", "gawk"}:
+            # gawk uses ``-i inplace`` (two tokens); skip the script body too
+            for j, t in enumerate(rest[:-1]):
+                if t == "-i" and rest[j + 1] == "inplace":
+                    non_flag = [x for x in rest[j + 2 :] if not x.startswith("-")]
+                    if non_flag:
+                        out.extend(non_flag[1:])
+                    break
+    return out
 
 
 def _bash_first_protected_match(command: str) -> str | None:

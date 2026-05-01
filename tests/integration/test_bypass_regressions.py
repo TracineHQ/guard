@@ -178,3 +178,80 @@ def test_b4_group_wrappers_denied(cmd):
 )
 def test_b5_pipe_to_shell_denied(cmd):
     assert _is_deny(decide(cmd)), f"B5 not denied: {cmd!r}"
+
+
+# === Round-3 bypasses ===
+# F1 — eval/source/. head-token deny
+# F2 — dangerous K=V env-var sinks (GIT_*/LD_*/DYLD_*/PYTHONPATH/...)
+# F3 — git -c includeIf.<cond>.path=... config sink
+# F4 — triple-stack sudo+env+interpreter (fixpoint peel)
+# F5 — sudo --preserve-env / positional VAR=
+# F6 — ANSI-C $'...' commit -m
+# F8 — sed -i / perl -pi / awk -i inplace against protected paths
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "eval rm -rf /",
+        'eval "rm -rf /"',
+        "source /tmp/evil.sh",
+        ". /tmp/evil.sh",
+    ],
+)
+def test_f1_eval_builtins_denied(cmd):
+    assert _is_deny(decide(cmd)), f"F1 not denied: {cmd!r}"
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        'GIT_SSH_COMMAND="rm -rf /" git fetch origin',
+        'GIT_EXTERNAL_DIFF="x" git diff',
+        "GIT_PAGER='!cmd' git log",
+        "LD_PRELOAD=/tmp/evil.so cat /etc/passwd",
+        "DYLD_INSERT_LIBRARIES=/tmp/evil.dylib ls",
+        "PYTHONPATH=/tmp/evil python -c 'pass'",
+    ],
+)
+def test_f2_dangerous_env_sinks_denied(cmd):
+    assert _is_deny(decide(cmd)), f"F2 not denied: {cmd!r}"
+
+
+def test_f3_git_includeif_path_denied():
+    assert _is_deny(
+        decide("git -c includeIf.gitdir:/tmp/.path=/tmp/evil.gitconfig status"),
+    )
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        'sudo -E env FOO=1 python3.11 -c "pass"',
+        'sudo -E env FOO=1 python3 -c "pass"',
+        "sudo env FOO=1 python -c 'pass'",
+    ],
+)
+def test_f4_triple_stack_peel(cmd):
+    assert _is_deny(decide(cmd)), f"F4 not denied: {cmd!r}"
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "sudo --preserve-env=FOO,BAR rm -rf /",
+        "sudo VAR=1 rm -rf /",
+        "sudo --user=x rm -rf /",
+    ],
+)
+def test_f5_sudo_extra_flags(cmd):
+    assert _is_deny(decide(cmd)), f"F5 not denied: {cmd!r}"
+
+
+def test_f8_inplace_editors_against_protected():
+    from guard.hooks.protected_files import _bash_first_protected_match
+
+    proto = "/Users/dev/develop/guard/src/guard/hooks/bash_command_validator.py"
+    assert _bash_first_protected_match(f"sed -i s/x/y/ {proto}") is not None
+    assert _bash_first_protected_match(f"perl -pi -e s/x/y/g {proto}") is not None
+    assert _bash_first_protected_match(f"awk -i inplace 1 {proto}") is not None

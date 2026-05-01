@@ -54,9 +54,11 @@ from guard.registry import (
     ALWAYS_DENY,
     AUTONOMOUS_FEEDBACK,
     COMMANDS,
+    DANGEROUS_ENV_SINKS,
     DANGEROUS_INTERPRETERS,
     DANGEROUS_RM_OPERANDS,
     DANGEROUS_SHELL_WRAPPERS,
+    EVAL_BUILTINS,
     GIT_CONFIG_EXEC_SINK_GLOBS,
     GIT_CONFIG_EXEC_SINKS,
     INTERPRETER_EVAL_FLAGS,
@@ -593,6 +595,23 @@ def _canonicalize(command: str) -> str:
 _SEG_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
+def _has_dangerous_env_assignment(tokens: list[str]) -> bool:
+    """Return True if any leading ``K=V`` token has K in DANGEROUS_ENV_SINKS.
+
+    Walks the leading run of ``K=V`` assignments (the bash positional
+    env-prefix syntax) and checks each key against the registry. Stops at
+    the first non-assignment token. Used by both the ``env K=V cmd`` form
+    and the bare ``K=V cmd`` form.
+    """
+    for tok in tokens:
+        if not _SEG_ENV_ASSIGN_RE.match(tok):
+            return False
+        key = tok.split("=", 1)[0]
+        if key in DANGEROUS_ENV_SINKS:
+            return True
+    return False
+
+
 def _strip_env_prefix(normalized: str) -> str | None:
     """If segment starts with ``env K=V K=V ...``, return the rest.
 
@@ -614,6 +633,54 @@ def _strip_env_prefix(normalized: str) -> str | None:
         # `env K=V` with no wrapped command — nothing to strip to.
         return None
     return " ".join(tokens[i:])
+
+
+def _strip_bare_env_assignments(normalized: str) -> str | None:
+    """If segment starts with ``K=V K=V ... cmd``, return the rest.
+
+    Bash accepts a leading run of ``K=V`` tokens before any command; they
+    set those env vars in the subprocess. ``GIT_SSH_COMMAND='...' git fetch``
+    is the canonical form. Returns ``None`` if there are no leading
+    assignments, or if no command follows.
+    """
+    tokens = normalized.split()
+    if not tokens or not _SEG_ENV_ASSIGN_RE.match(tokens[0]):
+        return None
+    i = 0
+    while i < len(tokens) and _SEG_ENV_ASSIGN_RE.match(tokens[i]):
+        i += 1
+    if i == 0 or i == len(tokens):
+        return None
+    return " ".join(tokens[i:])
+
+
+def _is_eval_builtin_invocation(normalized: str) -> bool:
+    """Return True if the head token is ``eval`` / ``source`` / ``.``.
+
+    Each of these executes its argument as code, defeating per-segment
+    validation. We deny outright regardless of payload.
+    """
+    tokens = normalized.split(maxsplit=1)
+    if not tokens:
+        return False
+    return _basename(tokens[0]) in EVAL_BUILTINS
+
+
+def _has_dangerous_env_sink(normalized: str) -> bool:
+    """Return True for ``GIT_SSH_COMMAND=… cmd`` / ``LD_PRELOAD=… cmd`` etc.
+
+    Covers both the bare ``K=V cmd`` form and the explicit ``env K=V cmd``
+    form. The middle case ``sudo K=V cmd`` is handled separately in
+    ``_strip_sudo`` (which strips sudo, then re-evaluates).
+    """
+    tokens = normalized.split()
+    if not tokens:
+        return False
+    if _has_dangerous_env_assignment(tokens):
+        return True
+    if tokens[0] == "env" and len(tokens) > 1:
+        return _has_dangerous_env_assignment(tokens[1:])
+    return False
 
 
 # Global git options that take a value either as the next token (``-C path``,
@@ -718,22 +785,41 @@ def _strip_shell_wrapper(tokens: list[str]) -> str | None:
     return None
 
 
+_SUDO_VALUE_FLAG_RE = re.compile(
+    r"^--(?:preserve-env|user|group|prompt|chdir|host|other-user|close-from)"
+    r"(?:=.*)?$"
+)
+
+
 def _strip_sudo(tokens: list[str]) -> str | None:
     """Strip ``sudo`` (with optional ``-E``/``-H``/``-u USER`` flags).
 
     Recurses through ``_strip_runner_prefix`` so ``sudo bash -c "..."`` peels
-    both wrappers. Returns the inner command, or ``None`` if not sudo.
+    both wrappers. Also consumes long-form value flags (``--preserve-env``,
+    ``--user=...`` etc.) and any positional ``K=V`` env assignments sudo
+    accepts before the command. Returns the inner command, or ``None`` if
+    not sudo.
     """
     if _basename(tokens[0]) != "sudo":
         return None
     i = 1
     while i < len(tokens):
         tok = tokens[i]
-        if tok in ("-E", "-H", "-S", "-i", "-s", "-n", "--"):
+        if tok in ("-E", "-H", "-S", "-i", "-s", "-n", "-b", "-k", "-K", "-A", "--"):
             i += 1
             continue
-        if tok in ("-u", "-g") and i + 1 < len(tokens):
+        if tok in ("-u", "-g", "-p", "-C", "-D", "-h", "-r", "-t") and i + 1 < len(tokens):
             i += 2
+            continue
+        if _SUDO_VALUE_FLAG_RE.match(tok):
+            # ``--preserve-env`` / ``--preserve-env=FOO,BAR`` / ``--user=X``.
+            # If no fused ``=value`` and a value follows, consume both; the
+            # bare flag (e.g. ``--preserve-env``) takes no value.
+            i += 1
+            continue
+        # Positional ``K=V`` env assignments — sudo accepts these before cmd.
+        if _SEG_ENV_ASSIGN_RE.match(tok):
+            i += 1
             continue
         break
     if i >= len(tokens):
@@ -964,6 +1050,32 @@ def _is_dangerous_rm(normalized: str) -> bool:
     return any(op in DANGEROUS_RM_OPERANDS for op in operands)
 
 
+_FIXPOINT_MAX_ITERATIONS = 8  # bounded peel depth to cap worst-case cost
+
+
+def _peel_one(form: str) -> str | None:
+    """Strip one layer of env / runner / git-global wrapper.
+
+    Returns the unwrapped form, or ``None`` if no helper fired. Used by
+    ``_candidate_forms`` to iterate to a fixpoint so triple-stacked wrappers
+    like ``sudo -E env FOO=1 python3 -c '...'`` peel all the way down to the
+    inner ``python3 -c '...'`` form the synthetic-deny matchers recognise.
+    """
+    env_stripped = _strip_env_prefix(form)
+    if env_stripped is not None:
+        return env_stripped
+    bare_env = _strip_bare_env_assignments(form)
+    if bare_env is not None:
+        return bare_env
+    runner_stripped = _strip_runner_prefix(form)
+    if runner_stripped is not None:
+        return runner_stripped
+    git_stripped = _strip_git_global_options(form)
+    if git_stripped is not None:
+        return git_stripped
+    return None
+
+
 def _candidate_forms(segment: str) -> list[str]:
     """Return all canonical forms of ``segment`` that matchers should consider.
 
@@ -971,30 +1083,40 @@ def _candidate_forms(segment: str) -> list[str]:
     "peelings" before the deny matchers fire:
 
     - normalized (quote/whitespace-folded)
-    - normalized + ``env K=V ...`` prefix stripped (F2)
-    - normalized + leading git global options stripped (F5)
+    - leading ``K=V`` env / ``env K=V ...`` prefix stripped (F2)
+    - leading git global options stripped (F5)
     - runner / shell wrapper prefix stripped (B1: ``bash -c "..."``,
-      ``sudo``, ``timeout 5 ...`` etc.). The runner strip uses shlex
-      tokenization on the RAW segment so quoted payloads survive.
+      ``sudo``, ``timeout 5 ...`` etc.)
 
-    Returning the list lets ``_match_always_deny`` and ``_match_synthetic_deny``
-    iterate the same set without duplicating the strip logic.
+    Triple-stacked forms like ``sudo -E env FOO=1 python3 -c "pass"`` need
+    multiple peels: sudo -> env -> bare interpreter. We iterate to a fixpoint
+    (capped to ``_FIXPOINT_MAX_ITERATIONS`` so a malicious input cannot drive
+    quadratic work). Each intermediate form is appended to the candidate list
+    so every matcher sees every peel layer.
     """
     forms: list[str] = []
     normalized = _normalize_segment(segment)
     forms.append(normalized)
-    env_stripped = _strip_env_prefix(normalized)
-    if env_stripped is not None:
-        forms.append(_normalize_segment(env_stripped))
-    git_stripped = _strip_git_global_options(normalized)
-    if git_stripped is not None:
-        forms.append(git_stripped)
     # Runner strip operates on the raw segment so ``bash -c "rm -rf /"``
     # yields a single inner token "rm -rf /" (preserving the payload), not
     # the post-shlex-collapsed form which would lose the quote boundary.
     runner_stripped = _strip_runner_prefix(segment)
     if runner_stripped is not None:
         forms.append(_normalize_segment(runner_stripped))
+
+    # Iterate strip cascade to a fixpoint.
+    seen: set[str] = set(forms)
+    current = forms[-1]
+    for _ in range(_FIXPOINT_MAX_ITERATIONS):
+        nxt = _peel_one(current)
+        if nxt is None:
+            break
+        nxt_norm = _normalize_segment(nxt)
+        if nxt_norm in seen or nxt_norm == current:
+            break
+        seen.add(nxt_norm)
+        forms.append(nxt_norm)
+        current = nxt_norm
     return forms
 
 
@@ -1028,6 +1150,8 @@ _SYNTH_RM_DENY = "<dangerous rm>"
 _SYNTH_GIT_CONFIG_DENY = "<git config injection>"
 _SYNTH_VAR_EXPAND_DENY = "<variable-expanded head>"
 _SYNTH_SHELL_WRAPPER_DENY = "<shell-wrapper invocation>"
+_SYNTH_EVAL_BUILTIN_DENY = "<shell builtin: eval/source/.>"
+_SYNTH_DANGEROUS_ENV_DENY = "<dangerous env-var sink>"
 
 _SYNTH_DENY_REASONS: dict[str, str] = {
     _SYNTH_INTERPRETER_DENY: (
@@ -1043,8 +1167,9 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
     _SYNTH_GIT_CONFIG_DENY: (
         "git config injection: a config key on the command line is a "
         "command-execution sink (alias.*, core.pager, core.editor, "
-        "*.cmd / *.clean / *.smudge, gpg.program, etc.). These keys cause "
-        "git internals to exec arbitrary commands; rewrite without -c."
+        "*.cmd / *.clean / *.smudge, gpg.program, includeIf.*.path, etc.). "
+        "These keys cause git internals to exec arbitrary commands or load "
+        "attacker-controlled config; rewrite without -c."
     ),
     _SYNTH_VAR_EXPAND_DENY: (
         "Variable-expanded head token cannot be statically evaluated. "
@@ -1056,6 +1181,17 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         "``zsh -c '...'``, ``sudo bash -c ...``, ``script /dev/null -c ...``). "
         "These re-enter the shell with attacker-controlled script bodies and "
         "are not allowed in agent contexts. Run the underlying command directly."
+    ),
+    _SYNTH_EVAL_BUILTIN_DENY: (
+        "Shell builtin (``eval``, ``source``, ``.``) executes its argument as "
+        "code; not allowed in agent context. Run the underlying command "
+        "directly instead of routing it through a builtin."
+    ),
+    _SYNTH_DANGEROUS_ENV_DENY: (
+        "A dangerous environment variable (GIT_SSH_COMMAND, GIT_EXTERNAL_DIFF, "
+        "GIT_PAGER, LD_PRELOAD, DYLD_*, PYTHONPATH, NODE_PATH, BASH_ENV, ...) "
+        "is being set as a K=V command prefix. These are exec / loader / "
+        "import-path hijack sinks; refuse to forward them to a subprocess."
     ),
 }
 
@@ -1173,14 +1309,22 @@ def _match_synthetic_deny(segment: str) -> str | None:  # noqa: PLR0911 -- linea
         return None
     forms = _candidate_forms(segment)
     for cand in forms:
+        # F1 — eval/source/. builtins (must fire on raw form before peeling
+        # would discard the head token).
+        if _is_eval_builtin_invocation(cand):
+            return _SYNTH_EVAL_BUILTIN_DENY
+        # F2 — dangerous K=V env sinks (GIT_SSH_COMMAND=, LD_PRELOAD=, ...).
+        if _has_dangerous_env_sink(cand):
+            return _SYNTH_DANGEROUS_ENV_DENY
         if _is_dangerous_interpreter(cand):
             return _SYNTH_INTERPRETER_DENY
         if _is_dangerous_rm(cand):
             return _SYNTH_RM_DENY
-    # Git config-injection (B2). The git canonicalization is done on the
-    # normalized form (no env / runner peeling needed for this matcher).
-    if _is_git_config_injection(forms[0]):
-        return _SYNTH_GIT_CONFIG_DENY
+        # Git config-injection (B2). Now run on every candidate form so a
+        # leading ``sudo``/``env``/etc. wrapper doesn't hide the inner
+        # ``git -c includeIf.*.path=...`` shape.
+        if _is_git_config_injection(cand):
+            return _SYNTH_GIT_CONFIG_DENY
     # Variable-expanded head token (B3). Same: the raw normalized form is
     # what matters; runner stripping would just hide the ``$VAR`` head.
     if _has_var_expanded_head(forms[0]):

@@ -938,6 +938,49 @@ PLAIN_RUNNER_PREFIXES: frozenset[str] = frozenset(
     }
 )
 
+# Shell builtins that execute their argument as code. ``eval`` runs its arg as
+# a shell command; ``source`` and ``.`` read and execute a script file.
+# All three trivially defeat any per-segment validator if used as the head
+# token, so we deny them outright in agent contexts.
+EVAL_BUILTINS: frozenset[str] = frozenset({"eval", "source", "."})
+
+# Environment variables whose values are passed through to internal exec sinks
+# (git transports, dynamic loaders, language interpreters). Setting any of
+# these as a ``K=V`` prefix on a command lets an attacker hijack the resulting
+# subprocess. ``PATH`` is intentionally absent — too noisy in normal use.
+DANGEROUS_ENV_SINKS: frozenset[str] = frozenset(
+    {
+        # git: shell-escaped exec sinks
+        "GIT_SSH_COMMAND",
+        "GIT_EXTERNAL_DIFF",
+        "GIT_PAGER",
+        "GIT_EDITOR",
+        "GIT_INDEX_FILE",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_TEMPLATE_DIR",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_NOSYSTEM",
+        # dynamic-linker hijack vectors (linux + darwin)
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "LD_AUDIT",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FORCE_FLAT_NAMESPACE",
+        # language-interpreter import-path hijacks
+        "PYTHONPATH",
+        "NODE_PATH",
+        "PERL5LIB",
+        "RUBYLIB",
+        "BASH_ENV",
+        "ENV",
+    }
+)
+
 # Git config keys whose values can contain ``!cmd`` shell escapes (alias.*),
 # external programs run by git internals (core.pager / core.editor / ...),
 # or filter commands. Setting these via ``git -c key=value`` or
@@ -971,6 +1014,11 @@ GIT_CONFIG_EXEC_SINK_GLOBS: tuple[tuple[str, str], ...] = (
     ("difftool.", ".cmd"),
     ("filter.", ".clean"),
     ("filter.", ".smudge"),
+    # ``includeIf.<gitdir-condition>.path=/path/to/.gitconfig`` tells git to
+    # load an attacker-controlled config file conditionally. The middle
+    # segment is opaque (``gitdir:/path``, ``onbranch:foo``); we only check
+    # the prefix/suffix bookends.
+    ("includeif.", ".path"),
 )
 
 
