@@ -281,8 +281,7 @@ class TestSubprocessIntegration:
             env=env,
         )
 
-    def test_subprocess_read_credentials_emits_ask(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("GUARD_DECISIONS_PATH", str(tmp_path / "log.jsonl"))
+    def test_subprocess_read_credentials_emits_ask(self, decision_log_env):
         result = self._run_hook(
             {
                 "tool_name": "Read",
@@ -293,8 +292,7 @@ class TestSubprocessIntegration:
         envelope = json.loads(result.stdout)
         assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
 
-    def test_subprocess_bash_var_indirection_emits_ask(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("GUARD_DECISIONS_PATH", str(tmp_path / "log.jsonl"))
+    def test_subprocess_bash_var_indirection_emits_ask(self, decision_log_env):
         result = self._run_hook(
             {
                 "tool_name": "Bash",
@@ -305,8 +303,7 @@ class TestSubprocessIntegration:
         envelope = json.loads(result.stdout)
         assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
 
-    def test_subprocess_heuristic_kdbx_emits_ask(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("GUARD_DECISIONS_PATH", str(tmp_path / "log.jsonl"))
+    def test_subprocess_heuristic_kdbx_emits_ask(self, decision_log_env):
         result = self._run_hook(
             {
                 "tool_name": "Read",
@@ -317,8 +314,7 @@ class TestSubprocessIntegration:
         envelope = json.loads(result.stdout)
         assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
 
-    def test_subprocess_benign_passes(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("GUARD_DECISIONS_PATH", str(tmp_path / "log.jsonl"))
+    def test_subprocess_benign_passes(self, decision_log_env):
         result = self._run_hook(
             {
                 "tool_name": "Edit",

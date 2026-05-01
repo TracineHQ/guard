@@ -191,8 +191,7 @@ class TestBashCredentialHints:
 
 
 class TestHookFunction:
-    def test_hook_emits_ask_for_credential_edit(self, capsys, tmp_path, monkeypatch):
-        monkeypatch.setenv("GUARD_DECISIONS_PATH", str(tmp_path / "log.jsonl"))
+    def test_hook_emits_ask_for_credential_edit(self, capsys, decision_log_env):
         hook(
             {
                 "tool_name": "Edit",
@@ -203,8 +202,7 @@ class TestHookFunction:
         envelope = json.loads(out)
         assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
 
-    def test_hook_passes_for_non_credential_edit(self, capsys, tmp_path, monkeypatch):
-        monkeypatch.setenv("GUARD_DECISIONS_PATH", str(tmp_path / "log.jsonl"))
+    def test_hook_passes_for_non_credential_edit(self, capsys, decision_log_env):
         hook(
             {
                 "tool_name": "Edit",
@@ -213,8 +211,7 @@ class TestHookFunction:
         )
         assert capsys.readouterr().out == ""
 
-    def test_hook_emits_ask_for_credential_bash(self, capsys, tmp_path, monkeypatch):
-        monkeypatch.setenv("GUARD_DECISIONS_PATH", str(tmp_path / "log.jsonl"))
+    def test_hook_emits_ask_for_credential_bash(self, capsys, decision_log_env):
         hook(
             {
                 "tool_name": "Bash",
@@ -225,8 +222,7 @@ class TestHookFunction:
         envelope = json.loads(out)
         assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
 
-    def test_hook_passes_for_benign_bash(self, capsys, tmp_path, monkeypatch):
-        monkeypatch.setenv("GUARD_DECISIONS_PATH", str(tmp_path / "log.jsonl"))
+    def test_hook_passes_for_benign_bash(self, capsys, decision_log_env):
         hook(
             {
                 "tool_name": "Bash",

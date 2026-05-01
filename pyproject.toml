@@ -73,6 +73,7 @@ pydocstyle.convention = "google"
   "PLC0415",   # local imports inside test fns / lazy hook imports
   "N802",      # snake_case test names sometimes mirror spec terms (test_dash_F_short_form)
   "ARG001",    # unused args used as pytest.param ids
+  "ARG002",    # side-effect-only pytest fixtures on test methods
   "PTH111",    # os.path used in payload strings, not real path objects
   "E402",      # grouped imports below header sections are intentional
 ]

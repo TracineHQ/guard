@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from guard._utils import (
     GUARD_DECISIONS_PATH,
     _env_int,
@@ -21,6 +23,19 @@ from guard._utils import (
 )
 
 SRC_DIR = str(Path(__file__).resolve().parent.parent / "src")
+
+
+@pytest.fixture
+def guard_decisions_jsonl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect ``guard._utils.GUARD_DECISIONS_PATH`` to an isolated JSONL.
+
+    ``GUARD_DECISIONS_PATH`` is a module-level constant captured at import time;
+    ``log_decision`` reads it directly. Patching the attribute (not the env
+    var) is the right tool here.
+    """
+    jsonl = tmp_path / "decisions.jsonl"
+    monkeypatch.setattr("guard._utils.GUARD_DECISIONS_PATH", str(jsonl))
+    return jsonl
 
 
 # === parse_hook_input / make_decision / safe_main (subprocess-based ports) ===
@@ -311,10 +326,9 @@ def test_env_int_malformed_falls_back_to_default() -> None:
 # === log_decision: spec-compliant JSONL writer ===
 
 
-def test_log_decision_writes_all_required_fields(tmp_path: Path, monkeypatch) -> None:
+def test_log_decision_writes_all_required_fields(guard_decisions_jsonl: Path) -> None:
     """log_decision emits the schema v1 record with every required field."""
-    jsonl = tmp_path / "decisions.jsonl"
-    monkeypatch.setattr("guard._utils.GUARD_DECISIONS_PATH", str(jsonl))
+    jsonl = guard_decisions_jsonl
 
     log_decision(
         hook_id="guard.test_hook",
@@ -342,10 +356,9 @@ def test_log_decision_writes_all_required_fields(tmp_path: Path, monkeypatch) ->
     assert record["timestamp"].endswith("Z")
 
 
-def test_log_decision_omits_optional_fields(tmp_path: Path, monkeypatch) -> None:
+def test_log_decision_omits_optional_fields(guard_decisions_jsonl: Path) -> None:
     """When optional fields are None, the record omits them."""
-    jsonl = tmp_path / "decisions.jsonl"
-    monkeypatch.setattr("guard._utils.GUARD_DECISIONS_PATH", str(jsonl))
+    jsonl = guard_decisions_jsonl
 
     log_decision(
         hook_id="guard.test_hook",
@@ -362,10 +375,9 @@ def test_log_decision_omits_optional_fields(tmp_path: Path, monkeypatch) -> None
     assert record["session_id"] == ""
 
 
-def test_log_decision_truncates_long_reason(tmp_path: Path, monkeypatch) -> None:
+def test_log_decision_truncates_long_reason(guard_decisions_jsonl: Path) -> None:
     """Reason is truncated to 1024 chars."""
-    jsonl = tmp_path / "decisions.jsonl"
-    monkeypatch.setattr("guard._utils.GUARD_DECISIONS_PATH", str(jsonl))
+    jsonl = guard_decisions_jsonl
 
     log_decision(
         hook_id="guard.test_hook",
@@ -379,10 +391,9 @@ def test_log_decision_truncates_long_reason(tmp_path: Path, monkeypatch) -> None
     assert len(record["reason"]) == 1024
 
 
-def test_log_decision_record_under_4096_bytes(tmp_path: Path, monkeypatch) -> None:
+def test_log_decision_record_under_4096_bytes(guard_decisions_jsonl: Path) -> None:
     """Total record size honours the 4096-byte envelope."""
-    jsonl = tmp_path / "decisions.jsonl"
-    monkeypatch.setattr("guard._utils.GUARD_DECISIONS_PATH", str(jsonl))
+    jsonl = guard_decisions_jsonl
 
     log_decision(
         hook_id="guard.test_hook",
@@ -397,14 +408,13 @@ def test_log_decision_record_under_4096_bytes(tmp_path: Path, monkeypatch) -> No
     assert len(raw) <= 4096
 
 
-def test_log_decision_oversize_record_is_valid_json(tmp_path: Path, monkeypatch) -> None:
+def test_log_decision_oversize_record_is_valid_json(guard_decisions_jsonl: Path) -> None:
     """Oversize records must remain valid JSON with the truncation marker.
 
     Spec contract (docs/output-format.md §5): records ≤ 4096 bytes AND parseable
     as JSON. Field-by-field truncation, never byte-slice.
     """
-    jsonl = tmp_path / "decisions.jsonl"
-    monkeypatch.setattr("guard._utils.GUARD_DECISIONS_PATH", str(jsonl))
+    jsonl = guard_decisions_jsonl
 
     log_decision(
         hook_id="guard.test_hook",
