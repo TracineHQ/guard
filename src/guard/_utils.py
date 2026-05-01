@@ -83,15 +83,19 @@ def _log_debug(msg: str) -> None:
         sys.stderr.write(f"[guard] {msg}\n")
 
 
+_AUTONOMOUS_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "on"})
+
+
 def is_autonomous_mode() -> bool:
     """Return True when running in non-interactive / driven-agent context.
 
-    Triggered by ``CLAUDE_AUTONOMOUS=1``. Set automatically by Claude Code when
+    Triggered by ``CLAUDE_AUTONOMOUS`` set to any of ``1``, ``true``, ``yes``,
+    or ``on`` (case-insensitive). Set automatically by Claude Code when
     running subagents or any context where there's no human at the prompt to
     answer a permission ask. Hooks consult this to decide between strict
     default-deny mode and pass-through-to-user mode.
     """
-    return os.environ.get("CLAUDE_AUTONOMOUS", "") == "1"
+    return os.environ.get("CLAUDE_AUTONOMOUS", "").strip().lower() in _AUTONOMOUS_TRUTHY
 
 
 # Loop detection settings

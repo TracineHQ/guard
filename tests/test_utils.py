@@ -427,6 +427,19 @@ def test_log_decision_oversize_record_is_valid_json(tmp_path: Path, monkeypatch)
     )
 
 
+def test_is_autonomous_mode_accepts_string_truthy(monkeypatch) -> None:
+    """`CLAUDE_AUTONOMOUS=true|yes|on|1` (case-insensitive) all enable strict mode."""
+    for value in ("1", "true", "True", "TRUE", "yes", "YES", "on", "ON", "  true "):
+        monkeypatch.setenv("CLAUDE_AUTONOMOUS", value)
+        assert is_autonomous_mode(), f"truthy value rejected: {value!r}"
+
+
+def test_is_autonomous_mode_rejects_falsy(monkeypatch) -> None:
+    for value in ("", "0", "false", "no", "off", "anything-else"):
+        monkeypatch.setenv("CLAUDE_AUTONOMOUS", value)
+        assert not is_autonomous_mode(), f"falsy value accepted: {value!r}"
+
+
 def test_append_jsonl_concurrent_writes_all_parse(tmp_path: Path) -> None:
     """50-way concurrent writes must all produce valid JSON lines."""
     from concurrent.futures import ThreadPoolExecutor

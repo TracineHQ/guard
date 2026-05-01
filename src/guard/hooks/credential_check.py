@@ -15,6 +15,7 @@ The audit utility is independent of the hook entry point.
 from __future__ import annotations
 
 import json
+import os
 import re
 import stat
 import sys
@@ -132,14 +133,39 @@ def _expand(path: str) -> str:
         return expanded
 
 
+def _candidate_paths(path: str) -> list[str]:
+    """Return both the resolved and lexical-normalized forms of ``path``.
+
+    ``Path.resolve()`` follows symlinks: on macOS ``/tmp/../Users/dev/.ssh/id_rsa``
+    resolves to ``/private/Users/dev/.ssh/id_rsa`` because ``/tmp`` is a symlink
+    to ``/private/tmp``. The credential matchers anchor on ``$HOME`` (``/Users/dev``)
+    so the resolved form misses. Match against both to close that gap.
+    """
+    out: list[str] = []
+    if not path:
+        return out
+    resolved = _expand(path)
+    out.append(resolved)
+    lexical = os.path.normpath(str(Path(path).expanduser()))
+    if lexical != resolved:
+        out.append(lexical)
+    # Also strip a leading ``/private`` (macOS firmlink) so a resolved
+    # ``/private/Users/dev/.ssh/id_rsa`` matches the unprefixed form.
+    if resolved.startswith("/private/"):
+        out.append(resolved[len("/private") :])
+    return out
+
+
 def _path_is_credential(file_path: str) -> bool:
     """Return True if ``file_path`` resolves to a known credential file."""
     if not file_path:
         return False
-    expanded = _expand(file_path)
-    if expanded in _CREDENTIAL_PATH_LITERALS:
-        return True
-    return any(p.search(expanded) for p in _CREDENTIAL_PATH_PATTERNS)
+    for candidate in _candidate_paths(file_path):
+        if candidate in _CREDENTIAL_PATH_LITERALS:
+            return True
+        if any(p.search(candidate) for p in _CREDENTIAL_PATH_PATTERNS):
+            return True
+    return False
 
 
 def _bash_touches_credential(command: str) -> bool:

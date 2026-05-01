@@ -41,6 +41,7 @@ _DENY_REASON = (
 # dumpers, viewers, and grep-style tools.
 _FILE_READERS: frozenset[str] = frozenset(
     {
+        # plain readers / pagers
         "cat",
         "head",
         "tail",
@@ -61,6 +62,29 @@ _FILE_READERS: frozenset[str] = frozenset(
         "vi",
         "ed",
         "grep",
+        # editors that hold the content in a buffer
+        "nano",
+        "emacs",
+        "pico",
+        "micro",
+        # copy / move / network-copy tools — byte-equivalent leak
+        "cp",
+        "mv",
+        "scp",
+        "rsync",
+        "dd",
+        # tools that print or fingerprint contents
+        "tee",
+        "diff",
+        "wc",
+        "md5",
+        "md5sum",
+        "shasum",
+        "sha1sum",
+        "sha256sum",
+        "sha512sum",
+        "cksum",
+        "file",
     }
 )
 

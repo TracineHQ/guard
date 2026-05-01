@@ -133,6 +133,31 @@ class TestDecide:
             decide("Edit", {"file_path": 12345})
 
 
+class TestPathTraversalNormalization:
+    """Lexical / firmlink path forms must still match the credential matchers."""
+
+    def test_macos_private_prefix_matches(self):
+        # Path.resolve() on macOS turns /tmp/.. into /private/... ; the matcher
+        # must still recognise the credential file by stripping the firmlink.
+        from guard.hooks.credential_check import _HOME
+
+        # Skip if HOME is itself under /private (already tested by the
+        # existing absolute-form tests).
+        if _HOME.startswith("/private/"):
+            return
+        result = decide("Edit", {"file_path": f"/private{_HOME}/.ssh/id_rsa"})
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_traversal_through_tmp_matches(self):
+        # Path that lexically reduces to ~/.ssh/id_rsa via .. traversal.
+        from guard.hooks.credential_check import _HOME
+
+        result = decide("Edit", {"file_path": f"/tmp/..{_HOME}/.ssh/id_rsa"})
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
 class TestBashCredentialHints:
     """Bash hint coverage must mirror Edit/Write file-path coverage."""
 

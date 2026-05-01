@@ -127,6 +127,31 @@ class TestExpandedReaderCoverage:
         assert result is not None
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # copy / move / network-copy
+            "cp /private/tmp/claude-1/x/tasks/y.output /tmp/leak.txt",
+            "mv /private/tmp/claude-1/x/tasks/y.output /tmp/leak.txt",
+            "scp /tmp/claude-1/x/tasks/y.output user@host:/tmp/",
+            "rsync /tmp/claude-1/x/tasks/y.output backup:/tmp/",
+            "dd if=/private/tmp/claude-1/x/tasks/y.output of=/tmp/leak",
+            # editors
+            "nano /private/tmp/claude-1/x/tasks/y.output",
+            "emacs /private/tmp/claude-1/x/tasks/y.output",
+            # fingerprinting / size-leak
+            "wc -l /private/tmp/claude-1/x/tasks/y.output",
+            "md5sum /private/tmp/claude-1/x/tasks/y.output",
+            "shasum /private/tmp/claude-1/x/tasks/y.output",
+            "diff /private/tmp/claude-1/x/tasks/y.output /tmp/other",
+            "tee /tmp/leak < /private/tmp/claude-1/x/tasks/y.output",
+        ],
+    )
+    def test_extended_reader_command_denied(self, command):
+        result = decide("Bash", {"command": command})
+        assert result is not None, f"reader missed: {command!r}"
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
 
 class TestDecideRobustness:
     def test_numeric_file_path(self):
