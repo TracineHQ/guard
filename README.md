@@ -42,6 +42,7 @@ Guardrails not walls: guard catches the obvious foot-guns at the Claude Code hoo
 
 - Claude Code v2.0.0+ (plugins entered public beta on 2025-10-09)
 - Python 3.11+ available on `python3` PATH (no third-party dependencies)
+- POSIX shell environment (Linux, macOS, WSL). Windows is not supported in v1 — the matchers target POSIX shell shapes (`rm -rf`, `cat ~/.aws/credentials`, process substitution) and offer no meaningful protection against PowerShell or `cmd.exe` equivalents. CI runs on `ubuntu-latest` and `macos-latest`.
 
 ## Configuration
 
