@@ -13,7 +13,7 @@ license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "TracineHQ contributors" }]
 keywords = ["claude-code", "claude-code-plugin", "safety", "hooks", "guardrails"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 4 - Beta",
   "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.11",
@@ -23,6 +23,12 @@ classifiers = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
+
+[project.urls]
+Homepage = "https://github.com/tracinehq/guard"
+Issues = "https://github.com/tracinehq/guard/issues"
+Changelog = "https://github.com/tracinehq/guard/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/tracinehq/guard/tree/main/docs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/guard"]

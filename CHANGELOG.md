@@ -1,5 +1,49 @@
 # Changelog
 
-## Unreleased
+All notable changes to this project are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
+adheres to [Semantic Versioning](https://semver.org/).
 
-- _nothing yet_
+## [Unreleased]
+
+## [1.0.0] - 2026-04-30
+
+First stable release. Guard ships eight stdlib-only `PreToolUse` hooks that
+sit between Claude Code and the tool surface, denying high-risk actions
+before they reach the host. The hook contract, decision-log schema, and
+autonomous-mode behavior are now considered stable for the 1.x line.
+
+### Added
+
+- `bash_command_validator` — denies dangerous shell shapes (rm -rf,
+  fork bombs, curl|sh, interpreter `-c` eval, runner-prefix bypasses).
+- `git_c_validator` — blocks `git -c <key>=<val>` injection of executable
+  config keys (alias.\*, core.pager, core.editor, filter.\*).
+- `credential_check` — scans tool inputs for API keys, tokens, private
+  keys, and provider-specific secret shapes before they leave the agent.
+- `commit_message_validator` — rejects commit messages that leak
+  attribution metadata or reference internal tooling by name.
+- `agent_output_guard` — strips/denies risky shapes the model emits in
+  reasoning output (e.g. exfiltration prompts).
+- `chrome_safety_validator` — gates `chrome-cli` actions, blocking
+  unsafe `eval` patterns and form submissions to non-allowlisted hosts.
+- `protected_files` — denies writes to credentials, SSH keys, shell
+  rc files, and other host-sensitive paths.
+- `subagent_scope` — restricts what a dispatched subagent can read or
+  modify based on a per-task allowlist.
+- JSONL decision log (schema v1) at `~/.claude/guard/decisions.jsonl`
+  for after-the-fact audit of every allow/deny.
+- Autonomous-mode strict default-deny: when `CLAUDE_AUTONOMOUS=1` is set
+  the hooks switch to fail-closed semantics for ambiguous inputs.
+
+### Security
+
+- Defense-in-depth posture: each hook is independent, and a deny from
+  any hook short-circuits the tool call. See [SECURITY.md](SECURITY.md)
+  for the threat model and reporting policy.
+- Mitigates the class of agent-confusion bypasses tracked under
+  CVE-2025-59356 by validating the literal command shape rather than
+  trusting model-emitted intent.
+
+[Unreleased]: https://github.com/tracinehq/guard/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/tracinehq/guard/releases/tag/v1.0.0
