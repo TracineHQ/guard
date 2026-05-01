@@ -166,6 +166,84 @@ class TestSubagentScope:
 # silently allow ``/totally_unrelated/src/safe.py``. Match strictly within cwd.
 
 
+class TestExpandedToolCoverage:
+    """MultiEdit and NotebookEdit must be enforced like Edit/Write."""
+
+    def test_multi_edit_out_of_scope_denied(self, tmp_path, capsys):
+        _write_scope(tmp_path, {"task": "T1", "allowed": ["allowed.py"]})
+        with pytest.raises(SystemExit):
+            hook(
+                {
+                    "tool_name": "MultiEdit",
+                    "tool_input": {"file_path": str(tmp_path / "out.py"), "edits": []},
+                    "cwd": str(tmp_path),
+                }
+            )
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_notebook_edit_uses_notebook_path(self, tmp_path, capsys):
+        _write_scope(tmp_path, {"task": "T1", "allowed": ["allowed.ipynb"]})
+        with pytest.raises(SystemExit):
+            hook(
+                {
+                    "tool_name": "NotebookEdit",
+                    "tool_input": {"notebook_path": str(tmp_path / "out.ipynb")},
+                    "cwd": str(tmp_path),
+                }
+            )
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+class TestAbsoluteDirPattern:
+    """Absolute trailing-slash patterns must match against the abs path."""
+
+    def test_absolute_dir_pattern_matches_descendant(self, tmp_path):
+        # Construct a real absolute path outside cwd. Use tmp_path's own
+        # parent as the pattern so resolve() doesn't symlink-rewrite it.
+        cwd = tmp_path / "projA"
+        cwd.mkdir()
+        target_dir = tmp_path / "leak"
+        target_dir.mkdir()
+        target = target_dir / "data.txt"
+        target.write_text("x")
+        pattern = str(target_dir.resolve()) + "/"
+        assert is_allowed(str(target), str(cwd), [pattern])
+
+    def test_absolute_dir_pattern_does_not_match_sibling(self, tmp_path):
+        cwd = tmp_path / "projA"
+        cwd.mkdir()
+        leak = tmp_path / "leak"
+        leak.mkdir()
+        sibling = tmp_path / "other" / "x.txt"
+        sibling.parent.mkdir()
+        sibling.write_text("x")
+        pattern = str(leak.resolve()) + "/"
+        assert not is_allowed(str(sibling), str(cwd), [pattern])
+
+
+class TestGlobstarRecursion:
+    """``**/<glob>`` must match top-level files too (Python fnmatch is FS-blind)."""
+
+    def test_globstar_md_matches_top_level(self, tmp_path):
+        target = tmp_path / "README.md"
+        target.write_text("x")
+        assert is_allowed(str(target), str(tmp_path), ["**/*.md"])
+
+    def test_globstar_md_matches_nested(self, tmp_path):
+        nested = tmp_path / "src" / "notes.md"
+        nested.parent.mkdir(parents=True)
+        nested.write_text("x")
+        assert is_allowed(str(nested), str(tmp_path), ["**/*.md"])
+
+    def test_globstar_does_not_match_other_extensions(self, tmp_path):
+        target = tmp_path / "src" / "code.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("x")
+        assert not is_allowed(str(target), str(tmp_path), ["**/*.md"])
+
+
 class TestSubagentScopeF7:
     def test_plain_pattern_does_not_match_outside_cwd(self, tmp_path):
         # cwd = tmp_path/projA ; allowed = src/safe.py.

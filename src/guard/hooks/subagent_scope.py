@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TracineHQ contributors
-"""PreToolUse hook: enforce file-level scope on Edit/Write.
+"""PreToolUse hook: enforce file-level scope on Edit/Write/MultiEdit/NotebookEdit.
 
 When ``<cwd>/.claude/subagent-scope.json`` is present with schema::
 
@@ -80,15 +80,16 @@ def _resolve_paths(file_path: str, cwd: str) -> tuple[str, str, bool]:
     return abs_path, rel_path, inside_cwd
 
 
-def _matches_dir(pattern: str, rel_path: str, *, inside_cwd: bool) -> bool:
+def _matches_dir(pattern: str, abs_path: str, rel_path: str, *, inside_cwd: bool) -> bool:
     """Recursive directory match for a trailing-slash pattern.
 
-    Anchored against ``rel_path`` only when the file is inside cwd. Patterns
-    that look like absolute paths (``/abs/dir/``) match the absolute form.
+    Absolute patterns (``/abs/dir/``) match against ``abs_path``; relative
+    patterns are anchored to ``rel_path`` and only fire when the file is
+    inside cwd.
     """
     if pattern.startswith("/"):
-        # Absolute pattern — match against absolute path is fine.
-        return rel_path.startswith(pattern.lstrip("/")) if not inside_cwd else False
+        base = pattern.rstrip("/")
+        return abs_path == base or abs_path.startswith(base + "/")
     if not inside_cwd:
         return False
     # Strip trailing slash for normalised comparison: "pkg/tests/" ~ "pkg/tests"
@@ -100,12 +101,20 @@ def _matches_glob(pattern: str, abs_path: str, rel_path: str, *, inside_cwd: boo
     """Glob-match against the relative path only (when inside cwd).
 
     Absolute glob patterns (starting with ``/``) match the absolute path.
+    A leading ``**/`` is rewritten to also match top-level files (e.g.
+    ``**/*.md`` matches ``README.md``); Python ``fnmatch`` is filesystem-blind
+    so the ``/`` in ``**/`` would otherwise require at least one directory
+    separator in the input.
     """
     if pattern.startswith("/"):
         return fnmatch.fnmatch(abs_path, pattern)
     if not inside_cwd:
         return False
-    return fnmatch.fnmatch(rel_path, pattern)
+    if fnmatch.fnmatch(rel_path, pattern):
+        return True
+    if pattern.startswith("**/"):
+        return fnmatch.fnmatch(rel_path, pattern[3:])
+    return False
 
 
 def _matches_plain(pattern: str, abs_path: str, rel_path: str, *, inside_cwd: bool) -> bool:
@@ -126,7 +135,7 @@ def _matches_plain(pattern: str, abs_path: str, rel_path: str, *, inside_cwd: bo
 def _matches_pattern(pattern: str, abs_path: str, rel_path: str, *, inside_cwd: bool) -> bool:
     """Dispatch a single allowlist pattern against ``abs_path`` / ``rel_path``."""
     if pattern.endswith("/"):
-        return _matches_dir(pattern, rel_path, inside_cwd=inside_cwd)
+        return _matches_dir(pattern, abs_path, rel_path, inside_cwd=inside_cwd)
     if any(c in pattern for c in "*?["):
         return _matches_glob(pattern, abs_path, rel_path, inside_cwd=inside_cwd)
     return _matches_plain(pattern, abs_path, rel_path, inside_cwd=inside_cwd)
@@ -143,15 +152,22 @@ def is_allowed(file_path: str, cwd: str, allowed: list[Any]) -> bool:
     )
 
 
+_SCOPED_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+
+
 def _extract_file_and_cwd(payload: dict[str, Any]) -> tuple[str, str] | None:
-    """Return ``(file_path, cwd)`` if both present and well-typed, else ``None``."""
-    if payload.get("tool_name") not in ("Edit", "Write"):
+    """Return ``(file_path, cwd)`` if both present and well-typed, else ``None``.
+
+    NotebookEdit uses ``notebook_path`` instead of ``file_path``; the others
+    all use ``file_path``.
+    """
+    if payload.get("tool_name") not in _SCOPED_TOOLS:
         return None
 
     tool_input = payload.get("tool_input", {}) or {}
     if not isinstance(tool_input, dict):
         return None
-    file_path = tool_input.get("file_path", "")
+    file_path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
     cwd = payload.get("cwd", "")
     if not isinstance(file_path, str) or not file_path:
         return None
