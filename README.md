@@ -6,14 +6,19 @@ Stdlib-only safety hooks for Claude Code.
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
 
+```
+$ rm -rf /
+guard: deny - rm -rf against /, /*, ~, $HOME, ., or ./ is catastrophic.
+```
+
 Guardrails not walls: guard catches the obvious foot-guns at the Claude Code hook layer so a stray tool call doesn't turn into a bad day. It is defense-in-depth, not a security boundary.
 
 ## What it does
 
 | Hook | What it catches |
 |---|---|
-| bash_command_validator | dangerous shell commands (rm -rf, fork bombs, ...) |
-| git_c_validator | `git commit -C` (silent message reuse) |
+| bash_command_validator | dangerous shell commands (rm -rf, eval/source, env-var hijack, shell-wrapper bypass) |
+| git_c_validator | `git -C path` traversal, `git -c key=value` config injection, `git commit -C` silent message reuse |
 | credential_check | hardcoded credentials in tool inputs |
 | commit_message_validator | malformed/missing commit messages |
 | agent_output_guard | oversized raw-data reads in subagent output |
@@ -80,6 +85,10 @@ just check
 ```
 
 Runs lint, typecheck, and tests. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, test tiers, and commit conventions.
+
+## Known limitations
+
+Guard is defense-in-depth, not a security boundary. The validators trade exhaustive coverage for low false-positive rates and stdlib-only portability, which means a determined attacker who controls Claude Code's input can bypass any client-side hook. Pattern-matching is conservative on purpose: rules deny shapes that have a clear safer alternative and pass shapes that are ambiguous. For the threat model, the disclosure process, and a list of areas guard explicitly does not cover, see [SECURITY.md](SECURITY.md).
 
 ## License
 
