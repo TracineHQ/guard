@@ -273,6 +273,30 @@ def test_shallow_stacks_denied_by_existing_matchers(cmd):
     assert _is_deny(decide(cmd)), f"shallow stack not denied: {cmd!r}"
 
 
+def test_python_script_arg_to_agent_output_denied():
+    """``python3 <agent-output-path>`` previously bypassed the per-reader allowlist."""
+    from guard.hooks.agent_output_guard import decide as agent_decide
+
+    res = agent_decide(
+        "Bash",
+        {"command": "python3 /private/tmp/claude-1/proj/sess/tasks/x.output"},
+    )
+    assert res is not None
+    assert res["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_bare_redirect_to_agent_output_denied():
+    """``< <agent-output-path>`` (bare stdin redirect) previously bypassed the allowlist."""
+    from guard.hooks.agent_output_guard import decide as agent_decide
+
+    res = agent_decide(
+        "Bash",
+        {"command": "< /private/tmp/claude-1/proj/sess/tasks/x.output"},
+    )
+    assert res is not None
+    assert res["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 def test_inplace_editors_against_protected_files():
     from guard.hooks.protected_files import _bash_first_protected_match
 

@@ -1,31 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TracineHQ contributors
-"""PreToolUse hook: deny direct reads on agent output JSONL files.
+"""PreToolUse hook: deny any tool call that targets an agent output file.
 
-Agent output transcripts can be large and waste context when read directly.
-This hook blocks ``Read`` and ``Bash(cat|head|tail)`` calls that target paths
-matching the typical agent output pattern, instructing the agent to use a
-dedicated query CLI instead.
+Agent output transcripts are large JSONL files that waste context when read
+directly. The path itself is the dangerous signal — what command would read,
+copy, or fingerprint it doesn't matter. This hook rejects any ``tool_input``
+shape (string/dict/list/nested) that contains a path matching the agent
+output pattern, regardless of which tool or verb is invoked.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import shlex
 import sys
 from typing import Any
 
-from guard._utils import emit_pretooluse_decision, log_decision, safe_main, token_basename
+from guard._utils import all_paths_in, emit_pretooluse_decision, log_decision, safe_main
 
 _HOOK_ID = "guard.agent_output_guard"
 
 # Matches agent output file paths produced by Claude Code subagent runs.
 # macOS form:   /private/tmp/claude-<pid>/.../tasks/<id>.output
 # Linux form:   /tmp/claude-<pid>/.../tasks/<id>.output
-# Anchored at end so we don't false-match unrelated paths containing
-# ``.output`` mid-string.
-AGENT_OUTPUT_PATTERN = re.compile(r"/(?:private/)?tmp/claude-\d+/.*/tasks/.*\.output\b")
+# The negative-lookahead trailing class ensures ``.output.bak``,
+# ``.output_old``, ``.output2`` etc. do NOT match — only the bare
+# ``.output`` filename (or one followed by a non-identifier char such as
+# ``"`` or whitespace) is the actual agent transcript.
+AGENT_OUTPUT_PATTERN = re.compile(
+    r"/(?:private/)?tmp/claude-\d+/.*/tasks/.*\.output(?![A-Za-z0-9_])"
+)
 
 _DENY_REASON = (
     "Direct reads on agent output files are not allowed — "
@@ -36,91 +40,24 @@ _DENY_REASON = (
     "  - fall back to the raw JSONL only when explicitly required"
 )
 
-# File-reader basenames that, when invoked against an agent-output file,
-# dump the transcript into the model's context. Includes pagers, hex/binary
-# dumpers, viewers, and grep-style tools.
-_FILE_READERS: frozenset[str] = frozenset(
-    {
-        # plain readers / pagers
-        "cat",
-        "head",
-        "tail",
-        "less",
-        "more",
-        "bat",
-        "rg",
-        "awk",
-        "sed",
-        "xxd",
-        "od",
-        "hexdump",
-        "strings",
-        "nl",
-        "tac",
-        "view",
-        "vim",
-        "vi",
-        "ed",
-        "grep",
-        # editors that hold the content in a buffer
-        "nano",
-        "emacs",
-        "pico",
-        "micro",
-        # copy / move / network-copy tools — byte-equivalent leak
-        "cp",
-        "mv",
-        "scp",
-        "rsync",
-        "dd",
-        # tools that print or fingerprint contents
-        "tee",
-        "diff",
-        "wc",
-        "md5",
-        "md5sum",
-        "shasum",
-        "sha1sum",
-        "sha256sum",
-        "sha512sum",
-        "cksum",
-        "file",
-    }
-)
-
-
-def _is_file_reader_command(command: str) -> bool:
-    """Return True if ``command`` invokes a file reader on its first token.
-
-    Tokenizes via ``shlex`` so leading whitespace, quotes, and absolute
-    paths (``/bin/cat /path``) are all handled. Falls back to a whitespace
-    split if shlex can't parse.
-    """
-    if not command.strip():
-        return False
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        tokens = command.strip().split()
-    if not tokens:
-        return False
-    return token_basename(tokens[0]) in _FILE_READERS
-
 
 def decide(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any] | None:
-    """Return a deny envelope if the call targets an agent output file."""
-    if tool_name == "Read":
-        path = tool_input.get("file_path", "")
-        if isinstance(path, str) and AGENT_OUTPUT_PATTERN.search(path):
+    """Return a deny envelope if any path-like token names an agent output file.
+
+    The path is the dangerous signal — verb-agnostic. We scan every
+    string contained anywhere in ``tool_input`` (covers ``Read.file_path``,
+    ``Glob.pattern``, ``Grep.path``, ``MultiEdit.file_path``, ``WebFetch.url``
+    with ``file://`` scheme, etc.) plus the raw Bash command string as a
+    fallback for compound shapes (heredocs, redirects, process-sub) where
+    token extraction may fragment unexpectedly.
+    """
+    for raw in all_paths_in(tool_input):
+        if AGENT_OUTPUT_PATTERN.search(raw):
             return emit_pretooluse_decision("deny", _DENY_REASON)
 
     if tool_name == "Bash":
-        command = tool_input.get("command", "")
-        if (
-            isinstance(command, str)
-            and _is_file_reader_command(command)
-            and AGENT_OUTPUT_PATTERN.search(command)
-        ):
+        cmd = tool_input.get("command", "")
+        if isinstance(cmd, str) and AGENT_OUTPUT_PATTERN.search(cmd):
             return emit_pretooluse_decision("deny", _DENY_REASON)
 
     return None

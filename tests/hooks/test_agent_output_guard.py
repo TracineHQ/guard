@@ -153,6 +153,56 @@ class TestExpandedReaderCoverage:
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+class TestPathAsSignal:
+    """Path-as-signal: any tool_input mentioning the pattern denies, regardless of verb."""
+
+    AGENT_PATH = "/private/tmp/claude-1/x/tasks/y.output"
+    LINUX_PATH = "/tmp/claude-99/x/tasks/y.output"
+
+    def _assert_deny(self, result, label=""):
+        assert result is not None, f"expected deny for {label!r}, got passthrough"
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_read_with_path_denied(self):
+        # Regression for the original Read-only enforcement.
+        self._assert_deny(decide("Read", {"file_path": self.AGENT_PATH}))
+
+    def test_glob_pattern_with_path_denied(self):
+        self._assert_deny(decide("Glob", {"pattern": self.AGENT_PATH}))
+
+    def test_grep_path_field_denied(self):
+        self._assert_deny(decide("Grep", {"pattern": "foo", "path": self.AGENT_PATH}))
+
+    def test_multiedit_file_path_denied(self):
+        self._assert_deny(
+            decide(
+                "MultiEdit",
+                {"file_path": self.AGENT_PATH, "edits": [{"old_string": "a", "new_string": "b"}]},
+            )
+        )
+
+    def test_webfetch_file_url_denied(self):
+        self._assert_deny(
+            decide("WebFetch", {"url": f"file://{self.AGENT_PATH}", "prompt": "summarize"})
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # script-arg with no reader verb
+            "python3 /private/tmp/claude-1/x/tasks/y.output",
+            # bare stdin redirect
+            "< /private/tmp/claude-1/x/tasks/y.output",
+            # compound shell construct
+            "while read l; do echo $l; done < /private/tmp/claude-1/x/tasks/y.output",
+            # arbitrary binary
+            "node /tmp/claude-99/x/tasks/y.output",
+        ],
+    )
+    def test_bash_compound_shapes_denied(self, command):
+        self._assert_deny(decide("Bash", {"command": command}), label=command)
+
+
 class TestDecideRobustness:
     def test_numeric_file_path(self):
         with contextlib.suppress(TypeError):
