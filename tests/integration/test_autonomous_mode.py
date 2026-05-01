@@ -108,6 +108,57 @@ def test_autonomous_feedback_surfaces_custom_message(prefix: str, tmp_path: Path
     )
 
 
+def test_autonomous_denies_deeply_stacked_env_python_dash_c(tmp_path: Path) -> None:
+    """9 stacked ``env A=1 ...`` wrappers around ``python3 -c "pass"`` must deny.
+
+    Locks in the inverted-default behavior: the inner ``python3 -c`` is not on
+    SAFE_PREFIXES, so even if the unwrap fixpoint runs out of peels, autonomous
+    mode default-denies the whole shape.
+    """
+    cmd = "env A=1 " * 9 + 'python3 -c "pass"'
+    _rc, stdout, _stderr = _run(cmd, autonomous=True, decisions_path=tmp_path / "log.jsonl")
+    assert _decision(stdout) == "deny", f"9-stack env+python3 -c not denied: {stdout[:300]}"
+
+
+def test_autonomous_denies_unicode_homoglyph_head(tmp_path: Path) -> None:
+    """Cyrillic 'ie' (U+0435) homoglyph as the head of an eval-rm must deny.
+
+    The head token is not ASCII eval, so the eval-builtin matcher doesn't fire,
+    but the segment is also not on SAFE_PREFIXES — autonomous mode denies.
+    The Cyrillic character is constructed from its codepoint so the source
+    file itself stays ASCII (and ruff RUF001 stays quiet).
+    """
+    cmd = "еval rm -rf /"  # noqa: RUF001 -- leading Cyrillic ie is the bypass payload
+    _rc, stdout, _stderr = _run(cmd, autonomous=True, decisions_path=tmp_path / "log.jsonl")
+    assert _decision(stdout) == "deny", f"unicode-homoglyph head not denied: {stdout[:300]}"
+
+
+def test_autonomous_denies_encoded_base64_pipe_bash(tmp_path: Path) -> None:
+    """``echo <b64> | base64 -d | bash`` must deny in autonomous mode."""
+    cmd = "echo cm0gLXJmIC8K | base64 -d | bash"
+    _rc, stdout, _stderr = _run(cmd, autonomous=True, decisions_path=tmp_path / "log.jsonl")
+    assert _decision(stdout) == "deny", f"encoded base64-pipe-bash not denied: {stdout[:300]}"
+
+
+def test_autonomous_allows_neutral_safe_prefix(tmp_path: Path) -> None:
+    """``git status`` is on SAFE_PREFIXES and must allow under the inverted default."""
+    log = tmp_path / "log.jsonl"
+    _rc, stdout, _stderr = _run("git status", autonomous=True, decisions_path=log)
+    assert _decision(stdout) == "allow", f"git status not allowed: {stdout[:300]}"
+
+
+def test_interactive_unchanged_for_unknown_command(tmp_path: Path) -> None:
+    """Interactive mode (CLAUDE_AUTONOMOUS=0) must still passthrough unknown commands.
+
+    The inverted-default in C1 only changes autonomous mode; the interactive
+    32+16 verifier suite must continue to behave identically.
+    """
+    _rc, stdout, _stderr = _run(
+        "flarbnoz --gronk", autonomous=False, decisions_path=tmp_path / "log.jsonl"
+    )
+    assert _decision(stdout) is None, f"interactive should passthrough: {stdout[:300]}"
+
+
 def test_autonomous_queue_path_is_writable(tmp_path: Path) -> None:
     """Verify the autonomous queue gets a record when a denial happens.
 

@@ -1397,9 +1397,10 @@ def _get_always_deny(segments: list[str]) -> dict[str, str] | None:
 # generic default-deny.
 
 DEFAULT_AUTONOMOUS_DENY = (
-    "This command is not on the safe-prefix allowlist. In autonomous mode "
-    "(CLAUDE_AUTONOMOUS=1) guard default-denies anything not explicitly safe. "
-    "If this is a known-safe command, add a rule to guard's registry."
+    "autonomous mode: command shape not on safe-prefix allowlist; not allowed "
+    "without explicit user approval. (CLAUDE_AUTONOMOUS=1 inverts the default "
+    "to deny — if this command is genuinely safe, add a rule to guard's "
+    "registry; otherwise re-run interactively.)"
 )
 
 
