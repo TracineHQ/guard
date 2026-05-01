@@ -121,8 +121,11 @@ class TestDecide:
         assert result is not None
         assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
 
-    def test_other_tool_passes(self):
-        assert decide("Read", {"file_path": "~/.aws/credentials"}) is None
+    def test_read_aws_credentials_now_asks(self):
+        # Universal scanner: Read on a credential file must ASK (was a bypass).
+        result = decide("Read", {"file_path": "~/.aws/credentials"})
+        assert result is not None
+        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
 
     def test_empty_inputs_pass(self):
         assert decide("Edit", {}) is None

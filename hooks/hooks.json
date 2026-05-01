@@ -16,7 +16,7 @@
         ]
       },
       {
-        "matcher": "Edit|Write|Bash",
+        "matcher": "Edit|Write|Bash|Read|Glob|Grep|MultiEdit|NotebookEdit|WebFetch",
         "hooks": [
           { "type": "command", "command": "python3 ${CLAUDE_PLUGIN_ROOT}/src/guard/hooks/credential_check.py" }
         ]

@@ -12,6 +12,7 @@ from unittest import mock
 from guard._utils import (
     GUARD_DECISIONS_PATH,
     _env_int,
+    all_paths_in,
     append_jsonl,
     emit_pretooluse_decision,
     is_autonomous_mode,
@@ -482,3 +483,50 @@ def test_sanitize_for_stderr_preserves_normal_text() -> None:
     """Normal printable text passes through unchanged."""
     text = "ls -la /tmp/foo"
     assert sanitize_for_stderr(text) == text
+
+
+# === all_paths_in (universal path scanner) ===
+
+
+def test_all_paths_in_extracts_absolute_path():
+    paths = list(all_paths_in({"file_path": "/Users/dev/.aws/credentials"}))
+    assert "/Users/dev/.aws/credentials" in paths
+
+
+def test_all_paths_in_extracts_tilde_path():
+    paths = list(all_paths_in({"command": "cat ~/.aws/credentials"}))
+    assert "~/.aws/credentials" in paths
+
+
+def test_all_paths_in_expands_home_var():
+    paths = list(all_paths_in({"command": "cat $HOME/.aws/credentials"}))
+    assert "$HOME/.aws/credentials" in paths
+    home = str(Path.home())
+    assert f"{home}/.aws/credentials" in paths
+
+
+def test_all_paths_in_expands_braced_home_var():
+    paths = list(all_paths_in({"command": "cat ${HOME}/.aws/credentials"}))
+    home = str(Path.home())
+    assert f"{home}/.aws/credentials" in paths
+
+
+def test_all_paths_in_recurses_into_lists():
+    paths = list(all_paths_in([{"a": "/etc/foo"}, {"b": "/var/bar"}]))
+    assert "/etc/foo" in paths
+    assert "/var/bar" in paths
+
+
+def test_all_paths_in_strips_file_url():
+    paths = list(all_paths_in({"url": "file:///etc/passwd"}))
+    assert "/etc/passwd" in paths
+
+
+def test_all_paths_in_dedupes():
+    paths = list(all_paths_in({"a": "/etc/foo", "b": "/etc/foo"}))
+    assert paths.count("/etc/foo") == 1
+
+
+def test_all_paths_in_ignores_pure_strings_without_paths():
+    paths = list(all_paths_in({"text": "just some text no paths here"}))
+    assert paths == []

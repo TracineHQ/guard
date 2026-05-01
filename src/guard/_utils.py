@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 # Storage locations
 GUARD_HOME = Path(os.environ.get("GUARD_DATA_DIR", str(Path.home() / ".claude" / "guard")))
@@ -346,6 +346,90 @@ def sanitize_for_stderr(text: str, *, max_len: int = 200) -> str:
     other control sequences into developer terminals.
     """
     return _CONTROL_CHARS_RE.sub("?", text)[:max_len]
+
+
+# === Path-token extraction (universal credential scanner) ===
+
+# Matches path-like tokens in any string: absolute POSIX, ``~``-anchored,
+# ``./``/``../``, ``$VAR``-prefixed, or relative paths containing a ``/``.
+# Stops at whitespace and shell metacharacters that terminate a token.
+# Variable-prefixed forms (``$HOME/...``, ``${HOME}/...``) are captured
+# verbatim; the caller is responsible for expanding them when needed.
+_PATH_LIKE_RE = re.compile(
+    r"""(?x)
+    (?:
+        ~[A-Za-z0-9_]*(?:/[^\s'";|&<>()`*?\[\]{}]+)+   # ~/... or ~user/...
+        |
+        \$\{[A-Za-z_][A-Za-z0-9_]*\}/[^\s'";|&<>()`*?\[\]{}]+   # ${VAR}/...
+        |
+        \$[A-Za-z_][A-Za-z0-9_]*/[^\s'";|&<>()`*?\[\]{}]+       # $VAR/...
+        |
+        /[^\s'";|&<>()`*?\[\]{}]+                       # /abs/path
+        |
+        \.{1,2}/[^\s'";|&<>()`*?\[\]{}]+                # ./rel or ../rel
+        |
+        [A-Za-z0-9_.+\-]+/[^\s'";|&<>()`*?\[\]{}/]+(?:/[^\s'";|&<>()`*?\[\]{}]*)*  # a/b
+    )
+    """
+)
+
+
+def _expand_home_var(token: str) -> str | None:
+    """Return ``token`` with a leading ``$HOME`` / ``${HOME}`` expanded, else ``None``.
+
+    Pure string substitution — does not call ``os.path.expandvars`` to avoid
+    unbounded variable expansion against the live process environment.
+    """
+    home = str(Path.home())
+    if token.startswith("$HOME/"):
+        return home + token[len("$HOME") :]
+    if token.startswith("${HOME}/"):
+        return home + token[len("${HOME}") :]
+    return None
+
+
+def _iter_strings(value: Any) -> Iterator[str]:  # noqa: ANN401 -- tool_input is genuinely Any
+    """Yield every string contained in ``value`` recursively (dicts/lists/tuples)."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _iter_strings(v)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _iter_strings(v)
+
+
+def all_paths_in(value: Any) -> Iterator[str]:  # noqa: ANN401 -- tool_input is genuinely Any
+    """Yield every path-like token contained in any tool_input shape.
+
+    Recurses into dicts and lists, scanning each string with ``_PATH_LIKE_RE``.
+    For variable-prefixed forms anchored at ``$HOME`` / ``${HOME}``, also
+    yields the literal-expanded form so credential matchers anchored on
+    ``$HOME`` (e.g. ``~/.aws/credentials``) hit the underlying file.
+
+    Strings shorter than 2 chars and obvious URL schemes other than ``file://``
+    are ignored. Duplicates within a single call are de-duplicated to keep
+    downstream matchers tight.
+    """
+    seen: set[str] = set()
+    for s in _iter_strings(value):
+        if not s:
+            continue
+        # Strip a leading ``file://`` so URL payloads match path matchers.
+        candidates = [s]
+        if s.startswith("file://"):
+            candidates.append(s[len("file://") :])
+        for source in candidates:
+            for match in _PATH_LIKE_RE.finditer(source):
+                token = match.group(0)
+                if token not in seen:
+                    seen.add(token)
+                    yield token
+                expanded = _expand_home_var(token)
+                if expanded is not None and expanded not in seen:
+                    seen.add(expanded)
+                    yield expanded
 
 
 def safe_main(hook_fn: Callable[[dict[str, Any]], None]) -> None:
