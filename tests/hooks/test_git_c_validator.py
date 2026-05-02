@@ -242,49 +242,44 @@ class TestDestructiveSubcommandFlags:
         assert decision == "allow"
 
 
-class TestPathTraversalConfigKeys:
-    """``-c core.hooksPath=../foo`` / ``-c core.attributesFile=../`` are denied.
+class TestDangerousPathsConfigKeys:
+    """``-c core.hooksPath=...`` / ``-c core.attributesFile=...`` are denied.
 
-    Pointing core.hooksPath at a path that traverses out of the repo lets the
-    next git subcommand load hooks from attacker-controlled territory. Same
-    for core.attributesFile (filter / diff drivers).
+    Any command-line override of these keys is malicious — the next git
+    subcommand would load hooks/attributes from the override target.
+    Both relative-path traversal (``../foo``) AND absolute paths
+    (``/tmp/evil``) are equally dangerous, so the rule denies any value.
+    Permanent settings go through ``git config``; repo-local hooks live in
+    ``.git/hooks/``.
     """
 
     @pytest.mark.parametrize(
         "command",
         [
+            # Traversal shapes
             "git -c core.hooksPath=../foo status",
             "git -c core.hooksPath=../../etc/x status",
             "git -c core.attributesFile=../../etc/x diff",
             "git -c core.AttributesFile=../bar log",  # case-insensitive key
             "git -C /repo -c core.hooksPath=../escape status",
             "git -c core.hooksPath=foo/../../escape status",
+            # Absolute-path shapes (the gap closed by this branch)
+            "git -c core.hooksPath=/tmp/evil status",
+            "git -c core.hooksPath=/var/folders/x/evil status",
+            "git -c core.attributesFile=/etc/gitattributes diff",
+            # Relative path without traversal — still attacker-controlled
+            "git -c core.hooksPath=hooks/local status",
+            # Empty value still overrides; deny.
+            "git -c core.hooksPath= status",
         ],
     )
-    def test_traversal_denied(self, command):
+    def test_dangerous_keys_denied(self, command):
         decision, code = _run(command)
-        assert decision == "deny", f"traversal not denied: {command!r}"
+        assert decision == "deny", f"override not denied: {command!r}"
         assert code == 2
 
-    @pytest.mark.parametrize(
-        "command",
-        [
-            # Absolute path values are not traversal (existing behavior).
-            "git -c core.hooksPath=/tmp/safe status",
-            "git -c core.attributesFile=/etc/gitattributes diff",
-            # Relative path without ``../`` is not traversal.
-            "git -c core.hooksPath=hooks/local status",
-        ],
-    )
-    def test_safe_paths_not_denied_for_traversal(self, command):
-        # The traversal check must not fire; the rest of the validator may
-        # produce its own decision (allow/passthrough) but never a traversal
-        # deny on these inputs.
-        decision, _ = _run(command)
-        assert decision != "deny"
-
-    def test_unrelated_key_with_traversal_passthrough(self):
-        # Other config keys with ``../`` in value are not traversal sinks for
-        # this hook (bash_command_validator handles exec sinks separately).
+    def test_unrelated_key_passthrough(self):
+        # Other config keys are not exec sinks — pass through to the rest
+        # of the validator (which may allow/deny on its own).
         decision, _ = _run("git -c color.ui=../foo status")
         assert decision != "deny"

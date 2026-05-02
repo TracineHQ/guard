@@ -266,12 +266,16 @@ def _is_commit_reuse(command: str) -> bool:
     return any(_is_reuse_token(tok, i, rest) for i, tok in enumerate(rest))
 
 
-# ``-c key=value`` paths-config keys whose value, if it traverses out via
-# ``../`` segments, points at attacker-controlled hooks/attributes the
-# subsequent git invocation would execute. The exploit shape is e.g.
-# ``git -c core.hooksPath=../../tmp/evil status`` — the next command in the
-# segment would silently run scripts from outside the repo.
-_PATH_TRAVERSAL_CONFIG_KEYS: frozenset[str] = frozenset({"core.hookspath", "core.attributesfile"})
+# ``-c key=value`` paths-config keys whose value would point the next git
+# subcommand at attacker-controlled hooks/attributes. There is no legitimate
+# reason to override these via the command line — repo-local hooks live in
+# ``.git/hooks/``, repo attributes live in ``.gitattributes``, and any
+# permanent override goes through ``git config``. Treat any ``-c`` override
+# of these keys as malicious regardless of value: relative-path traversal
+# (``../``) AND absolute paths (``/tmp/evil``) are equally dangerous.
+_DANGEROUS_PATHS_CONFIG_KEYS: frozenset[str] = frozenset(
+    {"core.hookspath", "core.attributesfile"},
+)
 
 
 def _normalize_config_key(key: str) -> str:
@@ -279,24 +283,23 @@ def _normalize_config_key(key: str) -> str:
     return key.strip().lower()
 
 
-def _check_traversal_kv(kv: str) -> tuple[str, str] | None:
-    """Return ``(key, value)`` if ``kv`` is a paths-config key with ``../`` value."""
+def _check_dangerous_kv(kv: str) -> tuple[str, str] | None:
+    """Return ``(key, value)`` if ``kv`` overrides a dangerous paths-config key."""
     if "=" not in kv:
         return None
     key, value = kv.split("=", 1)
-    if _normalize_config_key(key) in _PATH_TRAVERSAL_CONFIG_KEYS and "../" in value:
+    if _normalize_config_key(key) in _DANGEROUS_PATHS_CONFIG_KEYS:
         return key, value
     return None
 
 
-def _has_traversal_in_paths_config(command: str) -> tuple[str, str] | None:
-    """Return ``(key, value)`` if ``-c <paths-key>=<../...>`` shape is present.
+def _has_dangerous_paths_config(command: str) -> tuple[str, str] | None:
+    """Return ``(key, value)`` if ``-c <core.hooksPath|core.attributesFile>=...`` is present.
 
     Matches git's real syntax: ``-c`` and ``key=value`` as separate tokens.
-    Used by ``decide`` to deny path-traversal on hooks-path / attributes-file
-    overrides — these don't execute on their own (no ``--config-env``-style
-    execution), but the next git subcommand in the same invocation will load
-    from the traversed path.
+    Denies any value, not just traversal — absolute paths to attacker-controlled
+    locations bypass a traversal-only check. The next git subcommand in the
+    same invocation would load hooks/attributes from the override target.
     """
     try:
         parts = shlex.split(command)
@@ -307,7 +310,7 @@ def _has_traversal_in_paths_config(command: str) -> tuple[str, str] | None:
     i = 1
     while i < len(parts):
         if parts[i] == "-c" and i + 1 < len(parts):
-            hit = _check_traversal_kv(parts[i + 1])
+            hit = _check_dangerous_kv(parts[i + 1])
             if hit is not None:
                 return hit
             i += 2
@@ -320,15 +323,18 @@ def decide(command: str) -> dict[str, Any] | None:
     """Return a permission envelope, or ``None`` to fall through."""
     if has_shell_operators(command):
         return None
-    traversal = _has_traversal_in_paths_config(command)
-    if traversal is not None:
-        key, value = traversal
+    dangerous = _has_dangerous_paths_config(command)
+    if dangerous is not None:
+        key, value = dangerous
         return emit_pretooluse_decision(
             "deny",
             (
-                f"git -c {key}={value}: path traversal in core.hooksPath / "
-                "core.attributesFile is a known exploit shape — the next git "
-                "subcommand would load hooks/attributes from outside the repo."
+                f"git -c {key}={value}: command-line override of "
+                "core.hooksPath / core.attributesFile is a known exploit "
+                "shape — the next git subcommand would load hooks or "
+                "attributes from the override target. No legitimate use "
+                "for this at the CLI; use `git config` for permanent "
+                "settings or `.git/hooks/` for repo-local hooks."
             ),
         )
     if _is_commit_reuse(command):
