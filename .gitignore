@@ -29,3 +29,5 @@ venv/
 
 # Local strategy/planning docs — conversation scratch, not deliverables
 docs/planning/
+docs/strategy/
+docs/reviews/

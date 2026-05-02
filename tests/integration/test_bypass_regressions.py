@@ -38,6 +38,20 @@ def test_python311_eval_denied() -> None:
     assert _is_deny(res)
 
 
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        'pypy3 -c "print(1)"',
+        'pypy -c "print(1)"',
+        'pypy3 -e "print(1)"',
+    ],
+)
+def test_pypy_eval_denied(cmd: str) -> None:
+    res = decide(cmd)
+    assert res is not None, f"pypy variant not detected: {cmd!r}"
+    assert _is_deny(res), f"pypy eval not denied: {cmd!r}"
+
+
 def test_nodejs_eval_denied() -> None:
     res = decide('nodejs -e "1"')
     assert res is not None
@@ -129,6 +143,13 @@ def test_shell_wrappers_and_runners_denied(cmd):
         "git -c core.editor='!rm -rf /' commit",
         "git -c gpg.program=/tmp/evil log --show-signature",
         "git config core.pager '!rm -rf /'",
+        # Glob-pattern exec sinks from registry.GIT_CONFIG_EXEC_SINK_GLOBS.
+        # `<prefix>.<name>.<suffix>` — any user-chosen middle name resolves
+        # to an attacker-controlled command at the next git invocation.
+        "git -c filter.foo.smudge=/tmp/evil add x",
+        "git -c filter.foo.clean=/tmp/evil add x",
+        "git -c difftool.x.cmd=/tmp/evil diff",
+        "git -c mergetool.x.cmd=/tmp/evil merge",
     ],
 )
 def test_git_config_injection_denied(cmd):
