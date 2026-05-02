@@ -283,11 +283,32 @@ def test_main_status_returns_zero(populated_log: Path) -> None:
     assert rc == 0
 
 
-def test_main_unknown_subcommand_prints_help() -> None:
+def test_main_version_prints_three_lines(capsys) -> None:
+    """``guard --version`` mirrors ``gh --version``: name+version, install, repo."""
+    from guard import cli
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--version"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    lines = out.strip().splitlines()
+    assert len(lines) == 3, f"expected 3 lines, got {lines!r}"
+    assert lines[0].startswith("guard ")
+    assert "tracine-guard from " in lines[1]
+    assert lines[2] == "https://github.com/tracinehq/guard"
+
+
+def test_main_no_args_prints_help_to_stderr_and_exits_2(capsys) -> None:
+    """No-args returns 2 (POSIX convention for "missing operand")."""
     from guard import cli
 
     rc = cli.main([])
-    assert rc == 0
+    assert rc == 2
+    captured = capsys.readouterr()
+    # Help on stderr, NOT stdout — pipes consuming guard's stdout shouldn't
+    # be polluted with usage text on a missing-arg invocation.
+    assert "guard read-side CLI" in captured.err
+    assert captured.out == ""
 
 
 def test_main_invalid_since_returns_2(decision_log_env: Path, capsys) -> None:
