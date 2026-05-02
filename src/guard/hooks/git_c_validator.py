@@ -279,14 +279,24 @@ def _normalize_config_key(key: str) -> str:
     return key.strip().lower()
 
 
+def _check_traversal_kv(kv: str) -> tuple[str, str] | None:
+    """Return ``(key, value)`` if ``kv`` is a paths-config key with ``../`` value."""
+    if "=" not in kv:
+        return None
+    key, value = kv.split("=", 1)
+    if _normalize_config_key(key) in _PATH_TRAVERSAL_CONFIG_KEYS and "../" in value:
+        return key, value
+    return None
+
+
 def _has_traversal_in_paths_config(command: str) -> tuple[str, str] | None:
     """Return ``(key, value)`` if ``-c <paths-key>=<../...>`` shape is present.
 
-    Walks ``-c key=value`` and ``-c key value`` flag forms anywhere in the
-    command. Returns the first hit. Used by ``decide`` to deny path-traversal
-    on hooks-path / attributes-file overrides — these don't execute on their
-    own (no ``--config-env``-style execution), but the next git subcommand in
-    the same invocation will load from the traversed path.
+    Matches git's real syntax: ``-c`` and ``key=value`` as separate tokens.
+    Used by ``decide`` to deny path-traversal on hooks-path / attributes-file
+    overrides — these don't execute on their own (no ``--config-env``-style
+    execution), but the next git subcommand in the same invocation will load
+    from the traversed path.
     """
     try:
         parts = shlex.split(command)
@@ -296,20 +306,12 @@ def _has_traversal_in_paths_config(command: str) -> tuple[str, str] | None:
         return None
     i = 1
     while i < len(parts):
-        tok = parts[i]
-        if tok == "-c" and i + 1 < len(parts):
-            kv = parts[i + 1]
-            if "=" in kv:
-                key, value = kv.split("=", 1)
-                if _normalize_config_key(key) in _PATH_TRAVERSAL_CONFIG_KEYS and "../" in value:
-                    return key, value
+        if parts[i] == "-c" and i + 1 < len(parts):
+            hit = _check_traversal_kv(parts[i + 1])
+            if hit is not None:
+                return hit
             i += 2
             continue
-        if tok.startswith("-c") and "=" in tok[2:]:
-            kv = tok[2:]
-            key, value = kv.split("=", 1)
-            if _normalize_config_key(key) in _PATH_TRAVERSAL_CONFIG_KEYS and "../" in value:
-                return key, value
         i += 1
     return None
 

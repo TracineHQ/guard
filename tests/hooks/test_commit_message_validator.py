@@ -404,46 +404,37 @@ class TestAIEmailGitConfigPreflight:
             stderr="",
         )
 
-    def test_ai_email_configured_asks(self):
+    @pytest.mark.parametrize(
+        ("stdout", "returncode", "expected_decision"),
+        [
+            # AI-attributed addresses → ASK
+            ("noreply@anthropic.com\n", 0, "ask"),
+            ("223556219+Copilot@users.noreply.github.com\n", 0, "ask"),
+            # Benign / failure / empty → no envelope
+            ("dev@company.com\n", 0, None),
+            ("", 128, None),
+            ("\n", 0, None),
+        ],
+    )
+    def test_email_preflight(self, stdout, returncode, expected_decision):
         with patch(
             "guard.hooks.commit_message_validator.subprocess.run",
             autospec=True,
-            return_value=self._make_completed(stdout="noreply@anthropic.com\n"),
+            return_value=self._make_completed(stdout=stdout, returncode=returncode),
         ):
             result = decide('git commit -m "fix bug"')
-        assert result is not None
-        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
-        assert "AI-attributed" in result["hookSpecificOutput"]["permissionDecisionReason"]
-
-    def test_benign_email_passes(self):
-        with patch(
-            "guard.hooks.commit_message_validator.subprocess.run",
-            autospec=True,
-            return_value=self._make_completed(stdout="dev@company.com\n"),
-        ):
-            assert decide('git commit -m "fix bug"') is None
+        if expected_decision is None:
+            assert result is None
+        else:
+            assert result is not None
+            assert result["hookSpecificOutput"]["permissionDecision"] == expected_decision
+            assert "AI-attributed" in result["hookSpecificOutput"]["permissionDecisionReason"]
 
     def test_subprocess_failure_passes(self):
         with patch(
             "guard.hooks.commit_message_validator.subprocess.run",
             autospec=True,
             side_effect=OSError("git not found"),
-        ):
-            assert decide('git commit -m "fix bug"') is None
-
-    def test_subprocess_nonzero_returncode_passes(self):
-        with patch(
-            "guard.hooks.commit_message_validator.subprocess.run",
-            autospec=True,
-            return_value=self._make_completed(stdout="", returncode=128),
-        ):
-            assert decide('git commit -m "fix bug"') is None
-
-    def test_subprocess_empty_stdout_passes(self):
-        with patch(
-            "guard.hooks.commit_message_validator.subprocess.run",
-            autospec=True,
-            return_value=self._make_completed(stdout="\n"),
         ):
             assert decide('git commit -m "fix bug"') is None
 
@@ -461,15 +452,3 @@ class TestAIEmailGitConfigPreflight:
                 }
             )
         assert not spy.called
-
-    def test_copilot_bot_email_configured_asks(self):
-        with patch(
-            "guard.hooks.commit_message_validator.subprocess.run",
-            autospec=True,
-            return_value=self._make_completed(
-                stdout="223556219+Copilot@users.noreply.github.com\n",
-            ),
-        ):
-            result = decide('git commit -m "fix bug"')
-        assert result is not None
-        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
