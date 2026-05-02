@@ -266,10 +266,69 @@ def _is_commit_reuse(command: str) -> bool:
     return any(_is_reuse_token(tok, i, rest) for i, tok in enumerate(rest))
 
 
+# ``-c key=value`` paths-config keys whose value, if it traverses out via
+# ``../`` segments, points at attacker-controlled hooks/attributes the
+# subsequent git invocation would execute. The exploit shape is e.g.
+# ``git -c core.hooksPath=../../tmp/evil status`` — the next command in the
+# segment would silently run scripts from outside the repo.
+_PATH_TRAVERSAL_CONFIG_KEYS: frozenset[str] = frozenset({"core.hookspath", "core.attributesfile"})
+
+
+def _normalize_config_key(key: str) -> str:
+    """Lowercase and strip whitespace for git config-key matching."""
+    return key.strip().lower()
+
+
+def _has_traversal_in_paths_config(command: str) -> tuple[str, str] | None:
+    """Return ``(key, value)`` if ``-c <paths-key>=<../...>`` shape is present.
+
+    Walks ``-c key=value`` and ``-c key value`` flag forms anywhere in the
+    command. Returns the first hit. Used by ``decide`` to deny path-traversal
+    on hooks-path / attributes-file overrides — these don't execute on their
+    own (no ``--config-env``-style execution), but the next git subcommand in
+    the same invocation will load from the traversed path.
+    """
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return None
+    if not parts or parts[0] != "git":
+        return None
+    i = 1
+    while i < len(parts):
+        tok = parts[i]
+        if tok == "-c" and i + 1 < len(parts):
+            kv = parts[i + 1]
+            if "=" in kv:
+                key, value = kv.split("=", 1)
+                if _normalize_config_key(key) in _PATH_TRAVERSAL_CONFIG_KEYS and "../" in value:
+                    return key, value
+            i += 2
+            continue
+        if tok.startswith("-c") and "=" in tok[2:]:
+            kv = tok[2:]
+            key, value = kv.split("=", 1)
+            if _normalize_config_key(key) in _PATH_TRAVERSAL_CONFIG_KEYS and "../" in value:
+                return key, value
+        i += 1
+    return None
+
+
 def decide(command: str) -> dict[str, Any] | None:
     """Return a permission envelope, or ``None`` to fall through."""
     if has_shell_operators(command):
         return None
+    traversal = _has_traversal_in_paths_config(command)
+    if traversal is not None:
+        key, value = traversal
+        return emit_pretooluse_decision(
+            "deny",
+            (
+                f"git -c {key}={value}: path traversal in core.hooksPath / "
+                "core.attributesFile is a known exploit shape — the next git "
+                "subcommand would load hooks/attributes from outside the repo."
+            ),
+        )
     if _is_commit_reuse(command):
         return emit_pretooluse_decision(
             "deny",
@@ -296,7 +355,9 @@ def hook(payload: dict[str, Any]) -> None:
     if not isinstance(tool_input, dict):
         return
     command = tool_input.get("command", "")
-    if not isinstance(command, str) or ("git -C" not in command and "git commit" not in command):
+    if not isinstance(command, str) or (
+        "git -C" not in command and "git commit" not in command and "git -c " not in command
+    ):
         return
 
     envelope = decide(command)

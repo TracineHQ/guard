@@ -130,7 +130,10 @@ _CREDENTIAL_PATH_PATTERNS: list[re.Pattern[str]] = [
 # wouldn't trigger).
 _HEURISTIC_NAME_RE = re.compile(
     r"(?i)(?:secret|token|password|credential|api[_-]?key|bearer|"
-    r"\bpat\b|\bkey\b)"
+    r"\bpat\b|\bkey\b|"
+    # Token-prefixed filenames (provider-issued PATs / publishable keys).
+    # Anchored so they don't false-match a substring inside an unrelated word.
+    r"(?:^|[^A-Za-z0-9])(?:gh_|glpat[_-]|npm_|sk_|pk_live_))"
 )
 _HEURISTIC_EXTENSIONS: frozenset[str] = frozenset(
     {".pem", ".p12", ".pfx", ".kdbx", ".gpg", ".asc", ".jks", ".p8", ".ppk"}
