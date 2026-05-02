@@ -210,3 +210,46 @@ def test_migrate_file_handles_blank_and_invalid_lines(tmp_path: Path) -> None:
     assert report.blank == 1
     assert report.invalid_json == 1
     assert report.promoted_v0 == 1
+
+
+def test_migrate_file_captures_concurrent_tail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Records appended to the original after the backup snapshot are preserved.
+
+    Simulates the race window by intercepting the backup step: the backup
+    captures only the initial portion of the file, then a concurrent appender
+    adds a record to the original. The tail-capture step (size delta between
+    backup and original) picks up the appended bytes so they aren't lost.
+    """
+    import guard.migrate_log as ml
+
+    real_copy2 = ml.shutil.copy2
+
+    log = tmp_path / "guard-decisions.jsonl"
+    initial = json.dumps(_v0_record()) + "\n"
+    log.write_text(initial, encoding="utf-8")
+    initial_size = len(initial.encode("utf-8"))
+
+    appended_record = _v1_record(session_id="late-write")
+    appended_line = json.dumps(appended_record) + "\n"
+
+    def _injecting_copy2(src, dst, *args, **kwargs):  # type: ignore[no-untyped-def]
+        # Real copy first — establishes the frozen snapshot.
+        real_copy2(src, dst, *args, **kwargs)
+        # Then simulate a concurrent guard writer appending to the original.
+        with open(src, "a", encoding="utf-8") as fh:  # noqa: PTH123
+            fh.write(appended_line)
+
+    monkeypatch.setattr(ml.shutil, "copy2", _injecting_copy2)
+
+    report = migrate_file(log, backup=True)
+    assert report.promoted_v0 == 1
+    assert report.backup_path is not None
+    assert report.backup_path.stat().st_size == initial_size
+
+    final_lines = log.read_text(encoding="utf-8").splitlines()
+    assert len(final_lines) == 2
+    sessions = [json.loads(line)["session_id"] for line in final_lines]
+    assert "late-write" in sessions
