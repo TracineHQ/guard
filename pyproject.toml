@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "guard"
+name = "tracine-guard"
 version = "1.0.0"
 description = "Stdlib-only safety hooks plugin for Claude Code"
 readme = "README.md"

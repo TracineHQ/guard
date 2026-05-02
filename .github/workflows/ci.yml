@@ -92,6 +92,90 @@ jobs:
             unzip -l dist/*.whl | grep -F "guard/hooks/${module}.py" \
               || { echo "ERROR: ${module}.py missing from built wheel"; exit 1; }
           done
+      - name: Upload built distribution
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  install-smoke:
+    name: Install-from-wheel smoke test (${{ matrix.python }} on ${{ matrix.os }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.13']
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Download built distribution
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: dist
+          path: dist/
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install built wheel into a clean venv
+        shell: bash
+        run: |
+          set -eux
+          python -m venv /tmp/guard-smoke
+          # Install only from dist/ — refuse to fall back to PyPI so we exercise
+          # the freshly-built artifact, not whatever an old name resolved to.
+          /tmp/guard-smoke/bin/python -m pip install --no-index --find-links dist/ tracine-guard
+      - name: Verify CLI binary on PATH and reports the right version
+        shell: bash
+        run: |
+          set -eux
+          source /tmp/guard-smoke/bin/activate
+          which guard
+          guard --version
+          guard --help | grep -q "guard read-side CLI"
+          guard --json status | python -c "import json,sys; d=json.load(sys.stdin); print(d)"
+      - name: Verify import surface
+        shell: bash
+        run: |
+          set -eux
+          /tmp/guard-smoke/bin/python -c "
+          import guard, importlib.metadata as m
+          dist_version = m.version('tracine-guard')
+          assert guard.__version__ == dist_version, (guard.__version__, dist_version)
+          # Hooks are importable as scripts via -m
+          import guard.hooks.bash_command_validator
+          import guard.hooks.git_c_validator
+          import guard.hooks.credential_check
+          import guard.hooks.commit_message_validator
+          import guard.hooks.agent_output_guard
+          import guard.hooks.protected_files
+          import guard.hooks.subagent_scope
+          print('OK', guard.__version__)
+          "
+      - name: Verify a hook responds to a synthetic PreToolUse payload
+        shell: bash
+        run: |
+          set -eux
+          # Feed a clearly-dangerous payload; confirm the wheel-installed hook
+          # script returns deny on stdin/stdout. End-to-end validates that
+          # entry points + argparse + JSON contract all survive packaging.
+          # Hooks exit 2 on deny (Claude Code's "block" signal) — that's not
+          # a smoke-test failure, that IS the success condition. Capture the
+          # exit code separately so set -e doesn't propagate it.
+          payload='{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}'
+          set +e
+          out=$(echo "$payload" | /tmp/guard-smoke/bin/python -m guard.hooks.bash_command_validator)
+          rc=$?
+          set -e
+          test "$rc" = "2" || { echo "expected deny exit=2, got $rc"; exit 1; }
+          echo "$out" | python -c "
+          import json, sys
+          d = json.loads(sys.stdin.read())
+          assert d['hookSpecificOutput']['permissionDecision'] == 'deny', d
+          print('hook deny OK')
+          "
 
   detect-secrets:
     name: Scan for leaked secrets
