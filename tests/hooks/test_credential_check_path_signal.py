@@ -232,6 +232,40 @@ class TestTier6Heuristic:
         result = decide("Read", {"file_path": "/tmp/MY_SECRET.txt"})
         assert _is_ask(result)
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            # Token-prefixed filenames — provider-issued PAT / publishable key
+            # shapes. These would otherwise miss the keyword regex (no
+            # "secret"/"token"/"key" substring on their own).
+            "/tmp/gh_abc123.txt",
+            "/tmp/glpat-AAAABBBBCCCC",
+            "/tmp/glpat_xxxxx.cfg",
+            "/tmp/npm_authdata.cfg",
+            "/tmp/sk_live_abc123",
+            "/tmp/pk_live_xyz.cfg",
+            # Case insensitivity for token prefixes.
+            "/tmp/SK_live_xyz.cfg",
+        ],
+    )
+    def test_heuristic_token_prefix_asks(self, path):
+        result = decide("Read", {"file_path": path})
+        assert _is_ask(result), f"token-prefix miss: {path}"
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            # Cert / keystore extensions — these already exist in the set, but
+            # the assertion is part of this branch's coverage so a regression
+            # to the extension set is caught here.
+            "/tmp/keystore.jks",
+            "/tmp/serviceaccount.p8",
+        ],
+    )
+    def test_heuristic_extension_asks(self, path):
+        result = decide("Read", {"file_path": path})
+        assert _is_ask(result), f"extension miss: {path}"
+
 
 # --- Negative tests ---
 

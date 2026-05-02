@@ -15,6 +15,7 @@ import os
 import re
 import shlex
 import stat
+import subprocess  # nosec B404 -- used for read-only `git config user.email` lookup
 import sys
 from pathlib import Path
 from typing import Any
@@ -316,10 +317,53 @@ def _has_opaque_message_source(command: str) -> bool:
     return bool(_OPAQUE_MESSAGE_RE.search(command))
 
 
+_AI_EMAIL_CONFIG_ASK_REASON = (
+    "Configured git user.email looks AI-attributed — confirm intent.\n"
+    "`git config user.email` returns an address matching a known AI-tool "
+    "pattern, so any commit authored under this identity will be tagged as "
+    "AI-authored even when the message body is clean. Reset the identity "
+    "(`git config user.email <you@example.com>`) before committing as yourself."
+)
+
+
+def _ai_email_in_git_config(cwd: str | None) -> str | None:
+    """Return the configured user.email if it matches an AI-tool pattern.
+
+    Shells out to ``git config user.email`` with a short timeout. Any failure
+    (non-zero exit, missing config, OSError, timeout) returns ``None`` — git
+    will surface its own error when the commit runs and we don't want hook
+    plumbing issues to block legitimate commits.
+    """
+    try:
+        proc = subprocess.run(  # nosec B603 B607 -- static argv, PATH-resolved git matches user shell
+            ["git", "config", "user.email"],  # noqa: S607
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    email = proc.stdout.strip()
+    if not email:
+        return None
+    return email if _AI_EMAIL_RE.search(email) else None
+
+
 def decide(command: str, cwd: str | None = None) -> dict[str, Any] | None:
     """Return a deny envelope if AI attribution is found, else ``None``."""
     if _has_opaque_message_source(command):
         return emit_pretooluse_decision("deny", _OPAQUE_SOURCE_DENY_REASON)
+
+    ai_email = _ai_email_in_git_config(cwd)
+    if ai_email is not None:
+        return emit_pretooluse_decision(
+            "ask",
+            f"{_AI_EMAIL_CONFIG_ASK_REASON}\nConfigured email: {ai_email}",
+        )
 
     message = extract_commit_message(command, cwd=cwd)
     if message is None:
@@ -356,18 +400,20 @@ def hook(payload: dict[str, Any]) -> None:
         return
 
     hso = envelope.get("hookSpecificOutput", {})
+    decision = hso.get("permissionDecision", "deny")
     log_decision(
         hook_id=_HOOK_ID,
         event="PreToolUse",
         tool_name="Bash",
-        decision="deny",
+        decision=decision if decision in ("allow", "deny", "ask") else "deny",
         reason=hso.get("permissionDecisionReason", ""),
         command_excerpt=command,
         session_id=str(payload.get("session_id", "")),
         cwd=cwd_str,
     )
     sys.stdout.write(json.dumps(envelope))
-    sys.exit(2)
+    if decision == "deny":
+        sys.exit(2)
 
 
 if __name__ == "__main__":

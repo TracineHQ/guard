@@ -406,3 +406,29 @@ class TestBashWriteTargets:
             }
         )
         assert capsys.readouterr().out == ""
+
+    def test_bash_tee_inside_scope_passthrough(self, tmp_path, capsys):
+        _write_scope(tmp_path, {"task": "T1", "allowed": ["src/"]})
+        (tmp_path / "src").mkdir()
+        target = tmp_path / "src" / "out.txt"
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": f"echo X | tee {target}"},
+                "cwd": str(tmp_path),
+            }
+        )
+        assert capsys.readouterr().out == ""
+
+    def test_bash_cp_dest_inside_scope_passthrough(self, tmp_path, capsys):
+        _write_scope(tmp_path, {"task": "T1", "allowed": ["src/"]})
+        (tmp_path / "src").mkdir()
+        target = tmp_path / "src" / "copied.txt"
+        hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": f"cp source.txt {target}"},
+                "cwd": str(tmp_path),
+            }
+        )
+        assert capsys.readouterr().out == ""

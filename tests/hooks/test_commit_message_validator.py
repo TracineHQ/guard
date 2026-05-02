@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -380,3 +381,74 @@ class TestSubprocessIntegration:
             check=False,
         )
         assert result.returncode == 2
+
+
+class TestAIEmailGitConfigPreflight:
+    """Pre-flight check: warn (ASK) when git user.email itself looks AI-attributed.
+
+    The decide() function shells out to ``git config user.email`` once per
+    commit attempt. If the configured email matches an AI-tool pattern (e.g.
+    ``noreply@anthropic.com``), every commit authored under that identity
+    will be tagged as AI-authored even if the message body is clean.
+    """
+
+    def _make_completed(
+        self,
+        stdout: str = "",
+        returncode: int = 0,
+    ) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=["git", "config", "user.email"],
+            returncode=returncode,
+            stdout=stdout,
+            stderr="",
+        )
+
+    @pytest.mark.parametrize(
+        ("stdout", "returncode", "expected_decision"),
+        [
+            # AI-attributed addresses → ASK
+            ("noreply@anthropic.com\n", 0, "ask"),
+            ("223556219+Copilot@users.noreply.github.com\n", 0, "ask"),
+            # Benign / failure / empty → no envelope
+            ("dev@company.com\n", 0, None),
+            ("", 128, None),
+            ("\n", 0, None),
+        ],
+    )
+    def test_email_preflight(self, stdout, returncode, expected_decision):
+        with patch(
+            "guard.hooks.commit_message_validator.subprocess.run",
+            autospec=True,
+            return_value=self._make_completed(stdout=stdout, returncode=returncode),
+        ):
+            result = decide('git commit -m "fix bug"')
+        if expected_decision is None:
+            assert result is None
+        else:
+            assert result is not None
+            assert result["hookSpecificOutput"]["permissionDecision"] == expected_decision
+            assert "AI-attributed" in result["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_subprocess_failure_passes(self):
+        with patch(
+            "guard.hooks.commit_message_validator.subprocess.run",
+            autospec=True,
+            side_effect=OSError("git not found"),
+        ):
+            assert decide('git commit -m "fix bug"') is None
+
+    def test_non_commit_command_skips_subprocess(self):
+        # The hook entry point only invokes decide() when "git commit" is in
+        # the command — a plain status command shouldn't shell out at all.
+        with patch(
+            "guard.hooks.commit_message_validator.subprocess.run",
+            autospec=True,
+        ) as spy:
+            hook(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "git status"},
+                }
+            )
+        assert not spy.called

@@ -240,3 +240,51 @@ class TestDestructiveSubcommandFlags:
     def test_remote_listing_still_allowed(self):
         decision, _ = _run("git -C /tmp remote -v")
         assert decision == "allow"
+
+
+class TestPathTraversalConfigKeys:
+    """``-c core.hooksPath=../foo`` / ``-c core.attributesFile=../`` are denied.
+
+    Pointing core.hooksPath at a path that traverses out of the repo lets the
+    next git subcommand load hooks from attacker-controlled territory. Same
+    for core.attributesFile (filter / diff drivers).
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git -c core.hooksPath=../foo status",
+            "git -c core.hooksPath=../../etc/x status",
+            "git -c core.attributesFile=../../etc/x diff",
+            "git -c core.AttributesFile=../bar log",  # case-insensitive key
+            "git -C /repo -c core.hooksPath=../escape status",
+            "git -c core.hooksPath=foo/../../escape status",
+        ],
+    )
+    def test_traversal_denied(self, command):
+        decision, code = _run(command)
+        assert decision == "deny", f"traversal not denied: {command!r}"
+        assert code == 2
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # Absolute path values are not traversal (existing behavior).
+            "git -c core.hooksPath=/tmp/safe status",
+            "git -c core.attributesFile=/etc/gitattributes diff",
+            # Relative path without ``../`` is not traversal.
+            "git -c core.hooksPath=hooks/local status",
+        ],
+    )
+    def test_safe_paths_not_denied_for_traversal(self, command):
+        # The traversal check must not fire; the rest of the validator may
+        # produce its own decision (allow/passthrough) but never a traversal
+        # deny on these inputs.
+        decision, _ = _run(command)
+        assert decision != "deny"
+
+    def test_unrelated_key_with_traversal_passthrough(self):
+        # Other config keys with ``../`` in value are not traversal sinks for
+        # this hook (bash_command_validator handles exec sinks separately).
+        decision, _ = _run("git -c color.ui=../foo status")
+        assert decision != "deny"
