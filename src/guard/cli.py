@@ -520,6 +520,13 @@ def _build_parser() -> argparse.ArgumentParser:
             "One-shot rewrite of the JSONL log to schema v1. "
             "Idempotent — re-running on an already-v1 log is a no-op."
         ),
+        epilog=(
+            "RECOMMENDED: pause Claude Code sessions before running. "
+            "Guard's writer takes O_APPEND on the existing inode; if a hook "
+            "fires during migration, that record may land on the orphaned "
+            "inode and be lost on the atomic replace. The default backup "
+            "(.bak.<UTC-timestamp>) is your safety net."
+        ),
     )
     p_migrate.add_argument(
         "--path",

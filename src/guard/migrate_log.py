@@ -198,13 +198,30 @@ def migrate_file(
     """Migrate `path` in place. Returns a `MigrationReport`.
 
     Algorithm:
-    1. Stream the source file line-by-line, classify and rewrite each record.
-    2. Buffer output in a sibling `<path>.migrating` file.
-    3. If `dry_run`, discard the staging file and return counts only.
-    4. Otherwise, copy the original to `<path>.bak.<UTC-timestamp>` (when
-       `backup=True`), then `os.replace` the staging file onto the original.
-    5. On any exception, the staging file is removed; the original is
-       untouched (atomic-replace either fully succeeds or never happens).
+    1. Snapshot the original to ``<path>.bak.<UTC-timestamp>`` FIRST (before
+       streaming). This captures the file state at migration start so any
+       concurrent append happens against the original, not the staging.
+    2. Stream from the backup (frozen source) line-by-line; write transformed
+       output to a sibling ``<path>.migrating`` file. Streaming from the
+       backup, not the original, means staging is a deterministic transform
+       of a known-frozen input.
+    3. Before atomic-replace, capture any tail appended to the original since
+       the backup was taken (concurrent guard hook writes) and append the
+       (untransformed) tail to staging so no records are lost.
+    4. ``Path.replace(path)`` swaps staging onto the original atomically.
+    5. On any exception, staging is unlinked; the original (and the backup,
+       if created) are untouched.
+
+    Concurrency caveat: if guard's writer has an open fd on the original
+    BEFORE replace and writes AFTER replace, those bytes go to the orphaned
+    inode and are lost. The CLI documents the recommendation to pause
+    Claude Code sessions before migrating; a residual race window of a few
+    milliseconds remains. Mitigation: the backup is your safety net.
+
+    With ``dry_run=True``, no backup is taken and no replace occurs;
+    ``backup=False`` skips the backup but the streaming-from-source falls
+    back to streaming directly from ``path`` (less safe — only use with
+    ``dry_run=True`` or when you're certain no concurrent writes exist).
     """
     if not path.exists():
         msg = f"guard log not found: {path}"
@@ -222,13 +239,22 @@ def migrate_file(
     total = 0
 
     staging = path.with_name(path.name + ".migrating")
+    backup_path: Path | None = None
+
+    if not dry_run and backup:
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        backup_path = path.with_name(f"{path.name}.bak.{stamp}")
+        shutil.copy2(path, backup_path)
+
+    # Stream from the backup when available (frozen source); fall back to
+    # the original for dry-run or no-backup paths.
+    source_path = backup_path if backup_path is not None else path
+    backup_size = backup_path.stat().st_size if backup_path is not None else None
+
     try:
         with (
-            path.open("r", encoding="utf-8") as src,
-            staging.open(
-                "w",
-                encoding="utf-8",
-            ) as dst,
+            source_path.open("r", encoding="utf-8") as src,
+            staging.open("w", encoding="utf-8") as dst,
         ):
             for line in src:
                 total += 1
@@ -240,6 +266,16 @@ def migrate_file(
                 ):
                     samples_unrecognized.append(line.rstrip("\n")[:200])
                 dst.write(out)
+
+            # Capture any tail appended to the original since the backup ran.
+            # Untransformed tail is fine — these are post-snapshot records
+            # written by the (still-strict) v1 writer, so they're already v1.
+            if backup_size is not None:
+                with path.open("rb") as orig:
+                    orig.seek(backup_size)
+                    tail = orig.read()
+                if tail:
+                    dst.write(tail.decode("utf-8", errors="replace"))
 
         if dry_run:
             staging.unlink(missing_ok=True)
@@ -254,12 +290,6 @@ def migrate_file(
                 samples_unrecognized=samples_unrecognized,
                 dry_run=True,
             )
-
-        backup_path: Path | None = None
-        if backup:
-            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-            backup_path = path.with_name(f"{path.name}.bak.{stamp}")
-            shutil.copy2(path, backup_path)
 
         staging.replace(path)
     except BaseException:
