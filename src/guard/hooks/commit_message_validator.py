@@ -15,7 +15,7 @@ import os
 import re
 import shlex
 import stat
-import subprocess
+import subprocess  # nosec B404 -- used for read-only `git config user.email` lookup
 import sys
 from pathlib import Path
 from typing import Any
@@ -335,8 +335,8 @@ def _ai_email_in_git_config(cwd: str | None) -> str | None:
     plumbing issues to block legitimate commits.
     """
     try:
-        proc = subprocess.run(
-            ["git", "config", "user.email"],  # noqa: S607 -- PATH-resolved git matches user shell
+        proc = subprocess.run(  # nosec B603 B607 -- static argv, PATH-resolved git matches user shell
+            ["git", "config", "user.email"],  # noqa: S607
             cwd=cwd,
             capture_output=True,
             text=True,
