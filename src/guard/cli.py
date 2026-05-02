@@ -400,6 +400,49 @@ def cmd_diff() -> tuple[dict[str, Any], str]:
     return payload, "\n".join(lines) + "\n"
 
 
+def cmd_migrate_log(
+    log_path_override: str | None,
+    *,
+    dry_run: bool,
+    backup: bool,
+) -> tuple[dict[str, Any], str]:
+    """Rewrite the JSONL log in place to v1, in one shot."""
+    from guard.migrate_log import migrate_file  # noqa: PLC0415
+
+    target = Path(log_path_override) if log_path_override else Path(effective_log_path())
+    report = migrate_file(target, dry_run=dry_run, backup=backup)
+    payload = {
+        "path": str(target),
+        "dry_run": report.dry_run,
+        "total_lines": report.total_lines,
+        "already_v1": report.already_v1,
+        "promoted_v1_0": report.promoted_v1_0,
+        "promoted_v0": report.promoted_v0,
+        "unrecognized": report.unrecognized,
+        "invalid_json": report.invalid_json,
+        "blank": report.blank,
+        "backup_path": str(report.backup_path) if report.backup_path else None,
+        "samples_unrecognized": report.samples_unrecognized,
+    }
+    label = "would migrate" if dry_run else "migrated"
+    lines = [
+        f"{label}: {target}",
+        f"  total lines:    {report.total_lines}",
+        f"  already v1:     {report.already_v1}",
+        f"  promoted v1.0:  {report.promoted_v1_0}",
+        f"  promoted v0:    {report.promoted_v0}",
+        f"  unrecognized:   {report.unrecognized}",
+        f"  invalid JSON:   {report.invalid_json}",
+        f"  blank lines:    {report.blank}",
+    ]
+    if report.backup_path:
+        lines.append(f"  backup:         {report.backup_path}")
+    if report.samples_unrecognized:
+        lines.append("  samples (unrecognized):")
+        lines.extend(f"    {sample}" for sample in report.samples_unrecognized)
+    return payload, "\n".join(lines) + "\n"
+
+
 # === Helpers ===
 
 
@@ -471,6 +514,33 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    p_migrate = sub.add_parser(
+        "migrate-log",
+        help=(
+            "One-shot rewrite of the JSONL log to schema v1. "
+            "Idempotent — re-running on an already-v1 log is a no-op."
+        ),
+    )
+    p_migrate.add_argument(
+        "--path",
+        default=None,
+        help=(
+            "Override log path (default: $GUARD_DECISIONS_PATH or ~/.claude/guard-decisions.jsonl)."
+        ),
+    )
+    p_migrate.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report counts without writing.",
+    )
+    p_migrate.add_argument(
+        "--no-backup",
+        dest="backup",
+        action="store_false",
+        default=True,
+        help="Skip writing a sibling .bak.<timestamp> file (not recommended).",
+    )
+
     return parser
 
 
@@ -509,10 +579,16 @@ def main(argv: list[str] | None = None) -> int:
             payload, pretty = cmd_test(args.command)
         elif cmd == "diff":
             payload, pretty = cmd_diff()
+        elif cmd == "migrate-log":
+            payload, pretty = cmd_migrate_log(
+                args.path,
+                dry_run=bool(args.dry_run),
+                backup=bool(args.backup),
+            )
         else:
             parser.print_help()
             return 0
-    except ValueError as exc:
+    except (ValueError, FileNotFoundError, OSError) as exc:
         sys.stderr.write(f"guard: {exc}\n")
         return 2
 
