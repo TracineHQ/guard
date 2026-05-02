@@ -27,3 +27,5 @@ venv/
 # Local Claude Code state (per-session progress, scope files, checkpoints)
 .claude/
 
+# Local strategy/planning docs — conversation scratch, not deliverables
+docs/planning/
