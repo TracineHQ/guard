@@ -463,6 +463,55 @@ def _since_repr(since: timedelta | None) -> str:
 # === argparse wiring ===
 
 
+def _version_string() -> str:
+    """Multi-line ``--version`` payload — name, version, install path, repo URL.
+
+    Mirrors `gh --version`. Concrete install path makes bug reports
+    self-identifying (which wheel? editable? site-packages?).
+    """
+    install_dir = str(Path(__file__).resolve().parent)
+    return (
+        f"guard {__version__}\ntracine-guard from {install_dir}\nhttps://github.com/tracinehq/guard"
+    )
+
+
+class _RawVersionAction(argparse.Action):
+    """Print ``--version`` text verbatim (preserves newlines).
+
+    argparse's built-in ``version`` action runs the string through
+    ``HelpFormatter._fill_text`` which collapses newlines to spaces.
+    We want a multi-line ``gh --version``-style block, so emit raw.
+    """
+
+    def __init__(
+        self,
+        option_strings: list[str],
+        dest: str = argparse.SUPPRESS,
+        default: str = argparse.SUPPRESS,
+        version: str = "",
+        help: str = "show program's version number and exit",  # noqa: A002 -- argparse contract
+    ) -> None:
+        super().__init__(
+            option_strings=option_strings,
+            dest=dest,
+            default=default,
+            nargs=0,
+            help=help,
+        )
+        self._version = version
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        del namespace, values, option_string
+        sys.stdout.write(self._version + "\n")
+        parser.exit(0)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="guard",
@@ -475,15 +524,31 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--version",
-        action="version",
-        version=f"guard {__version__}",
+        action=_RawVersionAction,
+        version=_version_string(),
     )
     sub = parser.add_subparsers(dest="cmd")
 
-    sub.add_parser("status", help="Show installation status, log location, and last record.")
+    sub.add_parser(
+        "status",
+        help="Show installation status, log location, and last record.",
+        epilog=(
+            "Examples:\n"
+            "  guard status              # current install + last record\n"
+            "  guard --json status | jq  # pipeable for scripting"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
 
     p_noisy = sub.add_parser(
-        "noisy", help="Top N rules by hit count, grouped by (hook_id, decision)."
+        "noisy",
+        help="Top N rules by hit count, grouped by (hook_id, decision).",
+        epilog=(
+            "Examples:\n"
+            "  guard noisy --since 24h --limit 20\n"
+            "  guard --json noisy --since 7d | jq -s 'group_by(.hook_id)'"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_noisy.add_argument("--since", default="7d", help="Time window: Nd/Nh/Nm (default: 7d).")
     p_noisy.add_argument("--limit", type=int, default=10, help="Max entries (default: 10).")
@@ -495,14 +560,28 @@ def _build_parser() -> argparse.ArgumentParser:
             "Heuristic: full set of (hook_id, decision) pairs ever seen, minus "
             "the set seen in the recency window."
         ),
+        epilog=("Examples:\n  guard silent --since 30d  # rules that fired before but not lately"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_silent.add_argument("--since", default="30d", help="Time window: Nd/Nh/Nm (default: 30d).")
 
-    p_trace = sub.add_parser("trace", help="Print every record for a session, chronological.")
+    p_trace = sub.add_parser(
+        "trace",
+        help="Print every record for a session, chronological.",
+        epilog=("Examples:\n  guard trace abc123def456  # session_id from `guard status`"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p_trace.add_argument("session_id", help="Session id from the log.")
 
     p_test = sub.add_parser(
-        "test", help="In-process invocation of each hook's decide() on the given command."
+        "test",
+        help="In-process invocation of each hook's decide() on the given command.",
+        epilog=(
+            "Examples:\n"
+            "  guard test 'rm -rf /'           # preview which hook denies it\n"
+            "  guard test 'git -C /tmp status' # check git_c_validator behavior"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_test.add_argument("command", help="Bash command to test.")
 
@@ -512,6 +591,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "Show effective merged config. v1.1 stub: built-in defaults only; "
             "user/project layers land later."
         ),
+        epilog=("Examples:\n  guard diff  # effective config (built-in defaults today)"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
     p_migrate = sub.add_parser(
@@ -568,8 +649,8 @@ def main(argv: list[str] | None = None) -> int:
 
     cmd = args.cmd
     if cmd is None:
-        parser.print_help()
-        return 0
+        parser.print_help(sys.stderr)
+        return 2
 
     try:
         if cmd == "status":
