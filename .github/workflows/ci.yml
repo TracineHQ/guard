@@ -92,6 +92,83 @@ jobs:
             unzip -l dist/*.whl | grep -F "guard/hooks/${module}.py" \
               || { echo "ERROR: ${module}.py missing from built wheel"; exit 1; }
           done
+      - name: Upload built distribution
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  install-smoke:
+    name: Install-from-wheel smoke test (${{ matrix.python }} on ${{ matrix.os }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.13']
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Download built distribution
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806  # v4.1.9
+        with:
+          name: dist
+          path: dist/
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install built wheel into a clean venv
+        shell: bash
+        run: |
+          set -eux
+          python -m venv /tmp/guard-smoke
+          # Install only from dist/ — refuse to fall back to PyPI so we exercise
+          # the freshly-built artifact, not whatever an old name resolved to.
+          /tmp/guard-smoke/bin/python -m pip install --no-index --find-links dist/ tracine-guard
+      - name: Verify CLI binary on PATH and reports the right version
+        shell: bash
+        run: |
+          set -eux
+          source /tmp/guard-smoke/bin/activate
+          which guard
+          guard --version
+          guard --help | grep -q "guard read-side CLI"
+          guard status --json | python -c "import json,sys; d=json.load(sys.stdin); print(d)"
+      - name: Verify import surface
+        shell: bash
+        run: |
+          set -eux
+          /tmp/guard-smoke/bin/python -c "
+          import guard, importlib.metadata as m
+          dist_version = m.version('tracine-guard')
+          assert guard.__version__ == dist_version, (guard.__version__, dist_version)
+          # Hooks are importable as scripts via -m
+          import guard.hooks.bash_command_validator
+          import guard.hooks.git_c_validator
+          import guard.hooks.credential_check
+          import guard.hooks.commit_message_validator
+          import guard.hooks.agent_output_guard
+          import guard.hooks.protected_files
+          import guard.hooks.subagent_scope
+          print('OK', guard.__version__)
+          "
+      - name: Verify a hook responds to a synthetic PreToolUse payload
+        shell: bash
+        run: |
+          set -eux
+          # Feed a clearly-dangerous payload; confirm the wheel-installed hook
+          # script returns deny on stdin/stdout. End-to-end validates that
+          # entry points + argparse + JSON contract all survive packaging.
+          payload='{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}'
+          out=$(echo "$payload" | /tmp/guard-smoke/bin/python -m guard.hooks.bash_command_validator)
+          echo "$out" | python -c "
+          import json, sys
+          d = json.loads(sys.stdin.read())
+          assert d['hookSpecificOutput']['permissionDecision'] == 'deny', d
+          print('hook deny OK')
+          "
 
   detect-secrets:
     name: Scan for leaked secrets

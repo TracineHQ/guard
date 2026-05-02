@@ -1,0 +1,177 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build wheel and sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        # Release builds publish artifacts; running off a cache could let a
+        # poisoned cache entry land in the wheel. Pay the cold-install cost.
+        with:
+          enable-cache: false
+      - name: Verify tag matches pyproject.toml version
+        shell: bash
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME#v}"
+          file_version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$tag" != "$file_version" ]; then
+            echo "ERROR: tag $GITHUB_REF_NAME ($tag) does not match pyproject.toml version $file_version"
+            exit 1
+          fi
+          echo "Tag and pyproject.toml agree on version $tag"
+      - name: Build wheel and sdist
+        run: uv build
+      - name: List artifacts
+        run: ls -la dist/
+      - name: Upload built distribution
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: dist
+          path: dist/
+          retention-days: 30
+          if-no-files-found: error
+
+  testpypi-publish:
+    name: Publish to TestPyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/tracine-guard
+    permissions:
+      id-token: write  # OIDC token for Trusted Publisher
+    steps:
+      - name: Download built distribution
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806  # v4.1.9
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@6733eb7d741f0b11ec6a39b58540dab7590f9b7d  # v1.14.0
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  testpypi-smoke:
+    name: Smoke-test TestPyPI install (${{ matrix.python }} on ${{ matrix.os }})
+    needs: testpypi-publish
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.13']
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install tracine-guard from TestPyPI (with retry for index propagation)
+        shell: bash
+        run: |
+          set -eux
+          tag="${GITHUB_REF_NAME#v}"
+          python -m venv /tmp/guard-smoke
+          # TestPyPI indexes a release lazily; retry up to ~2 minutes.
+          # `--index-url` points at TestPyPI for `tracine-guard` itself;
+          # `--extra-index-url` falls back to real PyPI for any deps
+          # (we have none today, but this is the canonical pattern).
+          for attempt in 1 2 3 4 5 6 7 8; do
+            if /tmp/guard-smoke/bin/pip install \
+                --index-url https://test.pypi.org/simple/ \
+                --extra-index-url https://pypi.org/simple/ \
+                "tracine-guard==${tag}"; then
+              break
+            fi
+            echo "Install attempt $attempt failed, sleeping 15s..."
+            sleep 15
+          done
+      - name: Verify CLI binary, version, and import
+        shell: bash
+        run: |
+          set -eux
+          tag="${GITHUB_REF_NAME#v}"
+          source /tmp/guard-smoke/bin/activate
+          which guard
+          guard_version=$(guard --version | awk '{print $NF}')
+          test "$guard_version" = "$tag" \
+            || { echo "guard --version reported $guard_version, expected $tag"; exit 1; }
+          guard --help | grep -q "guard read-side CLI"
+          /tmp/guard-smoke/bin/python -c "
+          import guard, importlib.metadata as m
+          assert guard.__version__ == m.version('tracine-guard')
+          import guard.hooks.bash_command_validator
+          import guard.hooks.git_c_validator
+          print('OK', guard.__version__)
+          "
+      - name: Verify a hook denies a dangerous payload end-to-end
+        shell: bash
+        run: |
+          set -eux
+          payload='{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}'
+          out=$(echo "$payload" | /tmp/guard-smoke/bin/python -m guard.hooks.bash_command_validator)
+          echo "$out" | python -c "
+          import json, sys
+          d = json.loads(sys.stdin.read())
+          assert d['hookSpecificOutput']['permissionDecision'] == 'deny', d
+          print('hook deny OK')
+          "
+
+  pypi-publish:
+    name: Publish to PyPI (production)
+    needs: testpypi-smoke
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/tracine-guard
+    permissions:
+      id-token: write  # OIDC token for Trusted Publisher
+    steps:
+      - name: Download built distribution
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806  # v4.1.9
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@6733eb7d741f0b11ec6a39b58540dab7590f9b7d  # v1.14.0
+
+  gh-release:
+    name: Create GitHub release
+    needs: pypi-publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # required to create the release
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Download built distribution
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806  # v4.1.9
+        with:
+          name: dist
+          path: dist/
+      - name: Create release with built artifacts attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/*.whl dist/*.tar.gz
