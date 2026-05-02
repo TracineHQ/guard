@@ -64,7 +64,7 @@ jobs:
           name: dist
           path: dist/
       - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@6733eb7d741f0b11ec6a39b58540dab7590f9b7d  # v1.14.0
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # v1.14.0
         with:
           repository-url: https://test.pypi.org/legacy/
 
@@ -124,8 +124,14 @@ jobs:
         shell: bash
         run: |
           set -eux
+          # Hooks exit 2 on deny (Claude Code's block signal); capture
+          # the exit code rather than letting set -e propagate it.
           payload='{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}'
+          set +e
           out=$(echo "$payload" | /tmp/guard-smoke/bin/python -m guard.hooks.bash_command_validator)
+          rc=$?
+          set -e
+          test "$rc" = "2" || { echo "expected deny exit=2, got $rc"; exit 1; }
           echo "$out" | python -c "
           import json, sys
           d = json.loads(sys.stdin.read())
@@ -149,7 +155,7 @@ jobs:
           name: dist
           path: dist/
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@6733eb7d741f0b11ec6a39b58540dab7590f9b7d  # v1.14.0
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # v1.14.0
 
   gh-release:
     name: Create GitHub release

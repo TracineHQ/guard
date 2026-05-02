@@ -161,8 +161,15 @@ jobs:
           # Feed a clearly-dangerous payload; confirm the wheel-installed hook
           # script returns deny on stdin/stdout. End-to-end validates that
           # entry points + argparse + JSON contract all survive packaging.
+          # Hooks exit 2 on deny (Claude Code's "block" signal) — that's not
+          # a smoke-test failure, that IS the success condition. Capture the
+          # exit code separately so set -e doesn't propagate it.
           payload='{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}'
+          set +e
           out=$(echo "$payload" | /tmp/guard-smoke/bin/python -m guard.hooks.bash_command_validator)
+          rc=$?
+          set -e
+          test "$rc" = "2" || { echo "expected deny exit=2, got $rc"; exit 1; }
           echo "$out" | python -c "
           import json, sys
           d = json.loads(sys.stdin.read())
