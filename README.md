@@ -1,6 +1,7 @@
 # guard
 
 Stdlib-only safety hooks for Claude Code.
+Every decision is logged to JSONL — query, trace, and prune in place with `guard status|noisy|silent`.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/tracinehq/guard/ci.yml?branch=main&label=CI)](https://github.com/tracinehq/guard/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -43,6 +44,16 @@ Guardrails not walls: guard catches the obvious foot-guns at the Claude Code hoo
 - Claude Code v2.0.0+ (plugins entered public beta on 2025-10-09)
 - Python 3.11+ available on `python3` PATH (no third-party dependencies)
 - POSIX shell environment (Linux, macOS, WSL). Windows is not supported in v1 — the matchers target POSIX shell shapes (`rm -rf`, `cat ~/.aws/credentials`, process substitution) and offer no meaningful protection against PowerShell or `cmd.exe` equivalents. CI runs on `ubuntu-latest` and `macos-latest`.
+
+### Optional: power-user CLI
+
+The marketplace install above wires up the safety hooks. To query the decision log without `tail | jq`, install the read-side CLI from PyPI:
+
+```
+pipx install tracine-guard
+```
+
+Then `guard status` shows the log location and last record, `guard noisy --since 24h` ranks rules by hit count, `guard trace <session_id>` dumps a chronological view, and `guard silent` lists rules that fired historically but not recently. The CLI never writes — it only reads `~/.claude/guard-decisions.jsonl`. The two install paths complement each other; they aren't alternatives.
 
 ## Configuration
 

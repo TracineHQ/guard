@@ -25,9 +25,19 @@ Remove the hook's entry from `~/.claude/settings.json` PreToolUse, or comment ou
 
 ## Log inspection
 
-Tail and pretty-print decisions:
+Install the read-side CLI from PyPI for ergonomic queries:
 
-`tail -f ~/.claude/guard-decisions.jsonl | jq`
+```
+pipx install tracine-guard
+```
+
+Then:
+- `guard status` — log location and last record summary.
+- `guard noisy --since 24h` — top rules by hit count in a time window.
+- `guard silent --since 7d` — rules that fired historically but not recently.
+- `guard trace <session_id>` — chronological dump for one session.
+
+Without the CLI, the log is plain JSONL and works with anything that reads stdin: `tail -f ~/.claude/guard-decisions.jsonl | jq`.
 
 See `docs/output-format.md` for the JSONL schema (v1).
 
