@@ -63,7 +63,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     environment:
-      name: testpypi
+      name: TestPyPi
       url: https://test.pypi.org/p/tracine-guard
     permissions:
       id-token: write  # OIDC token for Trusted Publisher
@@ -73,6 +73,12 @@ jobs:
         with:
           name: dist
           path: dist/
+      - name: Strip non-distribution files before publish
+        # The build job ships SHA256SUMS alongside the wheel/sdist so the
+        # smoke job can pin its install with --require-hashes. twine (inside
+        # the pypa publish action) rejects any non-{whl,tar.gz} entry under
+        # dist/ as InvalidDistribution, so move it out before publishing.
+        run: rm -f dist/SHA256SUMS
       - name: Publish to TestPyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # v1.14.0
         with:
@@ -177,7 +183,7 @@ jobs:
     needs: testpypi-smoke
     runs-on: ubuntu-latest
     environment:
-      name: pypi
+      name: PyPi
       url: https://pypi.org/p/tracine-guard
     permissions:
       id-token: write  # OIDC token for Trusted Publisher
@@ -187,6 +193,8 @@ jobs:
         with:
           name: dist
           path: dist/
+      - name: Strip non-distribution files before publish
+        run: rm -f dist/SHA256SUMS
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # v1.14.0
 
@@ -210,7 +218,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
+          # Mark rc / a / b tags as pre-releases so the GitHub releases
+          # page distinguishes them from stable cuts. Pattern matches
+          # PEP 440 pre-release tag shapes: v1.0.0rc1, v1.0.0a2, v1.0.0b3.
+          prerelease_flag=""
+          if [[ "$GITHUB_REF_NAME" =~ (rc|a|b)[0-9]+$ ]]; then
+            prerelease_flag="--prerelease"
+          fi
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
+            $prerelease_flag \
             dist/*.whl dist/*.tar.gz

@@ -14,11 +14,21 @@ authors = [{ name = "TracineHQ contributors" }]
 keywords = ["claude-code", "claude-code-plugin", "safety", "hooks", "guardrails"]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
+  "Environment :: Console",
+  "Environment :: Plugins",
+  "Intended Audience :: Developers",
+  "Intended Audience :: System Administrators",
   "License :: OSI Approved :: Apache Software License",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX",
+  "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Topic :: Security",
+  "Topic :: Software Development :: Quality Assurance",
+  "Topic :: System :: Shells",
 ]
 
 [project.optional-dependencies]
@@ -39,6 +49,7 @@ Homepage = "https://github.com/tracinehq/guard"
 Issues = "https://github.com/tracinehq/guard/issues"
 Changelog = "https://github.com/tracinehq/guard/blob/main/CHANGELOG.md"
 Documentation = "https://github.com/tracinehq/guard/tree/main/docs"
+"Security Policy" = "https://github.com/tracinehq/guard/security/policy"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/guard"]
