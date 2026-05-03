@@ -124,9 +124,13 @@ jobs:
         run: |
           set -eux
           python -m venv /tmp/guard-smoke
-          # Install only from dist/ — refuse to fall back to PyPI so we exercise
-          # the freshly-built artifact, not whatever an old name resolved to.
-          /tmp/guard-smoke/bin/python -m pip install --no-index --find-links dist/ tracine-guard
+          # Install the local artifact directly by path — no remote resolution,
+          # no PyPI index, just the bytes we built one job ago. This is the
+          # most-pinned form of install and clears scorecard's
+          # PinnedDependenciesID rule (which targets remote pip installs).
+          wheel=$(ls dist/tracine_guard-*.whl)
+          test -f "$wheel" || { echo "no wheel found in dist/"; exit 1; }
+          /tmp/guard-smoke/bin/python -m pip install --no-index "$wheel"
       - name: Verify CLI binary on PATH and reports the right version
         shell: bash
         run: |

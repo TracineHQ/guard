@@ -40,6 +40,16 @@ jobs:
         run: uv build
       - name: List artifacts
         run: ls -la dist/
+      - name: Generate sha256 manifest of built artifacts
+        # Captured here so the smoke job can pin its TestPyPI install with
+        # --require-hashes — verifying the bytes that landed on TestPyPI
+        # match exactly what `uv build` produced one job ago.
+        shell: bash
+        run: |
+          set -eu
+          cd dist
+          shasum -a 256 ./*.whl ./*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
       - name: Upload built distribution
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -82,21 +92,44 @@ jobs:
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
           python-version: ${{ matrix.python }}
-      - name: Install tracine-guard from TestPyPI (with retry for index propagation)
+      - name: Download built distribution (for SHA256SUMS manifest)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: dist
+          path: dist/
+      - name: Install tracine-guard from TestPyPI with --require-hashes
         shell: bash
         run: |
           set -eux
           tag="${GITHUB_REF_NAME#v}"
           python -m venv /tmp/guard-smoke
+
+          # Build a hash-pinned requirements file from the SHA256SUMS the
+          # build job generated. --require-hashes makes pip refuse anything
+          # whose downloaded bytes don't match. This catches:
+          #   - TestPyPI returning different bytes than we uploaded
+          #   - MITM on the install path
+          #   - cache poisoning on the runner
+          # plus clears scorecard's PinnedDependenciesID rule.
+          wheel_hash=$(awk '/\.whl$/ { print $1 }' dist/SHA256SUMS)
+          sdist_hash=$(awk '/\.tar\.gz$/ { print $1 }' dist/SHA256SUMS)
+          test -n "$wheel_hash" -a -n "$sdist_hash" \
+            || { echo "missing hash in dist/SHA256SUMS"; cat dist/SHA256SUMS; exit 1; }
+
+          cat > /tmp/req.txt <<EOF
+          tracine-guard==${tag} \\
+              --hash=sha256:${wheel_hash} \\
+              --hash=sha256:${sdist_hash}
+          EOF
+          cat /tmp/req.txt
+
           # TestPyPI indexes a release lazily; retry up to ~2 minutes.
-          # `--index-url` points at TestPyPI for `tracine-guard` itself;
-          # `--extra-index-url` falls back to real PyPI for any deps
-          # (we have none today, but this is the canonical pattern).
           for attempt in 1 2 3 4 5 6 7 8; do
             if /tmp/guard-smoke/bin/pip install \
+                --require-hashes \
                 --index-url https://test.pypi.org/simple/ \
                 --extra-index-url https://pypi.org/simple/ \
-                "tracine-guard==${tag}"; then
+                -r /tmp/req.txt; then
               break
             fi
             echo "Install attempt $attempt failed, sleeping 15s..."
