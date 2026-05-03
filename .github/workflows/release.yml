@@ -63,7 +63,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     environment:
-      name: testpypi
+      name: TestPyPi
       url: https://test.pypi.org/p/tracine-guard
     permissions:
       id-token: write  # OIDC token for Trusted Publisher
@@ -177,7 +177,7 @@ jobs:
     needs: testpypi-smoke
     runs-on: ubuntu-latest
     environment:
-      name: pypi
+      name: PyPi
       url: https://pypi.org/p/tracine-guard
     permissions:
       id-token: write  # OIDC token for Trusted Publisher
