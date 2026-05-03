@@ -3,7 +3,7 @@
   "owner": { "name": "TracineHQ", "url": "https://github.com/tracinehq" },
   "metadata": {
     "description": "TracineHQ's Claude Code plugin catalog.",
-    "version": "1.0.0"
+    "version": "1.0.0rc1"
   },
   "plugins": [
     {

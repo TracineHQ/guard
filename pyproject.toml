@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tracine-guard"
-version = "1.0.0"
+version = "1.0.0rc1"
 description = "Stdlib-only safety hooks plugin for Claude Code"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -14,11 +14,21 @@ authors = [{ name = "TracineHQ contributors" }]
 keywords = ["claude-code", "claude-code-plugin", "safety", "hooks", "guardrails"]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
+  "Environment :: Console",
+  "Environment :: Plugins",
+  "Intended Audience :: Developers",
+  "Intended Audience :: System Administrators",
   "License :: OSI Approved :: Apache Software License",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX",
+  "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Topic :: Security",
+  "Topic :: Software Development :: Quality Assurance",
+  "Topic :: System :: Shells",
 ]
 
 [project.optional-dependencies]
@@ -36,9 +46,11 @@ guard = "guard.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/tracinehq/guard"
+Source = "https://github.com/tracinehq/guard"
 Issues = "https://github.com/tracinehq/guard/issues"
 Changelog = "https://github.com/tracinehq/guard/blob/main/CHANGELOG.md"
 Documentation = "https://github.com/tracinehq/guard/tree/main/docs"
+"Security Policy" = "https://github.com/tracinehq/guard/security/policy"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/guard"]
