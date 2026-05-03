@@ -3,7 +3,7 @@
 Stdlib-only safety hooks for Claude Code.
 Every decision is logged to JSONL — query, trace, and prune in place with `guard status|noisy|silent`.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/tracinehq/guard/ci.yml?branch=main&label=CI)](https://github.com/tracinehq/guard/actions/workflows/ci.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/TracineHQ/guard/ci.yml?branch=main&label=CI)](https://github.com/TracineHQ/guard/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
 
@@ -29,14 +29,14 @@ Guardrails not walls: guard catches the obvious foot-guns at the Claude Code hoo
 ## Install
 
 ```
-/plugin marketplace add tracinehq/guard
-/plugin install guard@tracinehq
+/plugin marketplace add TracineHQ/guard
+/plugin install guard@TracineHQ
 ```
 
-`tracinehq/guard` is the GitHub `owner/repo` shorthand for the marketplace source. `guard@tracinehq` is the `<plugin>@<marketplace>` reference Claude Code uses to install. To pin a specific tag:
+`TracineHQ/guard` is the GitHub `owner/repo` shorthand for the marketplace source. `guard@TracineHQ` is the `<plugin>@<marketplace>` reference Claude Code uses to install. To pin a specific tag:
 
 ```
-/plugin marketplace add tracinehq/guard#v1.0.0
+/plugin marketplace add TracineHQ/guard#v1.0.0
 ```
 
 ### Requirements

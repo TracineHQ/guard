@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "tracinehq",
-  "owner": { "name": "TracineHQ", "url": "https://github.com/tracinehq" },
+  "owner": { "name": "TracineHQ", "url": "https://github.com/TracineHQ" },
   "metadata": {
     "description": "TracineHQ's Claude Code plugin catalog.",
     "version": "1.0.0"
@@ -11,10 +11,10 @@
       "name": "guard",
       "version": "1.0.0",
       "description": "Stdlib-only safety hooks for Claude Code.",
-      "author": { "name": "TracineHQ contributors", "url": "https://github.com/tracinehq" },
+      "author": { "name": "TracineHQ contributors", "url": "https://github.com/TracineHQ" },
       "source": "./",
       "category": "safety",
-      "homepage": "https://github.com/tracinehq/guard"
+      "homepage": "https://github.com/TracineHQ/guard"
     }
   ]
 }

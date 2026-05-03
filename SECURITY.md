@@ -16,7 +16,7 @@ current supported series.
 
 Use GitHub Private Vulnerability Reporting:
 
-> <https://github.com/tracinehq/guard/security/advisories/new>
+> <https://github.com/TracineHQ/guard/security/advisories/new>
 
 Please include:
 
