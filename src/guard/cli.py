@@ -152,8 +152,15 @@ class JsonlReader:
 # === Effective log path ===
 
 
-def effective_log_path() -> str:
-    """Return the resolved log path: env override or default."""
+def effective_log_path(override: str | None = None) -> str:
+    """Return the resolved log path.
+
+    Resolution order: explicit ``override`` (e.g. ``--path``) →
+    ``$GUARD_DECISIONS_PATH`` env var → built-in default
+    (``~/.claude/guard-decisions.jsonl``).
+    """
+    if override:
+        return override
     return os.environ.get("GUARD_DECISIONS_PATH", GUARD_DECISIONS_PATH)
 
 
@@ -164,9 +171,9 @@ def effective_log_path() -> str:
 # one based on the ``--json`` flag (or stdout TTY heuristic).
 
 
-def cmd_status() -> tuple[dict[str, Any], str]:
+def cmd_status(path_override: str | None = None) -> tuple[dict[str, Any], str]:
     """Effective config + log location + line count + last record timestamp."""
-    path = effective_log_path()
+    path = effective_log_path(path_override)
     reader = JsonlReader(path)
     line_count = reader.line_count()
     last = reader.last_record()
@@ -193,10 +200,12 @@ def cmd_status() -> tuple[dict[str, Any], str]:
     return payload, "\n".join(lines) + "\n"
 
 
-def cmd_noisy(since: timedelta | None, limit: int) -> tuple[dict[str, Any], str]:
+def cmd_noisy(
+    since: timedelta | None, limit: int, path_override: str | None = None
+) -> tuple[dict[str, Any], str]:
     """Top N rules by hit count, grouped by ``(hook_id, decision)``."""
     cutoff = datetime.now(UTC) - since if since is not None else None
-    reader = JsonlReader(effective_log_path())
+    reader = JsonlReader(effective_log_path(path_override))
     counts: Counter[tuple[str, str]] = Counter()
     samples: dict[tuple[str, str], str] = {}
     total = 0
@@ -235,7 +244,7 @@ def cmd_noisy(since: timedelta | None, limit: int) -> tuple[dict[str, Any], str]
     return payload, "\n".join(lines) + "\n"
 
 
-def cmd_silent(since: timedelta) -> tuple[dict[str, Any], str]:
+def cmd_silent(since: timedelta, path_override: str | None = None) -> tuple[dict[str, Any], str]:
     """List ``(hook_id, decision)`` pairs that haven't appeared in N days.
 
     Heuristic: build the FULL set of pairs ever seen in the log; build the
@@ -244,7 +253,7 @@ def cmd_silent(since: timedelta) -> tuple[dict[str, Any], str]:
     to begin with.
     """
     cutoff = datetime.now(UTC) - since
-    reader = JsonlReader(effective_log_path())
+    reader = JsonlReader(effective_log_path(path_override))
     all_pairs: set[tuple[str, str]] = set()
     recent_pairs: set[tuple[str, str]] = set()
     last_seen: dict[tuple[str, str], str] = {}
@@ -281,9 +290,9 @@ def cmd_silent(since: timedelta) -> tuple[dict[str, Any], str]:
     return payload, "\n".join(lines) + "\n"
 
 
-def cmd_trace(session_id: str) -> tuple[dict[str, Any], str]:
+def cmd_trace(session_id: str, path_override: str | None = None) -> tuple[dict[str, Any], str]:
     """Print every record matching ``session_id``, chronological."""
-    reader = JsonlReader(effective_log_path())
+    reader = JsonlReader(effective_log_path(path_override))
     records = list(reader.iter_records(session_id=session_id))
     records.sort(key=lambda r: str(r.get("timestamp", "")))
     payload: dict[str, Any] = {
@@ -529,7 +538,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="cmd")
 
-    sub.add_parser(
+    path_help = (
+        "Override log path (default: $GUARD_DECISIONS_PATH or "
+        "~/.claude/guard-decisions.jsonl). Useful for querying a curated "
+        "fixture, e.g. `guard noisy --path assets/showcase.jsonl`."
+    )
+
+    p_status = sub.add_parser(
         "status",
         help="Show installation status, log location, and last record.",
         epilog=(
@@ -539,6 +554,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    p_status.add_argument("--path", default=None, help=path_help)
 
     p_noisy = sub.add_parser(
         "noisy",
@@ -552,6 +568,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_noisy.add_argument("--since", default="7d", help="Time window: Nd/Nh/Nm (default: 7d).")
     p_noisy.add_argument("--limit", type=int, default=10, help="Max entries (default: 10).")
+    p_noisy.add_argument("--path", default=None, help=path_help)
 
     p_silent = sub.add_parser(
         "silent",
@@ -564,6 +581,7 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_silent.add_argument("--since", default="30d", help="Time window: Nd/Nh/Nm (default: 30d).")
+    p_silent.add_argument("--path", default=None, help=path_help)
 
     p_trace = sub.add_parser(
         "trace",
@@ -572,6 +590,7 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_trace.add_argument("session_id", help="Session id from the log.")
+    p_trace.add_argument("--path", default=None, help=path_help)
 
     p_test = sub.add_parser(
         "test",
@@ -654,15 +673,15 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if cmd == "status":
-            payload, pretty = cmd_status()
+            payload, pretty = cmd_status(args.path)
         elif cmd == "noisy":
             since = parse_since(args.since)
-            payload, pretty = cmd_noisy(since, max(1, int(args.limit)))
+            payload, pretty = cmd_noisy(since, max(1, int(args.limit)), args.path)
         elif cmd == "silent":
             since = parse_since(args.since)
-            payload, pretty = cmd_silent(since)
+            payload, pretty = cmd_silent(since, args.path)
         elif cmd == "trace":
-            payload, pretty = cmd_trace(args.session_id)
+            payload, pretty = cmd_trace(args.session_id, args.path)
         elif cmd == "test":
             payload, pretty = cmd_test(args.command)
         elif cmd == "diff":
