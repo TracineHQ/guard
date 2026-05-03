@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-PLUGIN_VERSION = "1.0.0rc1"
+PLUGIN_VERSION = "1.0.0rc2"
 STAGED_NAME = f"guard-{PLUGIN_VERSION}"
 
 # Constants used by structural assertions.
