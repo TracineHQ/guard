@@ -218,15 +218,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          # Mark rc / a / b tags as pre-releases so the GitHub releases
-          # page distinguishes them from stable cuts. Pattern matches
-          # PEP 440 pre-release tag shapes: v1.0.0rc1, v1.0.0a2, v1.0.0b3.
+          # Mark pre-release tags: PEP 440 shapes (v1.0.0rc1, v1.0.0a2, v1.0.0b3)
+          # and hyphen-separated shapes (v1.0.0-rc1). Matches the same intent as
+          # `contains(github.ref_name, '-')` used in convo but also covers PEP 440.
           prerelease_flag=""
-          if [[ "$GITHUB_REF_NAME" =~ (rc|a|b)[0-9]+$ ]]; then
+          if [[ "$GITHUB_REF_NAME" =~ (rc|a|b)[0-9]+$ ]] || [[ "$GITHUB_REF_NAME" == *-* ]]; then
             prerelease_flag="--prerelease"
           fi
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
-            $prerelease_flag \
+            ${prerelease_flag:+$prerelease_flag} \
             dist/*.whl dist/*.tar.gz
