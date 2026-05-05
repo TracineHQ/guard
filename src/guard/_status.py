@@ -27,7 +27,7 @@ KNOWN_ENV_VARS = (
 
 DEFAULT_DECISIONS_PATH = str(Path("~/.claude/guard-decisions.jsonl").expanduser())
 
-INSTALL_HINT = "No hooks wired up - run `/plugin install guard@tracinehq` in Claude Code."
+INSTALL_HINT = "No hooks wired up - run `/plugin install guard@TracineHQ` in Claude Code."
 
 
 def _hooks_dir() -> Path:

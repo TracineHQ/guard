@@ -471,7 +471,7 @@ def _version_string() -> str:
     """
     install_dir = str(Path(__file__).resolve().parent)
     return (
-        f"guard {__version__}\ntracine-guard from {install_dir}\nhttps://github.com/tracinehq/guard"
+        f"guard {__version__}\ntracine-guard from {install_dir}\nhttps://github.com/TracineHQ/guard"
     )
 
 

@@ -26,7 +26,7 @@ body:
         - Anything that exposes user secrets or arbitrary RCE on the host.
         - Issues in Claude Code itself, not guard.
 
-        Read [SECURITY.md](https://github.com/tracinehq/guard/blob/main/SECURITY.md)
+        Read [SECURITY.md](https://github.com/TracineHQ/guard/blob/main/SECURITY.md)
         for the threat model and disclosure process. If you are unsure, treat
         it as security-sensitive and report privately first.
   - type: textarea

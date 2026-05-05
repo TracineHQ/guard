@@ -295,7 +295,7 @@ def test_main_version_prints_three_lines(capsys) -> None:
     assert len(lines) == 3, f"expected 3 lines, got {lines!r}"
     assert lines[0].startswith("guard ")
     assert "tracine-guard from " in lines[1]
-    assert lines[2] == "https://github.com/tracinehq/guard"
+    assert lines[2] == "https://github.com/TracineHQ/guard"
 
 
 def test_main_no_args_prints_help_to_stderr_and_exits_2(capsys) -> None:
