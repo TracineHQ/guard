@@ -1191,6 +1191,7 @@ _SYNTH_SHELL_WRAPPER_DENY = "<shell-wrapper invocation>"
 _SYNTH_EVAL_BUILTIN_DENY = "<shell builtin: eval/source/.>"
 _SYNTH_DANGEROUS_ENV_DENY = "<dangerous env-var sink>"
 _SYNTH_WRAPPER_STACKING_DENY = "<wrapper-stacking>"
+_SYNTH_PIP_INSTALL_URL_DENY = "<pip install from URL/VCS>"
 
 _SYNTH_DENY_REASONS: dict[str, str] = {
     _SYNTH_INTERPRETER_DENY: (
@@ -1235,6 +1236,12 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
     _SYNTH_WRAPPER_STACKING_DENY: (
         "stacked command wrappers exceed allowed depth (3); split into "
         "multiple commands or simplify the invocation."
+    ),
+    _SYNTH_PIP_INSTALL_URL_DENY: (
+        "pip install with a URL / VCS / file source (https://, http://, "
+        "git+, file://, or absolute path) fetches and executes setup.py "
+        "from an attacker-controlled location. Install named packages "
+        "from PyPI only, or vet the source manually."
     ),
 }
 
@@ -1340,6 +1347,39 @@ def _is_shell_wrapper_invocation(segment: str) -> bool:
     return False
 
 
+_PIP_URL_SOURCE_RE = re.compile(r"^(https?://|git\+|hg\+|svn\+|bzr\+|file://|/)")
+
+
+def _is_pip_install_from_url(normalized: str) -> bool:
+    """Return True for ``pip install <URL|VCS|absolute-path>`` shapes.
+
+    Registry prefix matching catches ``pip install`` (ASK), but cannot
+    inspect positional args. A URL/VCS/file source is the supply-chain
+    foothold: the package executes ``setup.py`` from attacker-controlled
+    bytes. Covers ``pip``, ``pip3``, ``uv pip``, and ``pipx``; skips flag
+    tokens (``-e``, ``--index-url=...``) so ``pip install -e .`` still
+    routes through the registry's ASK entry.
+    """
+    tokens = normalized.split()
+    if not tokens:
+        return False
+    head = _basename(tokens[0])
+    cursor = 1
+    if head in {"uv", "pipx"} and cursor < len(tokens) and tokens[cursor] == "pip":
+        cursor += 1
+    elif head not in {"pip", "pip3", "pipx"}:
+        return False
+    if cursor >= len(tokens) or tokens[cursor] != "install":
+        return False
+    cursor += 1
+    for tok in tokens[cursor:]:
+        if tok.startswith("-"):
+            continue
+        if _PIP_URL_SOURCE_RE.match(tok):
+            return True
+    return False
+
+
 # Per-candidate-form matchers: run once per entry in ``_candidate_forms`` so
 # env / git / runner-wrapper bypasses are evaluated against the same matchers
 # as their bare forms. Order matters: eval-builtin and env-sink matchers must
@@ -1350,6 +1390,7 @@ _PER_FORM_MATCHERS: tuple[tuple[Callable[[str], bool], str], ...] = (
     (_is_dangerous_interpreter, _SYNTH_INTERPRETER_DENY),
     (_is_dangerous_rm, _SYNTH_RM_DENY),
     (_is_git_config_injection, _SYNTH_GIT_CONFIG_DENY),
+    (_is_pip_install_from_url, _SYNTH_PIP_INSTALL_URL_DENY),
 )
 
 
