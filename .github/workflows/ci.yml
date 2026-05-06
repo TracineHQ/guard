@@ -110,6 +110,9 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - name: Download built distribution
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
@@ -180,6 +183,28 @@ jobs:
           assert d['hookSpecificOutput']['permissionDecision'] == 'deny', d
           print('hook deny OK')
           "
+      - name: Run full pytest suite against the wheel-installed package
+        shell: bash
+        run: |
+          set -eux
+          # Install test deps into the same venv. Only what tests import —
+          # ruff/mypy/vulture have their own jobs and aren't needed here.
+          /tmp/guard-smoke/bin/pip install pytest pytest-cov
+
+          # Confirm `import guard` resolves to the wheel-installed package,
+          # not the in-tree src/. pytest's rootdir gets prepended to sys.path
+          # but src/ does not, so the import falls through to site-packages.
+          /tmp/guard-smoke/bin/python -c "
+          import guard
+          assert '/site-packages/' in guard.__file__, \
+              f'guard imported from source tree, not wheel: {guard.__file__}'
+          print('guard imported from:', guard.__file__)
+          "
+
+          # Run the full suite against the installed bytes. Integration tests
+          # that subprocess into src/ via PYTHONPATH still pass — those are
+          # meta-tests on the source layout, not import-resolution checks.
+          /tmp/guard-smoke/bin/python -m pytest -q --no-header
 
   detect-secrets:
     name: Scan for leaked secrets

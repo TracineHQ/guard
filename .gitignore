@@ -28,6 +28,10 @@ venv/
 .claude/
 
 # Local strategy/planning docs — conversation scratch, not deliverables
+docs/plan/
 docs/planning/
 docs/strategy/
 docs/reviews/
+
+# Local launch/demo assets (screencast helpers) — not deliverables
+assets/

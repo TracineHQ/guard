@@ -94,6 +94,9 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - name: Set up Python ${{ matrix.python }}
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
@@ -177,6 +180,27 @@ jobs:
           assert d['hookSpecificOutput']['permissionDecision'] == 'deny', d
           print('hook deny OK')
           "
+      - name: Run full pytest suite against the TestPyPI-installed package
+        shell: bash
+        run: |
+          set -eux
+          # Test deps installed unpinned here (release-time validation).
+          # The package under test is hash-pinned; pytest itself is just
+          # the harness — drift would only affect failure messages, not
+          # the bytes being validated.
+          /tmp/guard-smoke/bin/pip install pytest pytest-cov
+
+          # Confirm `import guard` resolves to the TestPyPI-installed
+          # package, not the in-tree src/. If src/ leaked into sys.path
+          # the suite would silently validate the wrong bytes.
+          /tmp/guard-smoke/bin/python -c "
+          import guard
+          assert '/site-packages/' in guard.__file__, \
+              f'guard imported from source tree, not installed wheel: {guard.__file__}'
+          print('guard imported from:', guard.__file__)
+          "
+
+          /tmp/guard-smoke/bin/python -m pytest -q --no-header
 
   pypi-publish:
     name: Publish to PyPI (production)
