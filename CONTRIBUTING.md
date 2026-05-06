@@ -5,7 +5,7 @@ Thanks for your interest in guard. A few guidelines keep the project focused.
 ## Open an issue first
 
 For non-trivial changes — new hooks, registry additions, behavior changes —
-open an issue at <https://github.com/tracinehq/guard/issues> before sending a
+open an issue at <https://github.com/TracineHQ/guard/issues> before sending a
 PR. Small fixes (typos, tightening a regex, doc edits) can go straight to a
 PR.
 

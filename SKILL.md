@@ -43,4 +43,4 @@ See `docs/output-format.md` for the JSONL schema (v1).
 
 ## Reporting issues
 
-See `SECURITY.md` for vulnerability reports. For non-security bugs, open an issue at <https://github.com/tracinehq/guard/issues>.
+See `SECURITY.md` for vulnerability reports. For non-security bugs, open an issue at <https://github.com/TracineHQ/guard/issues>.

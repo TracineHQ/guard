@@ -45,5 +45,5 @@ autonomous-mode behavior are now considered stable for the 1.x line.
   CVE-2025-59356 by validating the literal command shape rather than
   trusting model-emitted intent.
 
-[Unreleased]: https://github.com/tracinehq/guard/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/tracinehq/guard/releases/tag/v1.0.0
+[Unreleased]: https://github.com/TracineHQ/guard/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/TracineHQ/guard/releases/tag/v1.0.0

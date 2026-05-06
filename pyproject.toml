@@ -45,11 +45,11 @@ dev = [
 guard = "guard.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/tracinehq/guard"
-Issues = "https://github.com/tracinehq/guard/issues"
-Changelog = "https://github.com/tracinehq/guard/blob/main/CHANGELOG.md"
-Documentation = "https://github.com/tracinehq/guard/tree/main/docs"
-"Security Policy" = "https://github.com/tracinehq/guard/security/policy"
+Homepage = "https://github.com/TracineHQ/guard"
+Issues = "https://github.com/TracineHQ/guard/issues"
+Changelog = "https://github.com/TracineHQ/guard/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/TracineHQ/guard/tree/main/docs"
+"Security Policy" = "https://github.com/TracineHQ/guard/security/policy"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/guard"]
