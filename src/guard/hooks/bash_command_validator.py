@@ -1192,6 +1192,11 @@ _SYNTH_EVAL_BUILTIN_DENY = "<shell builtin: eval/source/.>"
 _SYNTH_DANGEROUS_ENV_DENY = "<dangerous env-var sink>"
 _SYNTH_WRAPPER_STACKING_DENY = "<wrapper-stacking>"
 _SYNTH_PIP_INSTALL_URL_DENY = "<pip install from URL/VCS>"
+_SYNTH_KUBECTL_DESTRUCTION_DENY = "<kubectl cluster-wide deletion>"
+_SYNTH_GH_API_DELETE_DENY = "<gh api raw DELETE>"
+_SYNTH_GPG_SECRET_DELETE_DENY = "<gpg secret-key deletion>"
+_SYNTH_AWS_S3_DESTRUCTION_DENY = "<aws s3 destruction>"
+_SYNTH_CHMOD_777_ROOT_DENY = "<chmod 777 against system path>"
 
 _SYNTH_DENY_REASONS: dict[str, str] = {
     _SYNTH_INTERPRETER_DENY: (
@@ -1242,6 +1247,34 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         "git+, file://, or absolute path) fetches and executes setup.py "
         "from an attacker-controlled location. Install named packages "
         "from PyPI only, or vet the source manually."
+    ),
+    _SYNTH_KUBECTL_DESTRUCTION_DENY: (
+        "kubectl delete with --all / -A / --all-namespaces, or against a "
+        "namespace resource, deletes resources cluster-wide. Never a "
+        "single-step dev op; scope the deletion to a specific resource "
+        "name or run it manually with full intent."
+    ),
+    _SYNTH_GH_API_DELETE_DENY: (
+        "gh api -X DELETE bypasses the gh repo/release deny rules by "
+        "going through the raw GitHub API. Refused regardless of the "
+        "resource path. Use the corresponding gh subcommand if you "
+        "really mean to, so a human sees the prompt."
+    ),
+    _SYNTH_GPG_SECRET_DELETE_DENY: (
+        "gpg --delete-secret-key / --delete-secret-and-public-keys is "
+        "irreversible and deletes the private key bytes. Refused "
+        "regardless of flag ordering or --batch / --homedir prefixes."
+    ),
+    _SYNTH_AWS_S3_DESTRUCTION_DENY: (
+        "Destructive S3 op: aws s3 sync --delete, aws s3 rm --recursive, "
+        "or any aws s3api delete-bucket / delete-object* / delete-bucket-* "
+        "call. These wipe data with no undo. Run interactively with "
+        "explicit intent if you really mean to."
+    ),
+    _SYNTH_CHMOD_777_ROOT_DENY: (
+        "chmod -R with mode 777 / 0777 against a top-level system path "
+        "(/, /etc, /usr, /var, /bin, /sbin, /lib, ~, $HOME) is a "
+        "system-bricking foot-gun. Scope the chmod to a project directory."
     ),
 }
 
@@ -1350,43 +1383,256 @@ def _is_shell_wrapper_invocation(segment: str) -> bool:
 _PIP_URL_SOURCE_RE = re.compile(r"^(https?://|git\+|hg\+|svn\+|bzr\+|file://|/)")
 
 
-def _is_pip_install_from_url(normalized: str) -> bool:
+def _is_pip_install_from_url(normalized: str) -> bool:  # noqa: C901, PLR0911 -- linear walk through 5 invocation forms; flattening hurts readability
     """Return True for ``pip install <URL|VCS|absolute-path>`` shapes.
 
-    Registry prefix matching catches ``pip install`` (ASK), but cannot
-    inspect positional args. A URL/VCS/file source is the supply-chain
-    foothold: the package executes ``setup.py`` from attacker-controlled
-    bytes. Covers ``pip``, ``pip3``, ``uv pip``, and ``pipx``; skips flag
-    tokens (``-e``, ``--index-url=...``) so ``pip install -e .`` still
-    routes through the registry's ASK entry.
+    Covers the canonical Python supply-chain foothold across every common
+    invocation form:
+      * bare ``pip``, ``pip3``, ``pipx`` install
+      * ``uv pip install``
+      * ``uv add`` / ``poetry add`` (modern dep-manager equivalents)
+      * ``python -m pip install`` / ``python3 -m pip install`` (module form)
+      * pypy variants
+
+    A URL/VCS/file source is the foothold — the package executes ``setup.py``
+    from attacker-controlled bytes. Skips flag tokens so named-package
+    installs still route through the registry's ASK entry.
     """
     tokens = normalized.split()
     if not tokens:
         return False
     head = _basename(tokens[0])
     cursor = 1
-    if head in {"uv", "pipx"} and cursor < len(tokens) and tokens[cursor] == "pip":
+    if head in {"pip", "pip3", "pipx"}:
+        if cursor >= len(tokens) or tokens[cursor] != "install":
+            return False
+        cursor += 1
+    elif head == "uv" and cursor < len(tokens):
+        # ``uv pip install <URL>`` and ``uv add <URL>`` are functionally
+        # equivalent supply-chain surfaces; cover both.
+        if tokens[cursor] == "pip":
+            cursor += 1
+            if cursor >= len(tokens) or tokens[cursor] != "install":
+                return False
+            cursor += 1
+        elif tokens[cursor] == "add":
+            cursor += 1
+        else:
+            return False
+    elif head == "poetry" and cursor < len(tokens) and tokens[cursor] == "add":
         cursor += 1
     elif head in {"python", "python3", "pypy", "pypy3"} and (
         cursor < len(tokens) and tokens[cursor] == "-m"
     ):
-        # ``python -m pip install <URL>`` — module-runner form; same supply-
-        # chain risk as bare ``pip``. Skip the ``-m pip`` tokens.
         cursor += 1
         if cursor >= len(tokens) or tokens[cursor] != "pip":
             return False
         cursor += 1
-    elif head not in {"pip", "pip3", "pipx"}:
+        if cursor >= len(tokens) or tokens[cursor] != "install":
+            return False
+        cursor += 1
+    else:
         return False
-    if cursor >= len(tokens) or tokens[cursor] != "install":
-        return False
-    cursor += 1
     for tok in tokens[cursor:]:
         if tok.startswith("-"):
             continue
         if _PIP_URL_SOURCE_RE.match(tok):
             return True
     return False
+
+
+_KUBECTL_CLUSTER_FLAGS = {"--all", "-A", "--all-namespaces"}
+_KUBECTL_NAMESPACE_RESOURCES = {"namespace", "namespaces", "ns"}
+_KUBECTL_FLAGS_TAKING_VALUE = {
+    "-n",
+    "--namespace",
+    "-l",
+    "--selector",
+    "-f",
+    "--filename",
+    "-o",
+    "--output",
+    "--cascade",
+    "--grace-period",
+    "--field-selector",
+    "--context",
+    "--cluster",
+    "--user",
+    "--kubeconfig",
+}
+
+
+def _is_kubectl_destructive(normalized: str) -> bool:
+    """Return True for ``kubectl delete`` shapes that wipe broad scope.
+
+    Catches the bypasses literal ``kubectl delete --all`` rules cannot:
+    flag-reordering (``kubectl delete -n prod --all``), short alias
+    (``-A``), fused flag (``--namespace=prod``), and resource-type before
+    ``--all`` (``kubectl delete deployment --all``). Also catches namespace
+    deletion (``kubectl delete namespace foo``) regardless of position.
+
+    Single-resource deletions (``kubectl delete pod my-pod``) are NOT
+    affected — the matcher requires either a cluster-wide flag or the
+    namespace resource type as the first positional.
+    """
+    tokens = normalized.split()
+    if len(tokens) < 3 or _basename(tokens[0]) != "kubectl" or tokens[1] != "delete":
+        return False
+    rest = tokens[2:]
+    # Cluster-wide flag anywhere (separate or fused) → catastrophic.
+    for tok in rest:
+        if tok in _KUBECTL_CLUSTER_FLAGS or tok.startswith("--all="):
+            return True
+    # First positional after `delete` (skipping flags + their values) is
+    # the resource type. ``namespace`` / ``ns`` here means the user is
+    # deleting a namespace (cascades to every resource in it).
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok in _KUBECTL_FLAGS_TAKING_VALUE:
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        return tok in _KUBECTL_NAMESPACE_RESOURCES
+    return False
+
+
+def _is_gh_api_destructive(normalized: str) -> bool:
+    """Return True for ``gh api -X DELETE ...`` raw-API bypasses.
+
+    The literal ``gh repo delete`` / ``gh release delete`` rules block the
+    high-level subcommands, but ``gh api -X DELETE /repos/owner/repo`` does
+    the same thing through the raw GitHub API and otherwise passes through.
+    Covers separate (``-X DELETE``), fused (``-XDELETE``), and long-form
+    (``--method DELETE``) variants; case-insensitive on the verb.
+    """
+    tokens = normalized.split()
+    if len(tokens) < 3 or _basename(tokens[0]) != "gh" or tokens[1] != "api":
+        return False
+    rest = tokens[2:]
+    for i, tok in enumerate(rest):
+        if tok in {"-X", "--method"} and i + 1 < len(rest) and rest[i + 1].upper() == "DELETE":
+            return True
+        if tok.upper().startswith("-X") and len(tok) > 2 and tok[2:].upper() == "DELETE":
+            return True
+        if tok.startswith("--method=") and tok[len("--method=") :].upper() == "DELETE":
+            return True
+    return False
+
+
+_GPG_DESTRUCTIVE_FLAGS = {
+    "--delete-secret-key",
+    "--delete-secret-keys",
+    "--delete-secret-and-public-key",
+    "--delete-secret-and-public-keys",
+}
+
+
+def _is_gpg_secret_delete(normalized: str) -> bool:
+    """Return True for any ``gpg`` invocation that deletes a secret key.
+
+    The literal ``gpg --delete-secret-key`` rule misses flag-reordered
+    forms (``gpg --batch --delete-secret-key KEYID``,
+    ``gpg --homedir /path --delete-secret-key KEYID``). Walks all tokens
+    for the destructive flag — its presence is the deny condition.
+    """
+    tokens = normalized.split()
+    if not tokens or _basename(tokens[0]) != "gpg":
+        return False
+    return any(tok in _GPG_DESTRUCTIVE_FLAGS for tok in tokens[1:])
+
+
+_AWS_S3API_DESTRUCTIVE = {
+    "delete-bucket",
+    "delete-bucket-policy",
+    "delete-bucket-lifecycle",
+    "delete-bucket-website",
+    "delete-bucket-tagging",
+    "delete-bucket-replication",
+    "delete-bucket-cors",
+    "delete-bucket-encryption",
+    "delete-object",
+    "delete-objects",
+}
+
+
+def _is_aws_s3_destructive(normalized: str) -> bool:
+    """Return True for AWS S3 destructive shapes the literal rules miss.
+
+    Catches:
+      * ``aws s3 sync <src> <dst> --delete`` — wipes anything in dst not in src
+      * ``aws s3 rm <path> --recursive`` / ``-r`` — recursive object removal
+      * ``aws s3api delete-bucket / delete-bucket-* / delete-object[s]`` —
+        raw-API equivalents that bypass the high-level ``aws s3 rb`` rule
+    """
+    tokens = normalized.split()
+    if len(tokens) < 3 or _basename(tokens[0]) != "aws":
+        return False
+    if tokens[1] == "s3" and tokens[2] == "sync" and "--delete" in tokens[3:]:
+        return True
+    if tokens[1] == "s3" and tokens[2] == "rm":
+        return any(t in {"--recursive", "-r", "-R"} for t in tokens[3:])
+    return tokens[1] == "s3api" and len(tokens) >= 3 and tokens[2] in _AWS_S3API_DESTRUCTIVE
+
+
+_CHMOD_DANGEROUS_MODES = {"777", "0777"}
+_CHMOD_DANGEROUS_TARGETS = {
+    "/",
+    "/*",
+    "/etc",
+    "/etc/",
+    "/etc/*",
+    "/usr",
+    "/usr/",
+    "/usr/*",
+    "/var",
+    "/var/",
+    "/var/*",
+    "/bin",
+    "/bin/",
+    "/bin/*",
+    "/sbin",
+    "/sbin/",
+    "/sbin/*",
+    "/lib",
+    "/lib/",
+    "/lib/*",
+    "/lib64",
+    "/lib64/",
+    "/lib64/*",
+    "/boot",
+    "/boot/",
+    "/boot/*",
+    "~",
+    "~/",
+    "~/*",
+    "$HOME",
+    "$HOME/",
+    "$HOME/*",
+}
+
+
+def _is_chmod_dangerous(normalized: str) -> bool:
+    """Return True for ``chmod -R 777 <root-or-system-path>`` shapes.
+
+    System-bricking foot-gun: world-writable recursion against /, /etc,
+    /usr, /var, /bin, /sbin, /lib, ~, or $HOME. Requires all three:
+    recursive flag, full-perm mode (777 / 0777), and a top-level target.
+    Scoped chmods (``chmod -R 777 ./mydir``) are not affected.
+    """
+    tokens = normalized.split()
+    if not tokens or _basename(tokens[0]) != "chmod":
+        return False
+    rest = tokens[1:]
+    has_recursive = any(t in {"-R", "--recursive"} or (t.startswith("-") and "R" in t) for t in rest)
+    if not has_recursive:
+        return False
+    has_full_perm = any(t in _CHMOD_DANGEROUS_MODES for t in rest)
+    if not has_full_perm:
+        return False
+    return any(t in _CHMOD_DANGEROUS_TARGETS for t in rest)
 
 
 # Per-candidate-form matchers: run once per entry in ``_candidate_forms`` so
@@ -1400,6 +1646,11 @@ _PER_FORM_MATCHERS: tuple[tuple[Callable[[str], bool], str], ...] = (
     (_is_dangerous_rm, _SYNTH_RM_DENY),
     (_is_git_config_injection, _SYNTH_GIT_CONFIG_DENY),
     (_is_pip_install_from_url, _SYNTH_PIP_INSTALL_URL_DENY),
+    (_is_kubectl_destructive, _SYNTH_KUBECTL_DESTRUCTION_DENY),
+    (_is_gh_api_destructive, _SYNTH_GH_API_DELETE_DENY),
+    (_is_gpg_secret_delete, _SYNTH_GPG_SECRET_DELETE_DENY),
+    (_is_aws_s3_destructive, _SYNTH_AWS_S3_DESTRUCTION_DENY),
+    (_is_chmod_dangerous, _SYNTH_CHMOD_777_ROOT_DENY),
 )
 
 
