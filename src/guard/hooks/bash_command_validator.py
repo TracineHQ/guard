@@ -1367,6 +1367,15 @@ def _is_pip_install_from_url(normalized: str) -> bool:
     cursor = 1
     if head in {"uv", "pipx"} and cursor < len(tokens) and tokens[cursor] == "pip":
         cursor += 1
+    elif head in {"python", "python3", "pypy", "pypy3"} and (
+        cursor < len(tokens) and tokens[cursor] == "-m"
+    ):
+        # ``python -m pip install <URL>`` — module-runner form; same supply-
+        # chain risk as bare ``pip``. Skip the ``-m pip`` tokens.
+        cursor += 1
+        if cursor >= len(tokens) or tokens[cursor] != "pip":
+            return False
+        cursor += 1
     elif head not in {"pip", "pip3", "pipx"}:
         return False
     if cursor >= len(tokens) or tokens[cursor] != "install":
