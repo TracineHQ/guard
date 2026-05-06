@@ -772,6 +772,97 @@ COMMANDS: list[CommandRule] = [
         "package-mgmt",
         autonomous_feedback="Package install requires confirmation. Queue for session end.",
     ),
+    # --- Orchestration Destruction (DENY) ---
+    # Each shape below has no legitimate dev-time variant. The literal-prefix
+    # matcher catches subcommand args (`gh repo delete owner/repo --yes`,
+    # `kubectl delete --all -n production`, etc.) — extra flags after the
+    # prefix do not change the verdict.
+    CommandRule(
+        "kubectl delete --all",
+        Safety.DENY,
+        "Cluster-wide resource deletion is never a single-step dev op.",
+        "k8s-deny",
+    ),
+    CommandRule(
+        "kubectl delete pods --all",
+        Safety.DENY,
+        "Cluster-wide pod deletion is never a single-step dev op.",
+        "k8s-deny",
+    ),
+    CommandRule(
+        "kubectl delete namespace",
+        Safety.DENY,
+        "Namespace deletion cascades to every resource in it.",
+        "k8s-deny",
+    ),
+    CommandRule(
+        "aws s3 rb",
+        Safety.DENY,
+        "Bucket removal — irreversible, often paired with --force to wipe contents.",
+        "aws-deny",
+    ),
+    CommandRule(
+        "gh repo delete",
+        Safety.DENY,
+        "Repo deletion is irreversible and never a single-step dev op.",
+        "gh-deny",
+    ),
+    CommandRule(
+        "gh release delete",
+        Safety.DENY,
+        "Release deletion removes published artifacts; never a single-step dev op.",
+        "gh-deny",
+    ),
+    CommandRule(
+        "gpg --delete-secret-key",
+        Safety.DENY,
+        "Secret-key deletion is irreversible and unrecoverable.",
+        "gpg-deny",
+    ),
+    CommandRule(
+        "gpg --delete-secret-and-public-keys",
+        Safety.DENY,
+        "Secret-key deletion is irreversible and unrecoverable.",
+        "gpg-deny",
+    ),
+    CommandRule(
+        "chmod -R 777 /",
+        Safety.DENY,
+        "World-writable recursion against / is catastrophic.",
+        "chmod-deny",
+    ),
+    CommandRule(
+        "chmod -R 777 /*",
+        Safety.DENY,
+        "World-writable recursion against /* is catastrophic.",
+        "chmod-deny",
+    ),
+    # --- Orchestration Destruction (ASK) ---
+    # Documented for permission generation; have legitimate variants but
+    # warrant explicit user confirmation. (Runtime ASK behavior in interactive
+    # mode falls through to passthrough; these entries primarily document
+    # intent for the marketplace permission manifest.)
+    CommandRule(
+        "docker container prune",
+        Safety.ASK,
+        "Prunes stopped containers",
+        "docker-mgmt",
+        autonomous_feedback="Docker prune is destructive. Flag for human review.",
+    ),
+    CommandRule(
+        "docker volume prune",
+        Safety.ASK,
+        "Prunes unused volumes (data loss risk)",
+        "docker-mgmt",
+        autonomous_feedback="Docker volume prune deletes data. Flag for human review.",
+    ),
+    CommandRule(
+        "aws s3 rm",
+        Safety.ASK,
+        "S3 object removal",
+        "aws-mgmt",
+        autonomous_feedback="S3 deletion requires confirmation. Queue for session end.",
+    ),
 ]
 
 
