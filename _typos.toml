@@ -1,3 +1,5 @@
 [default.extend-words]
 # add false-positive identifiers as needed
 Nd = "Nd"  # placeholder for "N days" in CLI duration docstrings
+aks = "aks"  # Azure Kubernetes Service subcommand
+mke = "mke"  # docker mke / make typo allowlist if needed

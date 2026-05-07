@@ -1,9 +1,8 @@
-"""Comprehensive matcher coverage from the 2026-05-06 red-team fleet.
+"""End-to-end coverage for the synthetic-deny matcher families.
 
-One test class per matcher / matcher family. Each class has DENY_CASES
-(must produce a deny envelope) and LEGIT_CASES (must NOT deny). Every
-shape from ``docs/strategy/2026-05-06-redteam-findings.md`` is exercised
-at least once.
+One test group per matcher family. Each group has DENY_CASES (must
+produce a deny envelope) and LEGIT_CASES (must NOT deny). Every shape
+the matchers are designed to catch is exercised at least once.
 
 Tests run against the live ``decide()`` in interactive mode (autonomous
 unset) — this is the worst-case for false-negatives because autonomous
