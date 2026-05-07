@@ -405,9 +405,22 @@ def hook(payload: dict[str, Any]) -> None:
     if not isinstance(tool_input, dict):
         return
     command = tool_input.get("command", "")
-    if not isinstance(command, str) or (
-        "git -C" not in command and "git commit" not in command and "git -c " not in command
-    ):
+    if not isinstance(command, str) or not command:
+        return
+    # Token-aware gate: any `git` invocation with a `-C`/`-c` global option
+    # (in any of its argv shapes — bare, fused, equals, --config-env) or a
+    # `git commit` subcommand reaches `decide()`. The previous substring
+    # gate ("git -c " with trailing space) skipped the fused form
+    # `git -ccore.hooksPath=...`, leaving the new fused-form parser dead.
+    try:
+        head = shlex.split(command)
+    except ValueError:
+        head = command.split()
+    if not head or head[0] != "git":
+        return
+    rest = head[1:]
+    has_config_or_dir_flag = any(t.startswith(("-C", "-c", "--config-env")) for t in rest)
+    if not has_config_or_dir_flag and "commit" not in rest:
         return
 
     envelope = decide(command)

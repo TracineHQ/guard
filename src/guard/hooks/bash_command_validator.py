@@ -1059,7 +1059,19 @@ def _interpreter_runs_module_or_script(tokens: list[str]) -> bool:
     # Bun package-manager subcommands: ``bun add <pkg>`` / ``bun run dev`` etc.
     # bun acts as both interpreter and pkgmgr; pkg routes go through the
     # npm-like matchers (which catch URL/git installs).
+    #
+    # Tighten the exemption for ``run`` / ``test`` (and ``x``): these accept
+    # EITHER a package.json script name OR a script-file path. The path form
+    # is RCE-equivalent to ``bun /tmp/x.js`` and must NOT be exempted.
+    # Allow only when the operand looks like a script name (no ``/``, no
+    # script-file extension).
     if head == "bun" and len(tokens) >= 2 and tokens[1] in _BUN_PACKAGE_SUBCOMMANDS:
+        if tokens[1] in {"run", "test", "x"} and len(tokens) >= 3:
+            operand = tokens[2]
+            script_exts = (".js", ".ts", ".mjs", ".cjs", ".jsx", ".tsx")
+            if "/" in operand or operand.endswith(script_exts):
+                # Looks like a script path — fall through to RCE deny.
+                return True
         return False
     # Deno subcommand surface (``deno install``, ``deno task``, ``deno cache``)
     # is handled by other matchers; skip module-or-script trigger here.
@@ -1385,8 +1397,16 @@ def _match_always_deny(segment: str) -> str | None:
 
 
 def _match_always_deny_literal(normalized: str) -> str | None:
-    """Pure literal prefix lookup against ALWAYS_DENY (no canonicalization)."""
-    matches = [p for p in ALWAYS_DENY if normalized == p or normalized.startswith(p + " ")]
+    """Pure literal prefix lookup against ALWAYS_DENY (no canonicalization).
+
+    Recognises the bare-prefix form (``git push --force``) AND the
+    flag-with-value form (``git push --force-with-lease=ref``). Without the
+    ``=`` extension a literal like ``git push --force-with-lease`` would miss
+    its own canonical attached-value invocation.
+    """
+    matches = [
+        p for p in ALWAYS_DENY if normalized == p or normalized.startswith((p + " ", p + "="))
+    ]
     if not matches:
         return None
     return max(matches, key=len)
@@ -1609,8 +1629,9 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
     _SYNTH_GIT_FORCE_REFSPEC_DENY: (
         "git push with a refspec prefixed by ``+`` (e.g. ``+HEAD:main``) is "
         "the refspec form of force-push. It overwrites the remote ref "
-        "regardless of whether the local fast-forwards. Use ``--force-with-lease`` "
-        "and a regular refspec, or push to a non-protected branch first."
+        "regardless of whether the local fast-forwards. Resolve the divergence "
+        "first (``git pull --rebase`` or ``git fetch && git rebase``) and then "
+        "push without ``+``."
     ),
     _SYNTH_GIT_SUBMODULE_ADD_DENY: (
         "``git submodule add <url>`` fetches an arbitrary repository whose "
@@ -1618,9 +1639,10 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         "would run during init. Vet the URL out-of-band, then add manually."
     ),
     _SYNTH_GIT_WORKTREE_ADD_DENY: (
-        "``git worktree add <path>`` writes a new working directory at an "
-        "arbitrary path; pointed at a system path it would create files "
-        "outside the project. Use a path under the current repo only."
+        "``git worktree add`` target resolves under a system root "
+        "(/etc, /usr, /var, /System, ...). Worktrees there would scatter "
+        "git metadata into system paths. Use a sibling path "
+        "(``../scratch``) or ``/tmp/wt`` instead."
     ),
     _SYNTH_DNS_EXFIL_DENY: (
         "DNS-tunnel candidate (ping/dig/host/nslookup with a DNS label > 50 "
@@ -1880,12 +1902,20 @@ def _is_kubectl_destructive(normalized: str) -> bool:
     return False
 
 
+_GH_API_DESTRUCTIVE_VERBS = {"DELETE", "PATCH", "PUT"}
+
+
 def _is_gh_api_destructive(normalized: str) -> bool:
-    """Return True for ``gh api -X DELETE ...`` raw-API bypasses.
+    """Return True for ``gh api -X <DELETE|PATCH|PUT> ...`` raw-API bypasses.
 
     The literal ``gh repo delete`` / ``gh release delete`` rules block the
     high-level subcommands, but ``gh api -X DELETE /repos/owner/repo`` does
     the same thing through the raw GitHub API and otherwise passes through.
+    PATCH / PUT can edit / archive a repo (e.g. ``PATCH /repos/{o}/{r}`` with
+    ``archived=true`` is functionally a soft delete).
+    POST is intentionally NOT included — it covers issue creation, comments,
+    workflow dispatches, etc. (mostly legitimate); add specific path-level
+    POST denies if a pattern emerges.
     Covers separate (``-X DELETE``), fused (``-XDELETE``), and long-form
     (``--method DELETE``) variants; case-insensitive on the verb.
     """
@@ -1894,11 +1924,22 @@ def _is_gh_api_destructive(normalized: str) -> bool:
         return False
     rest = tokens[2:]
     for i, tok in enumerate(rest):
-        if tok in {"-X", "--method"} and i + 1 < len(rest) and rest[i + 1].upper() == "DELETE":
+        if (
+            tok in {"-X", "--method"}
+            and i + 1 < len(rest)
+            and rest[i + 1].upper() in _GH_API_DESTRUCTIVE_VERBS
+        ):
             return True
-        if tok.upper().startswith("-X") and len(tok) > 2 and tok[2:].upper() == "DELETE":
+        if (
+            tok.upper().startswith("-X")
+            and len(tok) > 2
+            and tok[2:].upper() in _GH_API_DESTRUCTIVE_VERBS
+        ):
             return True
-        if tok.startswith("--method=") and tok[len("--method=") :].upper() == "DELETE":
+        if (
+            tok.startswith("--method=")
+            and tok[len("--method=") :].upper() in _GH_API_DESTRUCTIVE_VERBS
+        ):
             return True
     return False
 
@@ -2203,11 +2244,13 @@ def _is_persistence_command(normalized: str) -> bool:
         return True
     if head == "systemctl":
         # ``systemctl <enable|start|link|mask>`` are the persistence verbs.
-        # ``status`` / ``show`` / ``cat`` are read-only — let those pass.
+        # ``status`` / ``show`` / ``cat`` are read-only.
+        # ``stop`` / ``disable`` tear down persistence (the inverse) — not
+        # a persistence shape; legitimate ops use them constantly.
         for tok in tokens[1:]:
             if tok.startswith("-"):
                 continue
-            return tok in {"enable", "start", "link", "mask", "disable", "stop"}
+            return tok in {"enable", "start", "link", "mask"}
         return False
     if head == "systemd-run":
         return True
@@ -2238,6 +2281,21 @@ def _is_chmod_setuid(normalized: str) -> bool:
         if tok.isdigit() and len(tok) == 4 and tok[0] in {"4", "2", "6"}:
             return True
     return False
+
+
+def _is_chmod_sensitive_target(normalized: str) -> bool:
+    """Return True for ``chmod <mode> <sensitive-path>`` regardless of mode.
+
+    World-readable on ``~/.ssh/id_rsa`` is credential disclosure;
+    world-writable on ``/etc/sudoers`` is privilege escalation. Neither
+    requires recursion or 777, so the existing ``_is_chmod_dangerous`` /
+    ``_is_chmod_setuid`` matchers miss them. This catches the destination
+    angle: any chmod against a sensitive system path or sensitive home tail.
+    """
+    tokens = normalized.split()
+    if len(tokens) < 2 or _basename(tokens[0]) != "chmod":
+        return False
+    return any(not t.startswith("-") and _operand_is_sensitive(t) for t in tokens[1:])
 
 
 # --- sudo escalation ---
@@ -2817,21 +2875,34 @@ def _is_remote_shell_wrapper(normalized: str) -> bool:
         # ``ssh -t host 'cmd'``, ``ssh user@host cmd``. Need at least 3 tokens
         # AND a non-flag last token. ``ssh host`` (interactive) is 2 tokens.
         return any(not t.startswith("-") for t in tokens[2:])
-    if head in {"docker", "kubectl"} and tokens[1] == "exec":
-        # Allow ``docker exec --help`` / ``--version`` (local help, no container).
-        if any(t in _REMOTE_SHELL_HELP_FLAGS for t in tokens[2:]):
+    if head in {"docker", "podman", "lxc", "kubectl"} and tokens[1] == "exec":
+        # Allow ``docker exec --help`` / ``--version`` ONLY when the help
+        # flag stands alone after ``exec`` (no container or trailing argv).
+        # ``docker exec --help mc rm -rf /`` is NOT a help invocation: docker
+        # treats `mc` as the container and `rm -rf /` as the command, then
+        # `--help` is just an unknown flag for `rm`. Insisting on
+        # tokens[2] in help-flags AND len == 3 closes that bypass.
+        if len(tokens) == 3 and tokens[2] in _REMOTE_SHELL_HELP_FLAGS:
             return False
         return True
+    # ``nsenter -t <pid> -m -p ...`` enters a target namespace and runs the
+    # trailing argv inside it — same shell-RCE shape as docker exec.
+    if head == "nsenter":
+        return any(not t.startswith("-") for t in tokens[1:])
     return False
 
 
 # --- Git destruction shapes that aren't literal-prefix matchable ---
 def _is_git_force_refspec(normalized: str) -> bool:
-    """Return True for ``git push [opts] <remote> +<refspec>`` (refspec force)."""
+    """Return True for ``git push [opts] [<remote>] +<refspec>`` (refspec force).
+
+    Catches both the explicit-remote form (``git push origin +HEAD:main``) and
+    the upstream-default form (``git push +HEAD:main``). Length floor is 3 so
+    the 3-token upstream-default shape isn't skipped.
+    """
     tokens = normalized.split()
-    if len(tokens) < 4 or _basename(tokens[0]) != "git" or tokens[1] != "push":
+    if len(tokens) < 3 or _basename(tokens[0]) != "git" or tokens[1] != "push":
         return False
-    # Any positional (non-flag) token starting with ``+`` is a force refspec.
     for tok in tokens[2:]:
         if tok.startswith("-"):
             continue
@@ -2849,15 +2920,32 @@ def _is_git_submodule_add(normalized: str) -> bool:
 
 
 def _is_git_worktree_add(normalized: str) -> bool:
-    """Return True for ``git worktree add <path>``.
+    """Return True for ``git worktree add <path>`` targeting a system path.
 
-    Allow ``git worktree list/lock/move/prune/remove/repair`` — only the
-    ``add`` subcommand creates files at an arbitrary path.
+    Allow ``git worktree list/lock/move/prune/remove/repair`` and the common
+    legitimate shapes (``git worktree add ../scratch HEAD``,
+    ``git worktree add /tmp/wt HEAD``). Only deny when the target path
+    resolves under a system root (/etc, /usr, /var, /System, ...) where a
+    worktree would write outside any reasonable project boundary.
     """
     tokens = normalized.split()
-    if len(tokens) < 3 or _basename(tokens[0]) != "git":
+    if len(tokens) < 4 or _basename(tokens[0]) != "git":
         return False
-    return tokens[1] == "worktree" and tokens[2] == "add"
+    if tokens[1] != "worktree" or tokens[2] != "add":
+        return False
+    # Walk past flags to find the first positional (the worktree path).
+    for tok in tokens[3:]:
+        if tok.startswith("-"):
+            continue
+        normalized_op = _normalize_home_path(tok)
+        if any(
+            normalized_op.startswith(p) or normalized_op == p.rstrip("/")
+            for p in _DANGEROUS_PATH_PREFIXES
+        ):
+            return True
+        # First positional consumed; ignore subsequent ones (commit-ish, etc.).
+        return False
+    return False
 
 
 # --- DNS exfil heads ---
@@ -2908,6 +2996,7 @@ _PER_FORM_MATCHERS: tuple[tuple[Callable[[str], bool], str], ...] = (
     (_is_sensitive_destination_write, _SYNTH_SENSITIVE_WRITE_DENY),
     (_is_persistence_command, _SYNTH_PERSISTENCE_DENY),
     (_is_chmod_setuid, _SYNTH_CHMOD_SETUID_DENY),
+    (_is_chmod_sensitive_target, _SYNTH_CHMOD_SETUID_DENY),
     (_is_sudo_escalation, _SYNTH_SUDO_ESCALATION_DENY),
     (_is_kernel_module_load, _SYNTH_KERNEL_MOD_DENY),
     (_is_process_attach, _SYNTH_PROCESS_ATTACH_DENY),
@@ -2936,6 +3025,7 @@ _PER_FORM_MATCHERS: tuple[tuple[Callable[[str], bool], str], ...] = (
     (_is_git_force_refspec, _SYNTH_GIT_FORCE_REFSPEC_DENY),
     (_is_git_submodule_add, _SYNTH_GIT_SUBMODULE_ADD_DENY),
     (_is_git_worktree_add, _SYNTH_GIT_WORKTREE_ADD_DENY),
+    (_is_pipe_to_interpreter, _SYNTH_PIPE_TO_INTERPRETER_DENY),
 )
 
 

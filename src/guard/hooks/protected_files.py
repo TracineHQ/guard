@@ -74,8 +74,13 @@ def is_protected(file_path: str) -> str | None:
     A pattern matches if ``file_path`` either:
     - ends with the pattern (file-pattern match: ``.git/config`` matches
       ``/repo/.git/config``)
-    - contains ``/<pattern>/`` (directory-pattern match: ``.git/hooks``
+    - is contained as a path SEGMENT (directory-pattern match: ``.git/hooks``
       matches ``/repo/.git/hooks/pre-commit``)
+
+    Directory-pattern matching is restricted to patterns whose last segment
+    contains no ``.`` — file patterns (``.git/config``, ``.gitattributes``)
+    only fire on the suffix form, so a path like ``/tmp/x/.git/config/extra``
+    or ``tools/.gitattributes/templates/foo`` does NOT trigger.
     """
     if not file_path:
         return None
@@ -93,11 +98,10 @@ def is_protected(file_path: str) -> str | None:
             and resolved_str[-(len(pattern) + 1)] == "/"
         ):
             return pattern
-        # Directory-pattern match: ``/<pattern>/`` appears anywhere in the
-        # resolved path. Catches ``.git/hooks/pre-commit`` matching the
-        # ``.git/hooks`` directory pattern. Skip patterns containing ``.``
-        # in the LAST segment (those are always file patterns, not dirs).
-        if "/" + pattern + "/" in resolved_str:
+        # Directory-pattern match: only for patterns whose last segment has
+        # no ``.`` (i.e. is a directory name, not a file name).
+        last_segment = pattern.rsplit("/", 1)[-1]
+        if "." not in last_segment and "/" + pattern + "/" in resolved_str:
             return pattern
     return None
 

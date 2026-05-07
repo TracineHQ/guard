@@ -277,8 +277,19 @@ def _read_message_file(path: str, cwd: str | None) -> str | None:
         return OUT_OF_SCOPE_SENTINEL
     if not _is_path_in_scope(resolved, cwd):
         return OUT_OF_SCOPE_SENTINEL
+    # Open the RESOLVED path with O_NOFOLLOW so a symlink swap between
+    # ``resolve()`` and ``open()`` cannot redirect the read. The scope and
+    # sensitivity checks above operate on ``resolved``; opening ``p`` would
+    # re-traverse the symlink and undo those checks. With O_NOFOLLOW the
+    # final-segment symlink itself errors closed (EMLINK / ELOOP) instead
+    # of pointing the validator at /etc/passwd or ~/.ssh/id_rsa.
     try:
-        with p.open("rb") as fh:
+        fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        _log_debug(f"commit_message_validator: cannot open {path!r}: {exc}")
+        return None
+    try:
+        with os.fdopen(fd, "rb") as fh:
             raw = fh.read(_FILE_MESSAGE_MAX_BYTES + 1)
     except OSError as exc:
         _log_debug(f"commit_message_validator: cannot read {path!r}: {exc}")

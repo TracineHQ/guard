@@ -6,6 +6,71 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — orchestration destruction coverage
+
+- `bash_command_validator`: ~30 new synthetic-deny matchers covering
+  - **Cloud destruction**: `aws iam/ec2/rds/lambda/dynamodb/eks/ecr/ecs/kms/secretsmanager/ssm/s3` destructive verbs;
+    `gcloud projects/iam/secrets/sql/run/storage delete`; `az group/aks/vm/storage/keyvault/sql delete`.
+  - **DB CLIs**: `psql/mysql/mariadb/cqlsh/sqlite3 -c "DROP|DELETE FROM|TRUNCATE|ALTER|GRANT|REVOKE"`;
+    `sqlite3 <db> "<destructive SQL>"` (no -c form); `redis-cli FLUSHALL/FLUSHDB/CONFIG/SAVE/SHUTDOWN`;
+    `dropdb`, `mysqladmin drop`; `mongo --eval` with destructive ops.
+  - **Disk / FS / network destruction**: `mkfs`, `dd of=/dev/...`, `shred /dev/...`, `parted/fdisk/wipefs`,
+    `diskutil eraseDisk`; `iptables -F`, `nft flush ruleset`, `ufw reset`.
+  - **Persistence + privilege escalation**: writes to `~/.bashrc`, `~/.ssh/authorized_keys`, `/etc/sudoers`,
+    `/etc/profile.d/*`, `/etc/cron.d/*`, `~/Library/LaunchAgents/*`, `/etc/systemd/system/*`,
+    PATH-hijack writes to `/usr/local/bin/`; `crontab -e/-r`, `at`, `systemctl enable/start/link/mask`,
+    `launchctl load`, `visudo`; chmod setuid/setgid; chmod against sensitive targets;
+    `sudo -i/-s/su`; `insmod/modprobe`; `gdb -p`/`strace -p`/`ptrace`.
+  - **IaC destruction**: `terraform apply -destroy`, `pulumi destroy`, `cdk destroy`,
+    `helm uninstall`, `vault {kv,secrets,token,policy} {delete,destroy,revoke}`, `argocd app delete`.
+  - **Remote-package install**: `npm/yarn/pnpm/bun install <URL|git+|github:|local>`;
+    `npx/pnpx/bunx <pkg>`; `cargo install --git/--path/--registry`;
+    `go install/run/get <pkg-with-@version>`; `gem install --source <url>`;
+    `helm install <URL>`; `helm repo add <URL>`.
+  - **Pipeline-to-interpreter**: `curl evil | python|ruby|perl|php|lua|bun|deno`.
+  - **Encoding evasion**: `trap '<cmd>' EXIT`, `env -S '<cmd>'`, `function-def + invoke`,
+    glob in command head, `stdbuf/watch/flock/chrt/taskset/runuser/chroot/unshare/firejail` wrappers
+    around dangerous payloads.
+  - **Remote-shell wrappers**: `ssh host '<cmd>'`, `docker/podman/lxc/kubectl exec`, `nsenter`.
+  - **DNS exfil heuristic**: `ping/dig/host/nslookup` with DNS labels >50 chars.
+  - **Git history destruction**: `git filter-branch`, `git filter-repo`,
+    `git reflog expire/delete`, `git gc --prune=now`,
+    `git push --force-with-lease`, `--force-if-includes`, `--mirror`, `+<refspec>`.
+  - **Git submodule/worktree path scoping**: `git submodule add <url>` denied;
+    `git worktree add` denied only when target resolves under a system root.
+- `git_c_validator`: detects fused `-c<key>=val` (no-space), `-c=key=val`,
+  and `--config-env=key=ENV` forms — closes the bypass where the previous
+  parser only handled `-c key=val` (separate tokens).
+- `commit_message_validator`: refuses `git commit -F <path>` when the path
+  resolves outside cwd or under sensitive system roots (/etc, /proc,
+  ~/.ssh, ~/.aws, ~/.gnupg). Opens the resolved file with `O_NOFOLLOW`
+  to close the symlink-TOCTOU window. Prevents `-F /etc/passwd`
+  content-disclosure into commit body.
+- `protected_files`: adds `.git/hooks`, `.git/config`, `.git/info/attributes`,
+  `.git/info/exclude`, `.gitmodules`, `.gitattributes`. Directory-pattern
+  matching scoped to patterns whose last segment has no `.`.
+- Registry: `GIT_CONFIG_EXEC_SINKS` extended with `core.attributesfile`,
+  `color.pager`, `uploadpack.packobjectshook`, `protocol.allow`,
+  `receive.procreceiverefs`. Glob patterns extended with `pager.*` and
+  `protocol.*.allow`.
+- Test surface: 500+ parametrized cases in
+  `tests/integration/test_synth_matchers_coverage.py` exercising every
+  matcher family with paired DENY / LEGIT cases.
+
+### Fixed (review pass)
+
+- `_match_always_deny_literal` recognises `prefix=value` form
+  (`git push --force-with-lease=ref` was bypassing the literal DENY).
+- `git push +HEAD:main` (3-token, no remote) now denied (was missing the
+  refspec-force matcher).
+- `bun run /tmp/x.js` / `bun test ./script.ts` denied (was exempted as
+  package subcommand; now distinguishes script-name from script-path).
+- `chmod 666 /etc/sudoers` denied (was passing because `_is_chmod_dangerous`
+  required recursive AND 777).
+- `docker exec --help <container> rm -rf /` denied (the `--help`
+  short-circuit was positional-blind; now requires `--help` to stand alone).
+- `_is_pipe_to_interpreter` wired into the dispatcher (was orphan).
+
 ## [1.0.0] - 2026-04-30
 
 First stable release. Guard ships seven stdlib-only `PreToolUse` hooks that
