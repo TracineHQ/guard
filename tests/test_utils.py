@@ -451,6 +451,119 @@ def test_is_autonomous_mode_rejects_falsy(monkeypatch) -> None:
         assert not is_autonomous_mode(), f"falsy value accepted: {value!r}"
 
 
+REDACTION_CASES = [
+    ("AKIAIOSFODNN7EXAMPLE", "[REDACTED-AWS-ID]"),
+    ("ASIAEXAMPLE12345ABCD", "[REDACTED-AWS-ID]"),
+    ("sk-ant-api03-" + "a" * 64, "[REDACTED-ANTHROPIC-KEY]"),
+    ("sk-proj-" + "B" * 32, "[REDACTED-OPENAI-PROJECT-KEY]"),
+    ("github_pat_" + "A" * 82, "[REDACTED-GITHUB-PAT]"),
+    ("ghp_" + "0" * 36, "[REDACTED-GITHUB-TOKEN]"),
+    ("ghs_" + "0" * 36, "[REDACTED-GITHUB-TOKEN]"),
+    ("glpat-" + "A" * 20, "[REDACTED-GITLAB-PAT]"),
+    ("xoxb-1234567890-abcdef", "[REDACTED-SLACK-TOKEN]"),
+    ("xoxe-1234567890-abcdef", "[REDACTED-SLACK-TOKEN]"),
+    ("rk_live_" + "A" * 24, "[REDACTED-STRIPE-KEY]"),
+    ("sk_test_" + "A" * 24, "[REDACTED-STRIPE-KEY]"),
+    ("SG." + "A" * 22 + "." + "B" * 43, "[REDACTED-SENDGRID-KEY]"),
+    ("npm_" + "A" * 36, "[REDACTED-NPM-TOKEN]"),
+    ("pypi-AgEIcHlwaS5vcmc" + "A" * 80, "[REDACTED-PYPI-TOKEN]"),
+    (
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV",
+        "[REDACTED-JWT]",
+    ),
+]
+
+
+@pytest.mark.parametrize(("secret", "marker"), REDACTION_CASES)
+def test_log_decision_redacts_known_secret_shapes(
+    secret: str,
+    marker: str,
+    guard_decisions_jsonl: Path,
+) -> None:
+    """Each known credential shape must be replaced before persistence."""
+    log_decision(
+        hook_id="guard.test",
+        event="PreToolUse",
+        tool_name="Bash",
+        decision="deny",
+        reason=f"caught: {secret}",
+        command_excerpt=f"echo {secret}",
+        session_id="redaction-test",
+    )
+    line = guard_decisions_jsonl.read_text("utf-8").strip()
+    assert secret not in line, f"{secret!r} survived redaction in: {line}"
+    assert marker in line, f"{marker} missing from log line: {line}"
+
+
+def test_log_decision_redacts_pem_block(guard_decisions_jsonl: Path) -> None:
+    """Multi-line PEM private key blocks must collapse to a single placeholder."""
+    pem = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABFwAAAAdz\n"
+        "c2gtcnNhAAAAAwEAAQ==\n"
+        "-----END OPENSSH PRIVATE KEY-----"
+    )
+    log_decision(
+        hook_id="guard.test",
+        event="PreToolUse",
+        tool_name="Write",
+        decision="deny",
+        reason=f"sees key: {pem}",
+        session_id="redaction-test",
+    )
+    line = guard_decisions_jsonl.read_text("utf-8").strip()
+    assert "BEGIN OPENSSH PRIVATE KEY" not in line
+    assert "[REDACTED-PRIVATE-KEY]" in line
+
+
+def test_log_decision_redacts_authorization_bearer(guard_decisions_jsonl: Path) -> None:
+    log_decision(
+        hook_id="guard.test",
+        event="PreToolUse",
+        tool_name="Bash",
+        decision="deny",
+        reason="curl with auth",
+        command_excerpt='curl -H "Authorization: Bearer abcdef-real-token-here" https://x',
+        session_id="redaction-test",
+    )
+    line = guard_decisions_jsonl.read_text("utf-8").strip()
+    assert "abcdef-real-token-here" not in line
+    assert "[REDACTED]" in line
+
+
+def test_log_decision_redacts_credential_named_kv(guard_decisions_jsonl: Path) -> None:
+    log_decision(
+        hook_id="guard.test",
+        event="PreToolUse",
+        tool_name="Bash",
+        decision="deny",
+        reason="env-set leak",
+        command_excerpt="aws_secret_access_key=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",
+        session_id="redaction-test",
+    )
+    line = guard_decisions_jsonl.read_text("utf-8").strip()
+    assert "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY" not in line
+    assert "[REDACTED]" in line
+
+
+def test_append_jsonl_refuses_to_follow_symlink(tmp_path: Path) -> None:
+    """O_NOFOLLOW: pre-planted symlink at the log path must not be followed.
+
+    Without this, an attacker that pre-creates
+    ``~/.claude/guard-decisions.jsonl -> /etc/cron.d/x`` could turn guard's
+    append into an arbitrary-write primitive.
+    """
+    target = tmp_path / "actual-target.txt"
+    target.write_text("untouched")
+    link_path = tmp_path / "guard-decisions.jsonl"
+    link_path.symlink_to(target)
+
+    append_jsonl(link_path, {"schema_version": 1, "decision": "allow"})
+
+    # Target must be byte-for-byte unchanged; the append silently fails.
+    assert target.read_text() == "untouched"
+
+
 def test_append_jsonl_concurrent_writes_all_parse(tmp_path: Path) -> None:
     """50-way concurrent writes must all produce valid JSON lines."""
     from concurrent.futures import ThreadPoolExecutor

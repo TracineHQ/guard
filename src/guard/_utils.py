@@ -118,6 +118,82 @@ _REASON_MAX_CHARS = 1024  # schema v1 §3
 _COMMAND_EXCERPT_MAX_CHARS = 4096  # schema v1 §3
 _TRUNCATION_MARKER = "…[truncated]"
 
+# Secret-shape redactors applied to ``command_excerpt`` and ``reason`` before
+# they land in the JSONL log. The log is itself a credential-disclosure side
+# channel: any process that can read ``~/.claude/guard-decisions.jsonl`` would
+# otherwise harvest a curated transcript of every secret the agent typed,
+# indexed by hook and timestamp. Keep the catalog focused on shapes that
+# (a) are unambiguous (low false-positive rate) and (b) would be catastrophic
+# in a log dump. Generic "high entropy" detection lives in ``credential_check``
+# upstream — here we only sanitize what already slipped past detection.
+_SECRET_REDACTORS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # AWS access-key IDs (AKIA = long-term, ASIA = session, AGPA/AROA/AIDA =
+    # IAM principal IDs). Format: ``[A-Z0-9]{16}`` after the prefix.
+    (re.compile(r"\b(?:AKIA|ASIA|AGPA|AROA|AIDA)[0-9A-Z]{16}\b"), "[REDACTED-AWS-ID]"),
+    # Anthropic API keys.
+    (re.compile(r"\bsk-ant-api03-[A-Za-z0-9_\-]{32,}"), "[REDACTED-ANTHROPIC-KEY]"),
+    # OpenAI / project keys.
+    (re.compile(r"\bsk-proj-[A-Za-z0-9_\-]{20,}"), "[REDACTED-OPENAI-PROJECT-KEY]"),
+    (re.compile(r"\bsk-[A-Za-z0-9]{32,}"), "[REDACTED-SK-KEY]"),
+    # GitHub PAT shapes (fine-grained, classic, OAuth, server, refresh).
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{60,}"), "[REDACTED-GITHUB-PAT]"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}"), "[REDACTED-GITHUB-TOKEN]"),
+    # GitLab PAT.
+    (re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}"), "[REDACTED-GITLAB-PAT]"),
+    # Slack tokens (xoxb/xoxp/xoxa/xoxe/xapp variants).
+    (re.compile(r"\bxox[abeprs]-[A-Za-z0-9\-]{10,}"), "[REDACTED-SLACK-TOKEN]"),
+    # Stripe restricted/secret/publishable keys.
+    (re.compile(r"\b(?:rk|sk|pk)_(?:live|test)_[A-Za-z0-9]{24,}"), "[REDACTED-STRIPE-KEY]"),
+    # SendGrid.
+    (re.compile(r"\bSG\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}"), "[REDACTED-SENDGRID-KEY]"),
+    # npm tokens.
+    (re.compile(r"\bnpm_[A-Za-z0-9]{30,}"), "[REDACTED-NPM-TOKEN]"),
+    # PyPI macaroons.
+    (re.compile(r"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_\-]+"), "[REDACTED-PYPI-TOKEN]"),
+    # JWT bearer tokens (3 base64url segments).
+    (
+        re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"),
+        "[REDACTED-JWT]",
+    ),
+    # PEM private keys (any flavor, multi-line).
+    (
+        re.compile(
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+            re.DOTALL,
+        ),
+        "[REDACTED-PRIVATE-KEY]",
+    ),
+    # Generic ``Authorization: Bearer <token>`` headers.
+    (re.compile(r"(?i)(authorization\s*:\s*bearer\s+)\S+"), r"\1[REDACTED]"),
+    # Generic ``KEY=value`` / ``KEY: value`` for credential-named keys.
+    (
+        re.compile(
+            r"(?i)((?:api[_-]?key|access[_-]?key|secret[_-]?key|aws_secret_access_key|"
+            r"private[_-]?key|password|passwd|pwd|token|auth|bearer)\s*[=:]\s*)"
+            r"['\"]?[^\s'\"&,;]{6,}",
+        ),
+        r"\1[REDACTED]",
+    ),
+)
+
+
+def _redact_secrets(text: str) -> str:
+    """Replace recognized secret shapes with redaction placeholders.
+
+    Applied to log-bound ``command_excerpt`` and ``reason`` strings before
+    they are persisted to ``~/.claude/guard-decisions.jsonl``. Matches are
+    conservative: we only replace shapes with vendor-specific prefixes or
+    explicit credential-named key/value contexts. Unknown high-entropy
+    strings are left in place — false-positive redactions in the audit
+    log would damage forensics more than the (low) marginal leak risk.
+    """
+    if not text:
+        return text
+    for pat, repl in _SECRET_REDACTORS:
+        text = pat.sub(repl, text)
+    return text
+
+
 # Schema-v1 envelope: every record carries ``v`` (short alias) and ``mode``
 # (effective enforcement posture). See ``docs/JSONL_FORMAT.md``.
 _SCHEMA_V = 1
@@ -231,8 +307,19 @@ def append_jsonl(path: str | Path, entry: dict[str, Any]) -> None:
     line = _shrink_to_envelope(dict(entry))
     try:
         path_str = str(path)
-        Path(path_str).parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path_str, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        Path(path_str).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # O_NOFOLLOW: refuse to follow a pre-planted symlink at the log path
+        # (e.g. ``~/.claude/guard-decisions.jsonl`` → ``/etc/cron.d/x``) which
+        # would let an attacker turn guard's append into an arbitrary-write
+        # primitive on a sensitive file. O_CLOEXEC: the fd never escapes to
+        # subprocesses spawned by hooks. ``hasattr`` keeps the call portable
+        # to platforms that lack the constants (e.g. older Windows builds).
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        fd = os.open(path_str, flags, 0o600)
         try:
             os.write(fd, line)
         finally:
@@ -277,6 +364,7 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
         cwd: Optional working directory string.
     """
     timestamp = datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    redacted_reason = _redact_secrets(reason)
     record: dict[str, Any] = {
         "v": _SCHEMA_V,
         "schema_version": _SCHEMA_V,
@@ -286,11 +374,12 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
         "event": event,
         "tool_name": tool_name,
         "decision": decision,
-        "reason": reason[:_REASON_MAX_CHARS],
+        "reason": redacted_reason[:_REASON_MAX_CHARS],
         "session_id": session_id,
     }
     if command_excerpt is not None:
-        record["command_excerpt"] = command_excerpt[:_COMMAND_EXCERPT_MAX_CHARS]
+        redacted_excerpt = _redact_secrets(command_excerpt)
+        record["command_excerpt"] = redacted_excerpt[:_COMMAND_EXCERPT_MAX_CHARS]
     if cwd is not None:
         record["cwd"] = cwd
     append_jsonl(GUARD_DECISIONS_PATH, record)
