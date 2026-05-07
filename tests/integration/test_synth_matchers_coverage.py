@@ -934,6 +934,13 @@ GIT_HISTORY_DENY = [
     "git worktree add /etc/passwd HEAD",
     "git worktree add /usr/local/wt HEAD",
     "git worktree add /var/lib/wt HEAD",
+    # Flag-shadow bypass: -b takes a branch name as next arg; the actual
+    # path follows. The validator must consume the flag+value pair before
+    # checking the positional, otherwise the branch name "exploit" gets
+    # falsely cleared and /etc/systemd/system goes unchecked.
+    "git worktree add -b exploit /etc/systemd/system HEAD",
+    "git worktree add -B branch /usr/local/wt HEAD",
+    "git worktree add --reason hold /var/lib/wt HEAD",
 ]
 
 GIT_HISTORY_LEGIT = [
@@ -953,6 +960,9 @@ GIT_HISTORY_LEGIT = [
     "git worktree add ./local-wt HEAD",
     "git worktree add /Users/dev/develop/repo/wt HEAD",
     "git worktree add /home/dev/projects/repo/wt HEAD",
+    # Flag with value, then legitimate path
+    "git worktree add -b feature /Users/dev/develop/repo/wt HEAD",
+    "git worktree add --track /tmp/wt HEAD",
     "git reflog show",
     "git gc",  # bare gc (no prune=now) — slower but recoverable
 ]

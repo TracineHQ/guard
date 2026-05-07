@@ -57,6 +57,14 @@ adheres to [Semantic Versioning](https://semver.org/).
   `tests/integration/test_synth_matchers_coverage.py` exercising every
   matcher family with paired DENY / LEGIT cases.
 
+### Fixed (review pass 3)
+
+- `_is_git_worktree_add` now consumes value-flags (`-b`, `-B`, `--reason`,
+  `--track`) as flag+value pairs before locating the path positional. Pass-2
+  flag-skip logic was naive: `git worktree add -b exploit /etc/systemd/system
+  HEAD` skipped `-b` then matched `exploit` (the branch name) as the path,
+  cleared it, and bypassed the deny on `/etc/systemd/system`.
+
 ### Fixed (review pass 2)
 
 - `_is_git_worktree_add` no longer denies `git worktree add /Users/...` /

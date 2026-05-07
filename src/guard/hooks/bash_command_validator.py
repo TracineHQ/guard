@@ -3004,6 +3004,13 @@ _WORKTREE_DANGEROUS_PREFIXES = (
 )
 
 
+# Flags on ``git worktree add`` that consume the next token as a value.
+# Without this, ``git worktree add -b exploit /etc/systemd/system HEAD``
+# would have the path-check fall on ``exploit`` (the branch name) instead
+# of the actual system path, bypassing the deny.
+_WORKTREE_VALUE_FLAGS = frozenset({"-b", "-B", "--reason", "--track"})
+
+
 def _is_git_worktree_add(normalized: str) -> bool:
     """Return True for ``git worktree add <path>`` targeting a system path.
 
@@ -3011,23 +3018,28 @@ def _is_git_worktree_add(normalized: str) -> bool:
     legitimate shapes (``git worktree add ../scratch HEAD``,
     ``git worktree add /tmp/wt HEAD``, ``git worktree add /Users/dev/.../wt``).
     Only deny when the target resolves under a system root (/etc, /usr, /var,
-    /System, ...) where a worktree would clobber OS files.
+    /System, ...) where a worktree would clobber OS files. Properly handles
+    value-consuming flags (``-b <branch>``) so they don't shadow the path arg.
     """
     tokens = normalized.split()
     if len(tokens) < 4 or _basename(tokens[0]) != "git":
         return False
     if tokens[1] != "worktree" or tokens[2] != "add":
         return False
-    for tok in tokens[3:]:
+    i = 3
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in _WORKTREE_VALUE_FLAGS and i + 1 < len(tokens):
+            i += 2
+            continue
         if tok.startswith("-"):
+            i += 1
             continue
         normalized_op = _normalize_home_path(tok)
-        if any(
+        return any(
             normalized_op.startswith(p) or normalized_op == p.rstrip("/")
             for p in _WORKTREE_DANGEROUS_PREFIXES
-        ):
-            return True
-        return False
+        )
     return False
 
 
