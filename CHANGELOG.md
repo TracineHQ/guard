@@ -57,6 +57,66 @@ adheres to [Semantic Versioning](https://semver.org/).
   `tests/integration/test_synth_matchers_coverage.py` exercising every
   matcher family with paired DENY / LEGIT cases.
 
+### Fixed (review pass 4)
+
+Pass-4 surfaced verified bypasses across three classes; all closed below.
+
+**Shell-semantics bypasses (`bash_command_validator`):**
+
+- ANSI-C `$'...'` quoting (Bash Reference Manual §3.1.2.4) is decoded at
+  the canonicalization layer. Without this, a head spelled
+  `$'\x64\x72\x6f\x70\x64\x62'` (= `dropdb`) reached every per-form
+  matcher as the literal escape string and bypassed head-token checks.
+- Bash brace expansion (`{r,r}m -rf /`, `tee /etc/{sudoers.d/x,profile.d/x.sh}`)
+  is expanded line-by-line. Newlines preserved so pipeline-split keeps
+  per-line segmentation.
+- Shell control-flow keywords (`then`, `else`, `elif`, `do`, `in`, `;;`,
+  `if`, `while`, `until`, `for`, `case`) are stripped from segment heads
+  after pipeline-split. Before this, `if true; then rm -rf /; fi` and
+  `for i in 1; do rm -rf /; done` produced segments whose heads were
+  `then`/`do` and missed every matcher. Bare `fi`/`done`/`esac`
+  terminators are dropped.
+
+**Cloud-CLI matchers (`bash_command_validator`):**
+
+- `aws`/`gcloud`/`az` now walk past leading global flags before indexing
+  into the destructive-path tuple. Pass-3 closed the same defect for
+  `git -c`; the cloud matchers retained the rigid `tokens[1]/[2]` shape.
+  Bypassed shapes now denied: `aws --region X ec2 terminate-instances`,
+  `aws --profile prod iam delete-user`, `gcloud --format json projects
+  delete`, `gcloud --quiet projects delete`, `az --subscription X group
+  delete`, `az -o json keyvault delete`.
+
+**Per-matcher coverage extensions:**
+
+- `vault` matcher now covers `token revoke`/`revoke-self`/`revoke-orphan`,
+  `secrets disable`, `policy delete`, `auth disable`, `lease revoke`/
+  `revoke-prefix` (was: only `kv destroy`/`metadata delete`).
+- `mongosh` now denies `-e <body>` (short alias of `--eval`) and
+  `--file <path>`/`-f <path>`/`--file=<path>` — file body is opaque so the
+  matcher refuses rather than allowing blindly.
+- Disk-destruction matchers (`mkfs.*`, `dd of=`, `shred`, `parted`,
+  `wipefs`) now treat filesystem-image paths (`.img`, `.iso`, `.qcow2`,
+  `.vhd[x]`, `.vmdk`, `.raw`, `.dd`) as device-equivalents. Formatting an
+  image and booting it is the same threat shape as targeting `/dev/`.
+
+**Audit-log hardening (`_utils.py`):**
+
+- `log_decision` now applies a focused secret-redaction pass to both
+  `command_excerpt` and `reason` before persistence. 18 vendor-specific
+  shapes covered (AWS access-key IDs, Anthropic / OpenAI / generic
+  `sk-*` keys, GitHub PAT/OAuth/server tokens, GitLab PAT, Slack tokens,
+  Stripe keys, SendGrid, npm, PyPI macaroons, JWT bearer, PEM private
+  keys, `Authorization: Bearer …` headers, `KEY=value` for credential-named
+  keys). Without this the JSONL log was a side-channel exfiltration
+  target — any process able to read it harvested every secret the agent
+  typed, indexed by hook and timestamp.
+- `append_jsonl` now opens the log path with `O_NOFOLLOW | O_CLOEXEC`
+  and creates the parent directory at mode `0o700`. Prevents a
+  pre-planted symlink at `~/.claude/guard-decisions.jsonl` from turning
+  guard's append into an arbitrary-write primitive against
+  attacker-chosen targets (e.g. `/etc/cron.d/x`).
+
 ### Fixed (review pass 3)
 
 - `_is_git_worktree_add` now consumes value-flags (`-b`, `-B`, `--reason`,

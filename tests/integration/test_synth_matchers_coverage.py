@@ -1275,6 +1275,92 @@ def test_control_flow_smuggling_denied(command: str) -> None:
     assert _is_deny(decide(command)), f"control-flow smuggle: {command!r}"
 
 
+# ============================================================================
+# Pass-4: cloud-CLI leading-global-flag bypass closures
+# ============================================================================
+# Pass-1/2/3 fixed the same defect on ``git -c``. The cloud matchers retained
+# the rigid ``tokens[1]/[2]`` indexing — every leading global flag (``aws
+# --region``, ``gcloud --format json``, ``az --subscription``) shifted the
+# operative tokens past the index check.
+
+CLOUD_FLAG_SHIFT_DENY = [
+    "aws --region us-east-1 ec2 terminate-instances --instance-ids i-1234",
+    "aws --profile prod iam delete-user --user-name victim",
+    "aws --endpoint-url=https://evil.com ec2 terminate-instances",
+    "aws --output table rds delete-db-instance --db-instance-identifier prod",
+    "gcloud --format json projects delete my-proj",
+    "gcloud --quiet projects delete my-proj",
+    "gcloud --project foo --format=table compute instances delete inst-1",
+    "az --subscription sub group delete --name foo",
+    "az --output table aks delete --name cluster1 --resource-group rg",
+    "az -o json keyvault delete --name kv1",
+]
+
+
+@pytest.mark.parametrize("command", CLOUD_FLAG_SHIFT_DENY)
+def test_cloud_global_flag_shift_denied(command: str) -> None:
+    assert _is_deny(decide(command)), f"cloud-CLI flag-shift bypass: {command!r}"
+
+
+# ============================================================================
+# Pass-4: vault subcommand coverage extension
+# ============================================================================
+
+VAULT_DESTRUCTIVE_DENY = [
+    "vault token revoke 12345",
+    "vault token revoke-self",
+    "vault token revoke-orphan abc",
+    "vault secrets disable kv/",
+    "vault policy delete admin",
+    "vault auth disable userpass",
+    "vault lease revoke abc/lease-id",
+    "vault lease revoke-prefix database/",
+]
+
+
+@pytest.mark.parametrize("command", VAULT_DESTRUCTIVE_DENY)
+def test_vault_subcommand_coverage_denied(command: str) -> None:
+    assert _is_deny(decide(command)), f"vault destructive bypass: {command!r}"
+
+
+# ============================================================================
+# Pass-4: mongosh -e and --file
+# ============================================================================
+
+MONGOSH_FLAG_DENY = [
+    'mongosh -e "db.dropDatabase()"',
+    'mongosh -e "db.users.deleteMany({})"',
+    "mongosh --file /tmp/destroy.js",
+    "mongosh -f /tmp/destroy.js",
+    "mongosh --file=/tmp/destroy.js",
+]
+
+
+@pytest.mark.parametrize("command", MONGOSH_FLAG_DENY)
+def test_mongosh_short_flag_and_file_denied(command: str) -> None:
+    assert _is_deny(decide(command)), f"mongosh flag bypass: {command!r}"
+
+
+# ============================================================================
+# Pass-4: disk-destruction now covers filesystem images, not just /dev/
+# ============================================================================
+
+DISK_IMAGE_DENY = [
+    "mkfs.ext4 /tmp/img.img",
+    "mkfs.xfs /tmp/disk.qcow2",
+    "shred /tmp/data.dd",
+    "shred -u /tmp/data.raw",
+    "parted /tmp/img.qcow2 mklabel gpt",
+    "wipefs /tmp/x.iso",
+    "dd if=/dev/zero of=/tmp/clobber.img bs=1M",
+]
+
+
+@pytest.mark.parametrize("command", DISK_IMAGE_DENY)
+def test_disk_image_destruction_denied(command: str) -> None:
+    assert _is_deny(decide(command)), f"disk-image bypass: {command!r}"
+
+
 # Brace forms that must NOT trip the expander into a false positive
 BRACE_LEGIT = [
     "find / -exec rm -rf {} \\;",  # find placeholder, empty body

@@ -2628,7 +2628,13 @@ def _is_dropdb_or_mysqladmin_drop(normalized: str) -> bool:
 
 
 def _is_mongo_destructive(normalized: str) -> bool:
-    """Return True for ``mongo|mongosh --eval`` with destructive ops."""
+    """Return True for ``mongo|mongosh --eval`` with destructive ops.
+
+    Recognises the long-form ``--eval`` flag and its short alias ``-e``
+    (mongosh accepts both per upstream docs). Also denies ``--file <path>``
+    and ``-f <path>`` because the validator can't read the file body to
+    inspect it for destructive ops; safer to refuse than to allow blindly.
+    """
     tokens = normalized.split()
     if not tokens or _basename(tokens[0]) not in {"mongo", "mongosh"}:
         return False
@@ -2636,32 +2642,66 @@ def _is_mongo_destructive(normalized: str) -> bool:
         r"(dropDatabase|dropCollection|\.drop\(|deleteMany|remove\()", re.IGNORECASE
     )
     for i, tok in enumerate(tokens[1:], start=1):
-        if tok == "--eval" and i + 1 < len(tokens) and destructive_ops.search(tokens[i + 1]):
+        # --eval / -e <body>
+        if (
+            tok in {"--eval", "-e"}
+            and i + 1 < len(tokens)
+            and destructive_ops.search(tokens[i + 1])
+        ):
             return True
+        # --eval=BODY
         if tok.startswith("--eval=") and destructive_ops.search(tok.split("=", 1)[1]):
+            return True
+        # --file <path> / -f <path> — refuse (file body is opaque to the parser)
+        if tok in {"--file", "-f"} and i + 1 < len(tokens):
+            return True
+        if tok.startswith("--file="):
             return True
     return False
 
 
 # --- Disk / FS bricking ---
+# Filesystem-image suffixes treated as device-equivalents. Formatting,
+# shredding, or partitioning a disk image (``.img``, ``.iso``, ``.qcow2``,
+# ``.vhdx``, ``.dd``, ``.raw``) is just as destructive as targeting ``/dev/``
+# directly — the image is typically attached and booted shortly after.
+_IMAGE_FILE_SUFFIXES = (".img", ".iso", ".qcow2", ".qcow", ".vhd", ".vhdx", ".vmdk", ".raw", ".dd")
+
+
+def _is_image_or_device_operand(tok: str) -> bool:
+    """Return True for an operand that names a block device or filesystem image."""
+    if tok.startswith("/dev/") or "/dev/" in tok:
+        return True
+    return any(tok.endswith(suffix) for suffix in _IMAGE_FILE_SUFFIXES)
+
+
 def _is_disk_destruction(normalized: str) -> bool:
-    """Return True for disk/partition/filesystem destruction shapes."""
+    """Return True for disk/partition/filesystem destruction shapes.
+
+    Catches both real-device targets (``/dev/sda``) and filesystem-image
+    targets (``/tmp/img.qcow2``) because formatting an image and booting it
+    is the same threat shape as formatting a raw device.
+    """
     tokens = normalized.split()
     if not tokens:
         return False
     head = _basename(tokens[0])
     if head.startswith("mkfs.") or head == "mkfs":
-        return any("/dev/" in t for t in tokens[1:])
+        return any(_is_image_or_device_operand(t) for t in tokens[1:])
     if head == "dd":
-        return any(t.startswith("of=/dev/") for t in tokens[1:])
+        return any(
+            t.startswith("of=/dev/")
+            or (t.startswith("of=") and any(t.endswith(s) for s in _IMAGE_FILE_SUFFIXES))
+            for t in tokens[1:]
+        )
     if head == "shred":
-        return any(t.startswith("/dev/") for t in tokens[1:])
+        return any(_is_image_or_device_operand(t) for t in tokens[1:] if not t.startswith("-"))
     if head in {"parted", "fdisk", "gdisk", "sfdisk", "cfdisk"}:
-        return any(t.startswith("/dev/") for t in tokens[1:])
+        return any(_is_image_or_device_operand(t) for t in tokens[1:])
     if head == "diskutil":
         return any(t in {"eraseDisk", "eraseVolume", "secureErase"} for t in tokens[1:])
     if head == "wipefs":
-        return any(t.startswith("/dev/") for t in tokens[1:])
+        return any(_is_image_or_device_operand(t) for t in tokens[1:])
     return False
 
 
@@ -2683,6 +2723,102 @@ def _is_network_policy_wipe(normalized: str) -> bool:
 
 
 # --- Cloud destruction (sniff matchers per CLI family) ---
+# Leading global flags shift positional indices on every cloud CLI.
+# ``aws --region us-east-1 ec2 terminate-instances`` puts the operative
+# ``ec2 terminate-instances`` at tokens[3:5], not tokens[1:3]. Matchers must
+# walk past flag-and-value pairs before indexing into the path tuple.
+_AWS_GLOBAL_VALUE_FLAGS = frozenset(
+    {
+        "--region",
+        "--profile",
+        "--endpoint-url",
+        "--cli-read-timeout",
+        "--cli-connect-timeout",
+        "--output",
+        "--ca-bundle",
+        "--cli-binary-format",
+        "--page-size",
+        "--query",
+        "--color",
+    }
+)
+_AWS_GLOBAL_BARE_FLAGS = frozenset(
+    {
+        "--no-paginate",
+        "--no-sign-request",
+        "--debug",
+        "--no-verify-ssl",
+        "--",
+    }
+)
+_GCLOUD_GLOBAL_VALUE_FLAGS = frozenset(
+    {
+        "--project",
+        "--account",
+        "--billing-project",
+        "--configuration",
+        "--format",
+        "--verbosity",
+        "--log-http",
+        "--user-output-enabled",
+        "--impersonate-service-account",
+    }
+)
+_GCLOUD_GLOBAL_BARE_FLAGS = frozenset({"--quiet", "-q", "--help", "-h"})
+_AZ_GLOBAL_VALUE_FLAGS = frozenset(
+    {
+        "--subscription",
+        "--output",
+        "-o",
+        "--query",
+        "--debug",
+        "--verbose",
+        "--only-show-errors",
+    }
+)
+_AZ_GLOBAL_BARE_FLAGS = frozenset({"--help", "-h"})
+
+
+def _strip_cloud_global_flags(
+    tokens: list[str],
+    value_flags: frozenset[str],
+    bare_flags: frozenset[str],
+) -> list[str]:
+    """Return ``tokens`` with leading CLI global flags (and their values) removed.
+
+    Walks past tokens at the start of the argv that are either bare flags
+    (``--quiet``) or value-consuming flags (``--region us-east-1``,
+    ``--profile=prod``). Stops at the first non-flag token (the service /
+    subcommand). The head token (``tokens[0]``) is preserved.
+    """
+    if not tokens:
+        return tokens
+    out = [tokens[0]]
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in bare_flags:
+            i += 1
+            continue
+        if tok in value_flags and i + 1 < len(tokens):
+            i += 2
+            continue
+        # Fused ``--region=us-east-1`` form.
+        if "=" in tok and tok.split("=", 1)[0] in value_flags:
+            i += 1
+            continue
+        # Any other flag we don't know about: skip it but don't consume the
+        # next token (false positives on value-flags we miss are OK because
+        # the matcher then sees the wrong path tuple and falls through; the
+        # alternative — over-consuming — would itself create a bypass).
+        if tok.startswith("-"):
+            i += 1
+            continue
+        break
+    out.extend(tokens[i:])
+    return out
+
+
 _AWS_DESTRUCTIVE_SUBCOMMANDS = {
     "iam": {"delete-user", "delete-role", "delete-access-key", "delete-login-profile"},
     "ec2": {
@@ -2712,9 +2848,16 @@ _AWS_DESTRUCTIVE_SUBCOMMANDS = {
 
 
 def _is_aws_destructive(normalized: str) -> bool:
-    """Return True for ``aws <service> <delete-*>`` calls (non-S3 services)."""
-    tokens = normalized.split()
-    if len(tokens) < 3 or _basename(tokens[0]) != "aws":
+    """Return True for ``aws <service> <delete-*>`` calls (non-S3 services).
+
+    Walks past leading global flags (``aws --region X --profile Y …``) before
+    indexing into the service / subcommand tuple.
+    """
+    raw = normalized.split()
+    if len(raw) < 3 or _basename(raw[0]) != "aws":
+        return False
+    tokens = _strip_cloud_global_flags(raw, _AWS_GLOBAL_VALUE_FLAGS, _AWS_GLOBAL_BARE_FLAGS)
+    if len(tokens) < 3:
         return False
     service = tokens[1]
     if service not in _AWS_DESTRUCTIVE_SUBCOMMANDS:
@@ -2741,10 +2884,16 @@ _GCLOUD_DESTRUCTIVE_PATHS = (
 
 
 def _is_gcloud_destructive(normalized: str) -> bool:
-    """Return True for known-destructive gcloud paths."""
-    tokens = normalized.split()
-    if len(tokens) < 3 or _basename(tokens[0]) != "gcloud":
+    """Return True for known-destructive gcloud paths.
+
+    Walks past leading global flags (``gcloud --quiet --format json …``)
+    before indexing into the path tuple. Any non-recognized flag is treated
+    as bare (skip the token alone) so we don't over-consume.
+    """
+    raw = normalized.split()
+    if len(raw) < 3 or _basename(raw[0]) != "gcloud":
         return False
+    tokens = _strip_cloud_global_flags(raw, _GCLOUD_GLOBAL_VALUE_FLAGS, _GCLOUD_GLOBAL_BARE_FLAGS)
     rest = [t for t in tokens[1:] if not t.startswith("-")]
     return any(
         len(rest) >= len(path) and tuple(rest[: len(path)]) == path
@@ -2775,10 +2924,15 @@ _AZ_DESTRUCTIVE_PATHS = (
 
 
 def _is_az_destructive(normalized: str) -> bool:
-    """Return True for known-destructive az paths."""
-    tokens = normalized.split()
-    if len(tokens) < 3 or _basename(tokens[0]) != "az":
+    """Return True for known-destructive az paths.
+
+    Walks past leading global flags (``az --subscription X --output table …``)
+    before indexing into the path tuple.
+    """
+    raw = normalized.split()
+    if len(raw) < 3 or _basename(raw[0]) != "az":
         return False
+    tokens = _strip_cloud_global_flags(raw, _AZ_GLOBAL_VALUE_FLAGS, _AZ_GLOBAL_BARE_FLAGS)
     rest = [t for t in tokens[1:] if not t.startswith("-")]
     return any(
         len(rest) >= len(path) and tuple(rest[: len(path)]) == path
@@ -2801,17 +2955,26 @@ def _is_iac_destruction(normalized: str) -> bool:
         return True
     if head == "helm" and len(tokens) >= 2 and tokens[1] in {"uninstall", "delete"}:
         return True
-    if (
-        head == "vault"
-        and len(tokens) >= 3
-        and tokens[1] == "kv"
-        and tokens[2]
-        in {
-            "destroy",
-            "metadata",
-        }
-    ):
-        return tokens[2] == "destroy" or (len(tokens) >= 4 and tokens[3] == "delete")
+    if head == "vault" and len(tokens) >= 3:
+        # ``vault kv destroy`` / ``vault kv metadata delete``
+        if tokens[1] == "kv" and tokens[2] in {"destroy", "metadata"}:
+            return tokens[2] == "destroy" or (len(tokens) >= 4 and tokens[3] == "delete")
+        # ``vault token revoke``, ``vault token revoke-self``,
+        # ``vault token revoke-orphan``.
+        if tokens[1] == "token" and tokens[2].startswith("revoke"):
+            return True
+        # ``vault secrets disable``, ``vault secrets move``.
+        if tokens[1] == "secrets" and tokens[2] in {"disable", "move", "tune"}:
+            return tokens[2] == "disable"
+        # ``vault policy delete``.
+        if tokens[1] == "policy" and tokens[2] == "delete":
+            return True
+        # ``vault auth disable`` (removes an auth method).
+        if tokens[1] == "auth" and tokens[2] == "disable":
+            return True
+        # ``vault lease revoke`` / ``vault lease revoke-prefix``.
+        if tokens[1] == "lease" and tokens[2].startswith("revoke"):
+            return True
     if head == "argocd" and len(tokens) >= 3 and tokens[1] == "app" and tokens[2] == "delete":
         return True
     if head == "rclone" and len(tokens) >= 2 and tokens[1] in {"purge", "delete"}:
