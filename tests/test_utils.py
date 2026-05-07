@@ -451,24 +451,27 @@ def test_is_autonomous_mode_rejects_falsy(monkeypatch) -> None:
         assert not is_autonomous_mode(), f"falsy value accepted: {value!r}"
 
 
+# Synthetic credential shapes used to verify the log-redaction catalog.
+# All values are intentionally fake — pragma allowlists silence the
+# detect-secrets pre-push hook on each line.
 REDACTION_CASES = [
-    ("AKIAIOSFODNN7EXAMPLE", "[REDACTED-AWS-ID]"),
-    ("ASIAEXAMPLE12345ABCD", "[REDACTED-AWS-ID]"),
-    ("sk-ant-api03-" + "a" * 64, "[REDACTED-ANTHROPIC-KEY]"),
-    ("sk-proj-" + "B" * 32, "[REDACTED-OPENAI-PROJECT-KEY]"),
-    ("github_pat_" + "A" * 82, "[REDACTED-GITHUB-PAT]"),
-    ("ghp_" + "0" * 36, "[REDACTED-GITHUB-TOKEN]"),
-    ("ghs_" + "0" * 36, "[REDACTED-GITHUB-TOKEN]"),
-    ("glpat-" + "A" * 20, "[REDACTED-GITLAB-PAT]"),
-    ("xoxb-1234567890-abcdef", "[REDACTED-SLACK-TOKEN]"),
-    ("xoxe-1234567890-abcdef", "[REDACTED-SLACK-TOKEN]"),
-    ("rk_live_" + "A" * 24, "[REDACTED-STRIPE-KEY]"),
-    ("sk_test_" + "A" * 24, "[REDACTED-STRIPE-KEY]"),
-    ("SG." + "A" * 22 + "." + "B" * 43, "[REDACTED-SENDGRID-KEY]"),
-    ("npm_" + "A" * 36, "[REDACTED-NPM-TOKEN]"),
-    ("pypi-AgEIcHlwaS5vcmc" + "A" * 80, "[REDACTED-PYPI-TOKEN]"),
+    ("AKIAIOSFODNN7EXAMPLE", "[REDACTED-AWS-ID]"),  # pragma: allowlist secret
+    ("ASIAEXAMPLE12345ABCD", "[REDACTED-AWS-ID]"),  # pragma: allowlist secret
+    ("sk-ant-api03-" + "a" * 64, "[REDACTED-ANTHROPIC-KEY]"),  # pragma: allowlist secret
+    ("sk-proj-" + "B" * 32, "[REDACTED-OPENAI-PROJECT-KEY]"),  # pragma: allowlist secret
+    ("github_pat_" + "A" * 82, "[REDACTED-GITHUB-PAT]"),  # pragma: allowlist secret
+    ("ghp_" + "0" * 36, "[REDACTED-GITHUB-TOKEN]"),  # pragma: allowlist secret
+    ("ghs_" + "0" * 36, "[REDACTED-GITHUB-TOKEN]"),  # pragma: allowlist secret
+    ("glpat-" + "A" * 20, "[REDACTED-GITLAB-PAT]"),  # pragma: allowlist secret
+    ("xoxb-1234567890-abcdef", "[REDACTED-SLACK-TOKEN]"),  # pragma: allowlist secret
+    ("xoxe-1234567890-abcdef", "[REDACTED-SLACK-TOKEN]"),  # pragma: allowlist secret
+    ("rk_live_" + "A" * 24, "[REDACTED-STRIPE-KEY]"),  # pragma: allowlist secret
+    ("sk_test_" + "A" * 24, "[REDACTED-STRIPE-KEY]"),  # pragma: allowlist secret
+    ("SG." + "A" * 22 + "." + "B" * 43, "[REDACTED-SENDGRID-KEY]"),  # pragma: allowlist secret
+    ("npm_" + "A" * 36, "[REDACTED-NPM-TOKEN]"),  # pragma: allowlist secret
+    ("pypi-AgEIcHlwaS5vcmc" + "A" * 80, "[REDACTED-PYPI-TOKEN]"),  # pragma: allowlist secret
     (
-        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV",  # pragma: allowlist secret
         "[REDACTED-JWT]",
     ),
 ]
@@ -498,10 +501,10 @@ def test_log_decision_redacts_known_secret_shapes(
 def test_log_decision_redacts_pem_block(guard_decisions_jsonl: Path) -> None:
     """Multi-line PEM private key blocks must collapse to a single placeholder."""
     pem = (
-        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
-        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABFwAAAAdz\n"
-        "c2gtcnNhAAAAAwEAAQ==\n"
-        "-----END OPENSSH PRIVATE KEY-----"
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"  # pragma: allowlist secret
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABFwAAAAdz\n"  # pragma: allowlist secret
+        "c2gtcnNhAAAAAwEAAQ==\n"  # pragma: allowlist secret
+        "-----END OPENSSH PRIVATE KEY-----"  # pragma: allowlist secret
     )
     log_decision(
         hook_id="guard.test",
@@ -512,7 +515,7 @@ def test_log_decision_redacts_pem_block(guard_decisions_jsonl: Path) -> None:
         session_id="redaction-test",
     )
     line = guard_decisions_jsonl.read_text("utf-8").strip()
-    assert "BEGIN OPENSSH PRIVATE KEY" not in line
+    assert "BEGIN OPENSSH PRIVATE KEY" not in line  # pragma: allowlist secret
     assert "[REDACTED-PRIVATE-KEY]" in line
 
 
@@ -538,11 +541,11 @@ def test_log_decision_redacts_credential_named_kv(guard_decisions_jsonl: Path) -
         tool_name="Bash",
         decision="deny",
         reason="env-set leak",
-        command_excerpt="aws_secret_access_key=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",
+        command_excerpt="aws_secret_access_key=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",  # pragma: allowlist secret
         session_id="redaction-test",
     )
     line = guard_decisions_jsonl.read_text("utf-8").strip()
-    assert "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY" not in line
+    assert "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY" not in line  # pragma: allowlist secret
     assert "[REDACTED]" in line
 
 
