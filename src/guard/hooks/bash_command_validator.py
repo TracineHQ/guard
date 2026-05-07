@@ -274,6 +274,27 @@ _GROUP_OPEN_RE = re.compile(r"^[!(){}\s]+")
 _GROUP_CLOSE_RE = re.compile(r"[;){}!\s]+$")
 
 
+# Bash control-flow keywords that introduce a clause body but are themselves
+# meaningless to the per-form matchers. After ``split_pipeline`` cuts on ``;``,
+# segments like ``then rm -rf /``, ``do rm -rf /``, ``elif true`` start with
+# the keyword instead of the operative head; without stripping it, the head
+# becomes ``then``/``do``/``elif`` and every matcher misses.
+_CONTROL_FLOW_LEADING_KEYWORDS = (
+    "then ",
+    "else ",
+    "elif ",
+    "do ",
+    "in ",
+    ";; ",
+    "if ",
+    "while ",
+    "until ",
+    "for ",
+    "case ",
+)
+_CONTROL_FLOW_TERMINATORS = frozenset({"fi", "done", "esac", ";;"})
+
+
 def _strip_group_wrappers(segment: str) -> str:
     """Strip leading ``(`` / ``{`` / ``!`` and trailing ``)`` / ``}``.
 
@@ -284,6 +305,12 @@ def _strip_group_wrappers(segment: str) -> str:
 
     Leading ``!`` is the bash logical-not prefix: ``! rm -rf /`` runs the
     command and inverts its exit code.
+
+    Also strips leading shell control-flow keywords (``then``, ``do``, ``elif``,
+    ``else``, ``in``, ``;;``) so payloads wrapped in ``if ...; then rm -rf /; fi``
+    or ``for x in 1; do rm -rf /; done`` reach the matchers with the correct
+    head token. Bare ``fi``/``done``/``esac`` segments are dropped entirely
+    (returned as empty string) since they have no operative content.
     """
     s = segment
     while True:
@@ -291,7 +318,23 @@ def _strip_group_wrappers(segment: str) -> str:
         s = _GROUP_OPEN_RE.sub("", s)
         s = _GROUP_CLOSE_RE.sub("", s)
         if s == prev:
-            return s
+            break
+    # Iteratively peel control-flow keywords. Bounded loop — each iteration
+    # strips at most one keyword and the string shrinks, so termination is
+    # guaranteed; the cap is defensive against pathological inputs.
+    for _ in range(8):
+        stripped = s.strip()
+        if stripped in _CONTROL_FLOW_TERMINATORS:
+            return ""
+        peeled = stripped
+        for kw in _CONTROL_FLOW_LEADING_KEYWORDS:
+            if peeled.startswith(kw):
+                peeled = peeled[len(kw) :].lstrip()
+                break
+        else:
+            return peeled
+        s = peeled
+    return s
 
 
 def split_pipeline(command: str) -> list[str]:
@@ -589,6 +632,95 @@ def _normalize_segment(segment: str) -> str:
 _UNICODE_WS_RE = re.compile("[\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]")
 
 
+# ANSI-C quoted strings (Bash Reference Manual §3.1.2.4) decode escape
+# sequences before exec; Python ``shlex`` does not. ``$'\x72\x6d -rf /'`` is
+# what ``rm -rf /`` looks like to the matcher unless we decode here first.
+_ANSI_C_QUOTED_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
+
+
+def _decode_ansi_c_quoted(command: str) -> str:
+    r"""Decode bash ``$'...'`` literals to their byte values.
+
+    Without this, a head spelled ``$'\\x64\\x72\\x6f\\x70\\x64\\x62'`` reaches
+    every per-form matcher as the literal escape string and bypasses the
+    ``dropdb`` head-token check. After decoding, the existing matchers fire on
+    the bash-equivalent form. Decode failures fall back to the original
+    literal so a malformed input doesn't crash the parser.
+    """
+    if "$'" not in command:
+        return command
+
+    def _sub(m: re.Match[str]) -> str:
+        body = m.group(1)
+        try:
+            return body.encode("latin-1", errors="replace").decode(
+                "unicode_escape", errors="replace"
+            )
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            return m.group(0)
+
+    return _ANSI_C_QUOTED_RE.sub(_sub, command)
+
+
+# Bash brace expansion (Bash Reference Manual §3.5.1) runs before word-splitting
+# and is purely textual: ``{a,b}c`` becomes ``ac bc``. Without expansion,
+# ``{r,r}m -rf /`` and ``tee /etc/{sudoers.d/x,profile.d/x.sh}`` reach the
+# matchers as a single literal token and bypass head/operand checks.
+_BRACE_EXPAND_RE = re.compile(r"([^\s{}]*)\{([^{}]+)\}([^\s]*)")
+
+
+def _expand_braces_once(token: str) -> list[str] | None:
+    """Expand a single brace group ``prefix{a,b,c}suffix`` to a list.
+
+    Bounded: refuses to expand ranges (``{1..100}``) and groups with > 32
+    alternatives, since expansion blow-up is itself a DoS surface. Returns
+    ``None`` if no comma-form brace group is present in the token.
+    """
+    m = _BRACE_EXPAND_RE.search(token)
+    if not m or "," not in m.group(2):
+        return None
+    parts = m.group(2).split(",")
+    if len(parts) > 32:
+        return None
+    prefix, suffix = m.group(1), m.group(3)
+    return [f"{prefix}{p}{suffix}" for p in parts]
+
+
+def _expand_braces_in_line(line: str) -> str:
+    """Apply brace expansion to a single newline-free line."""
+    if "{" not in line:
+        return line
+    tokens = line.split()
+    for _ in range(4):
+        out: list[str] = []
+        changed = False
+        for tok in tokens:
+            expanded = _expand_braces_once(tok)
+            if expanded is None:
+                out.append(tok)
+            else:
+                out.extend(expanded)
+                changed = True
+        tokens = out
+        if not changed:
+            break
+    return " ".join(tokens)
+
+
+def _expand_braces(command: str) -> str:
+    """Apply brace expansion to each line, preserving newlines.
+
+    Iterates with a bounded fixpoint so nested forms (``{a,b}{c,d}``) expand
+    fully, but caps at 4 passes to bound cost. This is canonicalization, not
+    perfect reproduction — we only need every alternative to appear so the
+    per-form matchers fire on the dangerous one. Newlines are preserved so
+    ``split_pipeline`` still sees per-line segmentation (comment lines etc.).
+    """
+    if "{" not in command:
+        return command
+    return "\n".join(_expand_braces_in_line(line) for line in command.split("\n"))
+
+
 def _canonicalize(command: str) -> str:
     r"""Fold POSIX line continuations and unicode whitespace to ASCII space.
 
@@ -597,9 +729,13 @@ def _canonicalize(command: str) -> str:
 
     - ``rm \\\n-rf /`` (backslash-newline continuation)
     - ``rm\xa0-rf\xa0/`` (NBSP) and similar unicode whitespace bypasses
+    - ``$'\\x72\\x6d' -rf /`` (ANSI-C quoting hides the head token)
+    - ``{r,r}m -rf /`` (brace expansion produces ``rm rm -rf /``)
     """
     command = command.replace("\\\n", " ")
-    return _UNICODE_WS_RE.sub(" ", command)
+    command = _UNICODE_WS_RE.sub(" ", command)
+    command = _decode_ansi_c_quoted(command)
+    return _expand_braces(command)
 
 
 # Regex matching a shell variable assignment of the form ``KEY=VALUE``.
