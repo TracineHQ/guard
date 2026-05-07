@@ -1430,6 +1430,7 @@ _SYNTH_CHMOD_777_ROOT_DENY = "<chmod 777 against system path>"
 _SYNTH_SENSITIVE_WRITE_DENY = "<write to sensitive destination>"
 _SYNTH_PERSISTENCE_DENY = "<persistence command>"
 _SYNTH_CHMOD_SETUID_DENY = "<chmod setuid/setgid>"
+_SYNTH_CHMOD_SENSITIVE_TARGET_DENY = "<chmod against sensitive path>"
 _SYNTH_SUDO_ESCALATION_DENY = "<sudo interactive escalation>"
 _SYNTH_KERNEL_MOD_DENY = "<kernel module load>"
 _SYNTH_PROCESS_ATTACH_DENY = "<debugger attach to PID>"
@@ -1544,6 +1545,11 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
     _SYNTH_CHMOD_SETUID_DENY: (
         "chmod setting setuid (4xxx, u+s, +s) or setgid (2xxx, g+s) bit. "
         "Creates a privilege-escalation primitive."
+    ),
+    _SYNTH_CHMOD_SENSITIVE_TARGET_DENY: (
+        "chmod with permissive group/other bits against a sensitive path "
+        "(/etc/sudoers, ~/.ssh/, ~/.aws/, ~/.gnupg/, etc.). Restrictive "
+        "hardening modes (600, 400, go-rwx) are allowed."
     ),
     _SYNTH_SUDO_ESCALATION_DENY: (
         "sudo invoking an interactive shell (-i, -s, su, bash, zsh, ...) or "
@@ -2283,19 +2289,78 @@ def _is_chmod_setuid(normalized: str) -> bool:
     return False
 
 
-def _is_chmod_sensitive_target(normalized: str) -> bool:
-    """Return True for ``chmod <mode> <sensitive-path>`` regardless of mode.
+def _chmod_grants_group_or_other(tokens: list[str]) -> bool:
+    """Return True if the chmod mode token grants any group/other access.
 
-    World-readable on ``~/.ssh/id_rsa`` is credential disclosure;
-    world-writable on ``/etc/sudoers`` is privilege escalation. Neither
-    requires recursion or 777, so the existing ``_is_chmod_dangerous`` /
-    ``_is_chmod_setuid`` matchers miss them. This catches the destination
-    angle: any chmod against a sensitive system path or sensitive home tail.
+    Numeric modes: 3 or 4 octal digits — check the last 3 (u/g/o); deny when
+    the group or other digit is non-zero. Symbolic modes: parse comma-clauses
+    of the form ``[ugoa]*[+=]perms`` — a clause whose target includes ``g``,
+    ``o``, or ``a`` and uses ``+`` or ``=`` (not ``-``) is permissive.
+
+    Restrictive shapes (``600``, ``400``, ``700``, ``go-rwx``, ``u+x``) return
+    False so legitimate hardening (``chmod 600 ~/.ssh/id_rsa``) passes.
+    """
+    for tok in tokens[1:]:
+        if tok.startswith("-"):
+            continue
+        if tok.isdigit() and len(tok) in {3, 4}:
+            mode = tok[-3:]
+            return int(mode[1]) != 0 or int(mode[2]) != 0
+        for clause in tok.split(","):
+            target = ""
+            for c in clause:
+                if c in "ugoa":
+                    target += c
+                else:
+                    break
+            rest = clause[len(target) :]
+            if not rest or rest[0] not in "+=":
+                continue
+            if not target or target == "u":
+                continue
+            if any(c in "goa" for c in target):
+                return True
+        return False
+    return False
+
+
+_CHMOD_HOME_SENSITIVE_TAILS = (".ssh/", ".aws/", ".gnupg/", ".config/gh/", ".docker/")
+
+
+def _operand_is_system_sensitive(operand: str) -> bool:
+    """Return True for sensitive system paths where any chmod is suspect."""
+    op = _normalize_home_path(operand)
+    return any(op.startswith(p) for p in _SENSITIVE_DEST_PATTERNS)
+
+
+def _operand_is_home_sensitive(operand: str) -> bool:
+    """Return True for ~/.ssh, ~/.aws, ~/.gnupg etc. where mode-bits matter."""
+    op = _normalize_home_path(operand)
+    if op.startswith("~/"):
+        tail = op[len("~/") :]
+        return any(tail.startswith(p) for p in _CHMOD_HOME_SENSITIVE_TAILS)
+    return any(("/" + p) in op for p in _CHMOD_HOME_SENSITIVE_TAILS)
+
+
+def _is_chmod_sensitive_target(normalized: str) -> bool:
+    """Return True for chmod against a sensitive path with risky semantics.
+
+    System paths (/etc/sudoers, /etc/shadow, ...): any chmod denies — the
+    agent has no business changing modes on system files. Home paths
+    (~/.ssh, ~/.aws, ~/.gnupg): only deny when the mode grants group/other
+    access; ``chmod 600 ~/.ssh/id_rsa`` (the recommended hardening shape)
+    is allowed. Pairs with ``_is_chmod_setuid`` (setuid/setgid) and
+    ``_is_chmod_dangerous`` (recursive 777).
     """
     tokens = normalized.split()
     if len(tokens) < 2 or _basename(tokens[0]) != "chmod":
         return False
-    return any(not t.startswith("-") and _operand_is_sensitive(t) for t in tokens[1:])
+    operands = [t for t in tokens[1:] if not t.startswith("-")]
+    if any(_operand_is_system_sensitive(op) for op in operands):
+        return True
+    if any(_operand_is_home_sensitive(op) for op in operands):
+        return _chmod_grants_group_or_other(tokens)
+    return False
 
 
 # --- sudo escalation ---
@@ -2919,31 +2984,49 @@ def _is_git_submodule_add(normalized: str) -> bool:
     return tokens[1] == "submodule" and tokens[2] == "add"
 
 
+# System roots where ``git worktree add`` has no legitimate reason to write.
+# Excludes /Users/, /home/, /private/ — those host all real user worktrees
+# (e.g. /Users/dev/develop/repo/wt is the canonical macOS shape).
+_WORKTREE_DANGEROUS_PREFIXES = (
+    "/etc/",
+    "/usr/",
+    "/var/",
+    "/bin/",
+    "/sbin/",
+    "/lib/",
+    "/lib64/",
+    "/boot/",
+    "/opt/",
+    "/root/",
+    "/System/",
+    "/Library/",
+    "/dev/",
+)
+
+
 def _is_git_worktree_add(normalized: str) -> bool:
     """Return True for ``git worktree add <path>`` targeting a system path.
 
     Allow ``git worktree list/lock/move/prune/remove/repair`` and the common
     legitimate shapes (``git worktree add ../scratch HEAD``,
-    ``git worktree add /tmp/wt HEAD``). Only deny when the target path
-    resolves under a system root (/etc, /usr, /var, /System, ...) where a
-    worktree would write outside any reasonable project boundary.
+    ``git worktree add /tmp/wt HEAD``, ``git worktree add /Users/dev/.../wt``).
+    Only deny when the target resolves under a system root (/etc, /usr, /var,
+    /System, ...) where a worktree would clobber OS files.
     """
     tokens = normalized.split()
     if len(tokens) < 4 or _basename(tokens[0]) != "git":
         return False
     if tokens[1] != "worktree" or tokens[2] != "add":
         return False
-    # Walk past flags to find the first positional (the worktree path).
     for tok in tokens[3:]:
         if tok.startswith("-"):
             continue
         normalized_op = _normalize_home_path(tok)
         if any(
             normalized_op.startswith(p) or normalized_op == p.rstrip("/")
-            for p in _DANGEROUS_PATH_PREFIXES
+            for p in _WORKTREE_DANGEROUS_PREFIXES
         ):
             return True
-        # First positional consumed; ignore subsequent ones (commit-ish, etc.).
         return False
     return False
 
@@ -2996,7 +3079,7 @@ _PER_FORM_MATCHERS: tuple[tuple[Callable[[str], bool], str], ...] = (
     (_is_sensitive_destination_write, _SYNTH_SENSITIVE_WRITE_DENY),
     (_is_persistence_command, _SYNTH_PERSISTENCE_DENY),
     (_is_chmod_setuid, _SYNTH_CHMOD_SETUID_DENY),
-    (_is_chmod_sensitive_target, _SYNTH_CHMOD_SETUID_DENY),
+    (_is_chmod_sensitive_target, _SYNTH_CHMOD_SENSITIVE_TARGET_DENY),
     (_is_sudo_escalation, _SYNTH_SUDO_ESCALATION_DENY),
     (_is_kernel_module_load, _SYNTH_KERNEL_MOD_DENY),
     (_is_process_attach, _SYNTH_PROCESS_ATTACH_DENY),

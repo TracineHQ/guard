@@ -57,6 +57,23 @@ adheres to [Semantic Versioning](https://semver.org/).
   `tests/integration/test_synth_matchers_coverage.py` exercising every
   matcher family with paired DENY / LEGIT cases.
 
+### Fixed (review pass 2)
+
+- `_is_git_worktree_add` no longer denies `git worktree add /Users/...` /
+  `/home/...` — pass-1 reused `_DANGEROUS_PATH_PREFIXES` which includes user
+  home roots, breaking the canonical worktree shape on macOS/Linux. New
+  `_WORKTREE_DANGEROUS_PREFIXES` excludes `/Users/`, `/home/`, `/private/`.
+- `_is_chmod_sensitive_target` no longer denies hardening commands like
+  `chmod 600 ~/.ssh/id_rsa`. Now: any chmod against system roots
+  (`/etc/sudoers`) denies; chmod against home subset (`~/.ssh`, `~/.aws`,
+  `~/.gnupg`) denies only when the mode grants group/other access.
+- New `_SYNTH_CHMOD_SENSITIVE_TARGET_DENY` label so the audit-log reason
+  no longer claims "setuid/setgid bit" when the trigger was a permissive
+  mode against a sensitive path.
+- CI smoke jobs (`install-smoke`, `testpypi-smoke`) now install
+  `pytest-xdist` so the suite-wide `addopts = -n auto --dist loadfile`
+  doesn't fail with `unrecognized arguments`.
+
 ### Fixed (review pass)
 
 - `_match_always_deny_literal` recognises `prefix=value` form

@@ -188,7 +188,7 @@ jobs:
           # The package under test is hash-pinned; pytest itself is just
           # the harness — drift would only affect failure messages, not
           # the bytes being validated.
-          /tmp/guard-smoke/bin/pip install pytest pytest-cov
+          /tmp/guard-smoke/bin/pip install pytest pytest-cov pytest-xdist
 
           # Confirm `import guard` resolves to the TestPyPI-installed
           # package, not the in-tree src/. If src/ leaked into sys.path

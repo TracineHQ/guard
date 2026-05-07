@@ -945,10 +945,14 @@ GIT_HISTORY_LEGIT = [
     "git worktree list",
     "git worktree remove /tmp/x",
     "git worktree prune",
-    # Common legitimate worktree shapes
+    # Common legitimate worktree shapes — including user-home roots which
+    # were broken in pass-1 (denied because /Users/ and /home/ were in the
+    # generic dangerous-prefix list).
     "git worktree add /tmp/x HEAD",
     "git worktree add ../scratch HEAD",
     "git worktree add ./local-wt HEAD",
+    "git worktree add /Users/dev/develop/repo/wt HEAD",
+    "git worktree add /home/dev/projects/repo/wt HEAD",
     "git reflog show",
     "git gc",  # bare gc (no prune=now) — slower but recoverable
 ]
@@ -1075,19 +1079,42 @@ def test_a4_bun_script_name_not_denied(command: str) -> None:
 
 
 # A6: chmod against sensitive target (no need for -R or 777)
+# - System paths: any chmod denies (agent has no business mode-changing /etc/*)
+# - Home subset (~/.ssh, ~/.aws, ~/.gnupg): only deny if mode grants
+#   group/other access. ``chmod 600 ~/.ssh/id_rsa`` is the recommended
+#   hardening shape and must pass.
 A6_CHMOD_SENSITIVE_DENY = [
     "chmod 666 /etc/sudoers",
     "chmod 644 /etc/passwd",
     "chmod 666 /etc/shadow",
     "chmod 777 ~/.ssh/authorized_keys",
-    "chmod 644 ~/.ssh/id_rsa",
+    "chmod 644 ~/.ssh/id_rsa",  # group-readable on private key
     "chmod 660 /etc/sudoers.d/x",
+    "chmod 770 ~/.aws/credentials",
+    "chmod g+r ~/.ssh/id_rsa",
+    "chmod o+rw ~/.aws/credentials",
+    "chmod a=rwx ~/.gnupg/secring.gpg",
+]
+
+# Hardening / restrictive shapes — must NOT trip the matcher.
+A6_CHMOD_SENSITIVE_LEGIT = [
+    "chmod 600 ~/.ssh/id_rsa",
+    "chmod 400 ~/.ssh/id_rsa",
+    "chmod 700 ~/.ssh",
+    "chmod 600 ~/.aws/credentials",
+    "chmod go-rwx ~/.ssh/id_rsa",
+    "chmod u+x ~/.ssh/id_rsa",
 ]
 
 
 @pytest.mark.parametrize("command", A6_CHMOD_SENSITIVE_DENY)
 def test_a6_chmod_sensitive_target_denied(command: str) -> None:
     assert _is_deny(decide(command)), f"chmod sensitive bypass: {command!r}"
+
+
+@pytest.mark.parametrize("command", A6_CHMOD_SENSITIVE_LEGIT)
+def test_a6_chmod_hardening_allowed(command: str) -> None:
+    assert not _is_deny(decide(command)), f"chmod hardening false-positive: {command!r}"
 
 
 # A7: --help short-circuit must be FIRST arg after exec, not anywhere

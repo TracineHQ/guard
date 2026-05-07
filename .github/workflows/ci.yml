@@ -189,7 +189,7 @@ jobs:
           set -eux
           # Install test deps into the same venv. Only what tests import —
           # ruff/mypy/vulture have their own jobs and aren't needed here.
-          /tmp/guard-smoke/bin/pip install pytest pytest-cov
+          /tmp/guard-smoke/bin/pip install pytest pytest-cov pytest-xdist
 
           # Confirm `import guard` resolves to the wheel-installed package,
           # not the in-tree src/. pytest's rootdir gets prepended to sys.path
