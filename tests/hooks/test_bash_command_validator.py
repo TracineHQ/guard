@@ -237,9 +237,9 @@ class TestSubprocessIntegration:
         decision, _ = _run('# query\nsqlite3 db.sqlite "SELECT * FROM users"', tmp_path)
         assert decision == "allow"
 
-    def test_sqlite3_drop_passthrough(self, tmp_path):
+    def test_sqlite3_drop_denied(self, tmp_path):
         decision, _ = _run('# cleanup\nsqlite3 db.sqlite "DROP TABLE users"', tmp_path)
-        assert decision == "passthrough"
+        assert decision == "deny"
 
     def test_bash_command_validator_denies_unsafe_input(self, tmp_path):
         # gh auth token is hard-denied

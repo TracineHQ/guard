@@ -113,11 +113,46 @@ def check_generated_footers(message: str) -> str | None:
 # stream / non-regular file — the caller must deny rather than treat as
 # "no message".
 STREAM_FILE_SENTINEL = "\x00guard:stream-file\x00"
+# Sentinel returned when the path resolves outside the allowed scope (cwd or
+# system temp dirs). Caller denies with a content-disclosure warning rather
+# than letting git read /etc/passwd as a "commit message".
+OUT_OF_SCOPE_SENTINEL = "\x00guard:out-of-scope\x00"
 
 # Path forms that always indicate an attacker-controlled stream input git
 # would read at runtime — the validator cannot pre-read these reliably.
 _STREAM_LITERAL_PATHS: frozenset[str] = frozenset({"/dev/stdin", "/dev/null", "/dev/fd/0", "-"})
 _STREAM_PATH_PREFIXES: tuple[str, ...] = ("/dev/fd/", "/proc/self/fd/")
+
+# System paths that must NEVER be read as a commit message body. The
+# validator pre-reads `-F <path>` to scan for AI-attribution markers; if an
+# agent points -F at /etc/passwd, /etc/shadow, ~/.ssh/id_rsa, etc., the
+# file's contents land in the commit and (worse) in the hook's logs. Refuse
+# regardless of intent — there is no legitimate "commit message" under any
+# of these roots.
+_SENSITIVE_READ_PREFIXES: tuple[str, ...] = (
+    "/etc/",
+    "/proc/",
+    "/sys/",
+    "/var/log/",
+    "/var/db/",
+    "/private/etc/",
+    "/private/var/log/",
+    "/private/var/db/",
+    "/root/",
+    "/boot/",
+    "/dev/",
+)
+# Home-relative sensitive subtrees (resolved against the current user's home).
+_SENSITIVE_HOME_TAILS: tuple[str, ...] = (
+    ".ssh/",
+    ".aws/",
+    ".gnupg/",
+    ".config/gh/",
+    ".kube/",
+    ".docker/config.json",
+    ".netrc",
+    ".pgpass",
+)
 
 
 def _looks_like_stream_path(path: str) -> bool:
@@ -140,8 +175,63 @@ def _looks_like_stream_path(path: str) -> bool:
     return bool(stat.S_ISCHR(mode) or stat.S_ISFIFO(mode) or stat.S_ISBLK(mode))
 
 
+def _is_path_in_scope(resolved: Path, cwd: str | None) -> bool:
+    """Return True if ``resolved`` is under cwd or a process-temp directory.
+
+    The validator pre-reads `-F <path>` to scan for AI-attribution markers.
+    Restricting reads to (cwd subtree | system temp) prevents an agent from
+    using `git commit -F /etc/passwd` to disclose arbitrary file contents
+    via the commit body. The temp allowance covers the common
+    `~/.cache/guard/msg.txt`-style flow that legitimately stages a message.
+    """
+    try:
+        resolved_str = str(resolved)
+    except (ValueError, OSError):
+        return False
+    # Always allow standard temp roots; agents commonly stage commit bodies
+    # there before invoking git.
+    temp_prefixes = (
+        "/tmp/",
+        "/var/folders/",  # macOS user temp
+        "/var/tmp/",
+        "/private/tmp/",  # macOS realpath form
+        "/private/var/folders/",
+        "/private/var/tmp/",
+    )
+    if any(resolved_str.startswith(p) or resolved_str == p.rstrip("/") for p in temp_prefixes):
+        return True
+    if cwd:
+        try:
+            cwd_resolved = Path(cwd).resolve()
+        except (ValueError, OSError):
+            return False
+        try:
+            resolved.relative_to(cwd_resolved)
+        except ValueError:
+            return False
+        return True
+    return False
+
+
+def _is_sensitive_read_target(resolved: Path) -> bool:
+    """Return True if ``resolved`` falls under a content-disclosure-sensitive root."""
+    resolved_str = str(resolved)
+    if any(resolved_str.startswith(p) for p in _SENSITIVE_READ_PREFIXES):
+        return True
+    try:
+        home = Path.home()
+    except (RuntimeError, OSError):
+        return False
+    try:
+        rel = resolved.relative_to(home)
+    except ValueError:
+        return False
+    rel_str = str(rel)
+    return any(rel_str.startswith(t) or rel_str == t.rstrip("/") for t in _SENSITIVE_HOME_TAILS)
+
+
 def _read_message_file(path: str, cwd: str | None) -> str | None:
-    """Read a commit-message file safely, returning its text or ``None``.
+    """Read a commit-message file safely, returning its text or a sentinel.
 
     Resolves ``~`` and, for relative paths, joins against ``cwd`` (the hook
     payload's reported working directory). Caps reads at
@@ -149,9 +239,13 @@ def _read_message_file(path: str, cwd: str | None) -> str | None:
     soft-DoS the regex pipeline. Any I/O failure returns ``None`` — git will
     surface the underlying error to the user when the commit runs.
 
-    If the path is a stream / FIFO / character device / fd, returns the
-    sentinel ``STREAM_FILE_SENTINEL`` so the caller can deny with a clear
-    message rather than silently passing through.
+    Returns ``STREAM_FILE_SENTINEL`` if the path is a stream / FIFO / fd
+    (caller denies — we cannot pre-read these reliably).
+    Returns ``OUT_OF_SCOPE_SENTINEL`` if the path resolves outside cwd /
+    system temp OR under a content-disclosure-sensitive system path
+    (/etc, /proc, /sys, ~/.ssh, ~/.aws, ~/.gnupg, etc.). Without this
+    check, ``git commit -F /etc/passwd`` would disclose file contents
+    through the commit body.
     """
     if not path:
         return None
@@ -162,6 +256,27 @@ def _read_message_file(path: str, cwd: str | None) -> str | None:
         p = Path(cwd) / p
     if _looks_like_stream_path(str(p)):
         return STREAM_FILE_SENTINEL
+    # Nonexistent paths fall through to the open() below, which will OSError
+    # and return None — git surfaces "fatal: could not open file" itself.
+    # We only enforce scope/sensitive-target denies on paths that actually
+    # exist; otherwise a typo would surface as a confusing security error.
+    if not p.exists():
+        try:
+            with p.open("rb") as fh:
+                fh.read(1)
+        except OSError as exc:
+            _log_debug(f"commit_message_validator: cannot read {path!r}: {exc}")
+        return None
+    try:
+        resolved = p.resolve()
+    except (ValueError, OSError):
+        return None
+    # Sensitive-system check FIRST so even a path under cwd that symlinks
+    # to /etc/passwd still gets refused.
+    if _is_sensitive_read_target(resolved):
+        return OUT_OF_SCOPE_SENTINEL
+    if not _is_path_in_scope(resolved, cwd):
+        return OUT_OF_SCOPE_SENTINEL
     try:
         with p.open("rb") as fh:
             raw = fh.read(_FILE_MESSAGE_MAX_BYTES + 1)
@@ -176,7 +291,7 @@ def _read_message_file(path: str, cwd: str | None) -> str | None:
     return raw.decode("utf-8", errors="replace")
 
 
-def _extract_file_flag_path(command: str) -> str | None:  # noqa: PLR0911 -- linear flag-form dispatch; each early-return matches one git -F syntax
+def _extract_file_flag_path(command: str) -> str | None:
     """Return the path argument to ``-F`` / ``--file=`` / ``-F=`` / ``-F-``.
 
     Tokenizes via ``shlex`` so quoted paths and embedded spaces are handled.
@@ -279,6 +394,14 @@ _STREAM_DENY_REASON = (
     "`git commit -F <path>`."
 )
 
+_OUT_OF_SCOPE_DENY_REASON = (
+    "Commit message file resolves outside the working directory or under a "
+    "content-disclosure-sensitive system path (/etc, /proc, /sys, ~/.ssh, "
+    "~/.aws, ~/.gnupg, etc.). Reading these as a 'commit message' would "
+    "leak file contents into the commit body and the hook log. Stage the "
+    "message under the working directory or a temp dir, then re-run."
+)
+
 _OPAQUE_SOURCE_DENY_REASON = (
     "Commit message uses a shell shape this validator cannot inspect: "
     "ANSI-C ``$'...'`` quoting, ``$VAR`` / ``${VAR}`` expansion, command "
@@ -371,6 +494,8 @@ def decide(command: str, cwd: str | None = None) -> dict[str, Any] | None:
 
     if message is STREAM_FILE_SENTINEL or message == STREAM_FILE_SENTINEL:
         return emit_pretooluse_decision("deny", _STREAM_DENY_REASON)
+    if message is OUT_OF_SCOPE_SENTINEL or message == OUT_OF_SCOPE_SENTINEL:
+        return emit_pretooluse_decision("deny", _OUT_OF_SCOPE_DENY_REASON)
 
     for checker in (check_ai_emails, check_ai_trailers, check_generated_footers):
         match = checker(message)

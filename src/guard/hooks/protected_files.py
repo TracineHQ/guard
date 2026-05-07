@@ -53,11 +53,30 @@ PROTECTED_PATTERNS: list[str] = [
     "hooks/protected_files.py",
     "hooks/commit_message_validator.py",
     "hooks/agent_output_guard.py",
+    # Git infrastructure: a write to .git/hooks/ replaces the repo's own
+    # hook scripts, which run on every commit/push. .git/config holds
+    # exec sinks (core.hooksPath, alias.* w/ !shell). .gitmodules can
+    # auto-fetch attacker-controlled submodule URLs whose own hooks fire
+    # during init. .git/info/attributes overrides .gitattributes (filter.*
+    # exec sinks). All of these turn a "harmless" write into RCE.
+    ".git/hooks",
+    ".git/config",
+    ".git/info/attributes",
+    ".git/info/exclude",
+    ".gitmodules",
+    ".gitattributes",
 ]
 
 
 def is_protected(file_path: str) -> str | None:
-    """Return the matched protected pattern for ``file_path``, else ``None``."""
+    """Return the matched protected pattern for ``file_path``, else ``None``.
+
+    A pattern matches if ``file_path`` either:
+    - ends with the pattern (file-pattern match: ``.git/config`` matches
+      ``/repo/.git/config``)
+    - contains ``/<pattern>/`` (directory-pattern match: ``.git/hooks``
+      matches ``/repo/.git/hooks/pre-commit``)
+    """
     if not file_path:
         return None
     try:
@@ -67,12 +86,18 @@ def is_protected(file_path: str) -> str | None:
 
     resolved_str = str(resolved)
     for pattern in PROTECTED_PATTERNS:
-        # Match /<...>/pattern to avoid false positives like /not_<...>/file.py
+        # Exact-suffix match (file pattern).
         if (
             resolved_str.endswith(pattern)
             and len(resolved_str) > len(pattern)
             and resolved_str[-(len(pattern) + 1)] == "/"
         ):
+            return pattern
+        # Directory-pattern match: ``/<pattern>/`` appears anywhere in the
+        # resolved path. Catches ``.git/hooks/pre-commit`` matching the
+        # ``.git/hooks`` directory pattern. Skip patterns containing ``.``
+        # in the LAST segment (those are always file patterns, not dirs).
+        if "/" + pattern + "/" in resolved_str:
             return pattern
     return None
 

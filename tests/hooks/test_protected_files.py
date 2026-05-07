@@ -36,11 +36,15 @@ class TestIsProtected:
         # Shouldn't match when 'hooks/' prefix is missing from the suffix
         assert is_protected("/some/path/not_hooks/command_registry.py") is None
 
-    def test_all_patterns_end_with_py_or_json(self):
-        # Patterns now include both .py hook files and .json settings files;
-        # widen the invariant to cover both.
+    def test_all_patterns_end_with_py_json_or_git_path(self):
+        # Patterns now include .py hook files, .json settings files, and
+        # git-infra paths (.git/hooks, .git/config, .gitmodules, etc.).
         for p in PROTECTED_PATTERNS:
-            assert p.endswith((".py", ".json"))
+            assert (
+                p.endswith((".py", ".json"))
+                or p.startswith((".git/", ".gitmodules", ".gitattributes"))
+                or p == ".git"
+            )
 
     def test_matches_claude_settings_json(self):
         # Edits to ~/.claude/settings.json must surface for review — that
