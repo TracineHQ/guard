@@ -26,6 +26,23 @@ _HOOK_ID = "guard.protected_files"
 
 _CP_MV_INSTALL_MIN_OPERANDS = 2  # need both <src> and <dst>
 
+# Trust-root patterns whose protection MUST NOT be allowlist-bypassable.
+# An attacker (or a confused agent) who lands one ASK-approved write to the
+# allowlist file, then sets ``disable_rules: ["guard.protected_files"]``,
+# would silence every subsequent edit to every protected file — including
+# subsequent edits to the allowlist itself. The same applies to
+# ``.claude/settings*.json`` (the wiring that decides whether guard's hooks
+# fire at all). For these, the allowlist override is intentionally refused;
+# the user always sees an ASK. Other protected files (their CLAUDE.md, etc.)
+# remain user-overridable through the normal allowlist mechanisms.
+_UN_OVERRIDABLE_PATTERNS: frozenset[str] = frozenset(
+    {
+        ".claude/guard/allowlist.json",
+        ".claude/settings.json",
+        ".claude/settings.local.json",
+    }
+)
+
 # Files that define security policy for all Claude Code sessions.
 # Changes to these affect every repo and every agent.
 PROTECTED_PATTERNS: list[str] = [
@@ -728,19 +745,23 @@ def hook(payload: dict[str, Any]) -> None:
     cwd_str = cwd_val if isinstance(cwd_val, str) else None
     session_id = str(payload.get("session_id", ""))
 
-    bypass = hook_bypass_reason(load_allowlist(), _HOOK_ID, excerpt)
-    if bypass is not None:
-        log_decision(
-            hook_id=_HOOK_ID,
-            event="PreToolUse",
-            tool_name=tool_name,
-            decision="pass",
-            reason=bypass,
-            command_excerpt=excerpt,
-            session_id=session_id,
-            cwd=cwd_str,
-        )
-        return
+    # Trust-root protections are NOT allowlist-bypassable: writes to the
+    # allowlist itself or to ``.claude/settings*.json`` always go through
+    # ASK regardless of any ``disable_rules`` / ``allow_commands`` entry.
+    if matched not in _UN_OVERRIDABLE_PATTERNS:
+        bypass = hook_bypass_reason(load_allowlist(), _HOOK_ID, excerpt)
+        if bypass is not None:
+            log_decision(
+                hook_id=_HOOK_ID,
+                event="PreToolUse",
+                tool_name=tool_name,
+                decision="pass",
+                reason=bypass,
+                command_excerpt=excerpt,
+                session_id=session_id,
+                cwd=cwd_str,
+            )
+            return
 
     reason = f"Protected file: {matched} — confirm edit"
     envelope = emit_pretooluse_decision("ask", reason)

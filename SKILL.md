@@ -40,9 +40,64 @@ When **both** are set, the file wins (more deliberate artifact). Pattern syntax 
 
 The patterns resolve at hook-call time, so live edits take effect on the next tool call without restarting Claude Code.
 
-## Disabling individual hooks
+## Allowlist (per-rule disable + per-command override)
 
-Remove the hook's entry from `~/.claude/settings.json` PreToolUse, or comment out the corresponding line in `<plugin>/hooks/hooks.json` if you forked.
+When guard's default policy is too strict for a specific command or file, the allowlist lets you turn off a rule by id, or allow one exact command, without forking the plugin.
+
+### File locations
+
+Both files use the same JSON schema; the project file wins on per-rule conflicts.
+
+- **Project**: `.claude/guard/allowlist.json` (rooted at the working directory — committable to the repo).
+- **Global**: `~/.claude/guard/allowlist.json` (per-user, applies to every project).
+
+### Schema
+
+```json
+{
+  "disable_rules": ["bash.disk_destruction"],
+  "allow_commands": [
+    {
+      "rule": "guard.protected_files",
+      "command": "/repo/CLAUDE.md",
+      "reason": "intentional CLAUDE.md update for the rebrand task"
+    }
+  ]
+}
+```
+
+- `disable_rules` — list of rule ids that bypass entirely. Use `guard allowlist rules` to see all known ids. The bash hook uses ids like `bash.disk_destruction`, `bash.git_history_destruction`. Other hooks use the hook id itself (`guard.protected_files`, `guard.commit_message_validator`, etc.).
+- `allow_commands` — exact-string match. The `command` is matched against the bash command (for `bash_command_validator`) or the file path (for `protected_files`). `reason` is required and gets logged on every bypass.
+
+### CLI
+
+```
+guard allowlist list                                 # show effective merged config
+guard allowlist rules                                # all known rule ids
+guard allowlist disable-rule <rule-id> --reason "..."
+guard allowlist enable-rule <rule-id>
+guard allowlist allow-command <rule-id> <command> --reason "..."
+guard allowlist remove-command <rule-id> <command>
+```
+
+All mutation commands take `--scope project|global` (default: `project`).
+
+### Trust-root: un-overridable protections
+
+Three paths under `protected_files` are NOT allowlist-bypassable. Even with `disable_rules: ["guard.protected_files"]` or an exact-path `allow_commands` entry, edits to these always go through ASK:
+
+- `.claude/guard/allowlist.json` — the allowlist itself (writes here would let an attacker grant themselves further overrides).
+- `.claude/settings.json`, `.claude/settings.local.json` — Claude Code wiring (writes here could remove guard's hooks entirely).
+
+Other protected files (your `CLAUDE.md`, `.cursorrules`, etc.) are user-overridable through the normal mechanisms.
+
+### Audit trail
+
+Every allowlist bypass is logged as a `decision="pass"` record with the bypass reason, so you can grep the audit log to see which rules were silenced and why.
+
+## Disabling individual hooks entirely
+
+Prefer the allowlist (above) when you only need to silence a specific rule or command. To remove a whole hook from the harness, delete its entry from `~/.claude/settings.json` PreToolUse, or comment out the corresponding line in `<plugin>/hooks/hooks.json` if you forked.
 
 ## Log inspection
 

@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — allowlist (per-rule disable + per-command override)
+
+- Per-rule `disable_rules` and per-command `allow_commands` mechanisms
+  let users silence individual rules or specific commands without
+  forking the plugin. Project-scoped (`.claude/guard/allowlist.json`)
+  and global (`~/.claude/guard/allowlist.json`) allowlists merge with
+  project precedence. CLI: `guard allowlist {list,rules,disable-rule,
+  enable-rule,allow-command,remove-command}` with `--scope`. Every
+  bypass is logged as a `decision="pass"` audit record. See `SKILL.md`.
+- `protected_files` trust-root: writes to `.claude/guard/allowlist.json`
+  and `.claude/settings*.json` are NOT allowlist-bypassable — those
+  files control whether guard runs at all and whether allowlist
+  overrides apply, so they always go through ASK.
+
 ### Changed — shared safe-IO primitives
 
 - New `guard._safe_io` module consolidates the cwd/temp scope check,

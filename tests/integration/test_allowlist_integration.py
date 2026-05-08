@@ -297,3 +297,83 @@ def test_protected_files_exact_path_does_not_match_other_paths(
     # An "ask" envelope was emitted.
     assert "permissionDecision" in out
     assert "ask" in out
+
+
+# === Trust-root: allowlist cannot bypass writes to allowlist itself / settings ===
+
+
+@pytest.mark.parametrize(
+    "trust_root_path",
+    [
+        "/repo/.claude/guard/allowlist.json",
+        "/repo/.claude/settings.json",
+        "/repo/.claude/settings.local.json",
+    ],
+)
+def test_protected_files_trust_root_unbypassable_by_disable_rules(
+    allowlist_home: Path,
+    decision_log_env: Path,
+    capsys: pytest.CaptureFixture[str],
+    trust_root_path: str,
+) -> None:
+    """A blanket ``disable_rules: ["guard.protected_files"]`` MUST NOT silence
+    edits to the allowlist itself or to ``.claude/settings*.json`` — those
+    files control whether guard runs at all and whether allowlist overrides
+    apply, so the user always sees an ASK for them.
+    """
+    from guard.hooks.protected_files import hook
+
+    _write_allowlist(
+        allowlist_home / "allowlist.json", {"disable_rules": ["guard.protected_files"]}
+    )
+    payload = {
+        "tool_name": "Edit",
+        "tool_input": {"file_path": trust_root_path, "old_string": "x", "new_string": "y"},
+        "session_id": "s1",
+    }
+    hook(payload)
+    out = capsys.readouterr().out
+    assert "permissionDecision" in out
+    assert "ask" in out
+
+
+@pytest.mark.parametrize(
+    "trust_root_path",
+    [
+        "/repo/.claude/guard/allowlist.json",
+        "/repo/.claude/settings.json",
+        "/repo/.claude/settings.local.json",
+    ],
+)
+def test_protected_files_trust_root_unbypassable_by_allow_command(
+    allowlist_home: Path,
+    decision_log_env: Path,
+    capsys: pytest.CaptureFixture[str],
+    trust_root_path: str,
+) -> None:
+    """An exact-path ``allow_commands`` entry for a trust-root file MUST NOT
+    silence the ASK either. Trust roots are always-ASK.
+    """
+    from guard.hooks.protected_files import hook
+
+    _write_allowlist(
+        allowlist_home / "allowlist.json",
+        {
+            "allow_commands": [
+                {
+                    "rule": "guard.protected_files",
+                    "command": trust_root_path,
+                    "reason": "should NOT bypass — trust root",
+                }
+            ]
+        },
+    )
+    payload = {
+        "tool_name": "Edit",
+        "tool_input": {"file_path": trust_root_path, "old_string": "x", "new_string": "y"},
+        "session_id": "s1",
+    }
+    hook(payload)
+    out = capsys.readouterr().out
+    assert "permissionDecision" in out
+    assert "ask" in out
