@@ -48,6 +48,70 @@ from guard._utils import GUARD_HOME
 
 PROJECT_ALLOWLIST_RELPATH = Path(".claude") / "guard" / "allowlist.json"
 
+# All known rule_ids users can put on disable_rules / allow_commands.rule.
+# Synthesised at module load from the bash matchers' rule_ids plus the
+# whole-hook rule_ids of the other four hooks. Sorted for deterministic
+# CLI output. Keep this list in sync with the matchers it documents — it
+# is the single source of truth for ``guard allowlist rules``.
+KNOWN_RULE_IDS: tuple[str, ...] = (
+    # Bash: ALWAYS_DENY layer (coarse).
+    "bash.always_deny",
+    # Bash: synthetic matchers (fine-grained, one per matcher func).
+    "bash.aws_destructive",
+    "bash.aws_s3_destructive",
+    "bash.az_destructive",
+    "bash.cargo_remote_install",
+    "bash.chmod_dangerous",
+    "bash.chmod_sensitive_target",
+    "bash.chmod_setuid",
+    "bash.credential_leak",
+    "bash.dangerous_env_sink",
+    "bash.dangerous_interpreter",
+    "bash.dangerous_rm",
+    "bash.db_cli_destructive",
+    "bash.disk_destruction",
+    "bash.dns_exfil",
+    "bash.dropdb_or_mysqladmin",
+    "bash.env_split_string",
+    "bash.eval_builtin",
+    "bash.exec_wrapper",
+    "bash.function_definition",
+    "bash.gcloud_destructive",
+    "bash.gem_remote_install",
+    "bash.gh_api_destructive",
+    "bash.git_config_injection",
+    "bash.git_force_refspec",
+    "bash.git_submodule_add",
+    "bash.git_worktree_add",
+    "bash.glob_head",
+    "bash.go_remote_install",
+    "bash.gpg_secret_delete",
+    "bash.helm_remote_install",
+    "bash.iac_destruction",
+    "bash.kernel_module_load",
+    "bash.kubectl_destructive",
+    "bash.mongo_destructive",
+    "bash.network_policy_wipe",
+    "bash.npm_url_install",
+    "bash.npx_remote",
+    "bash.persistence",
+    "bash.pip_install_url",
+    "bash.pipe_to_interpreter",
+    "bash.process_attach",
+    "bash.remote_shell_wrapper",
+    "bash.sensitive_write",
+    "bash.shell_wrapper",
+    "bash.sudo_escalation",
+    "bash.trap_exploit",
+    "bash.var_expanded_head",
+    "bash.wrapper_stacking",
+    # Other hooks: whole-hook disable only in v1.0; the rule_id IS the hook_id.
+    "guard.commit_message_validator",
+    "guard.credential_check",
+    "guard.git_c_validator",
+    "guard.protected_files",
+)
+
 
 class AllowlistError(ValueError):
     """Raised when an allowlist file is structurally invalid (not a JSON object)."""
@@ -196,6 +260,146 @@ def hook_bypass_reason(allowlist: Allowlist, hook_id: str, excerpt: str) -> str 
     if entry is not None:
         return f"allowlist: {entry.reason} (rule={hook_id})"
     return None
+
+
+# === Mutation API (CLI helpers) ===
+#
+# Each mutation reads the file, edits in-memory, writes back atomically. The
+# format is human-friendly: 2-space indent, sorted keys at the top level,
+# trailing newline. Files don't have to exist before mutation — they're
+# created on first add. Empty after a remove? We leave the empty document
+# rather than delete the file so users can git-track its presence.
+
+
+_ALLOWLIST_FILE_TEMPLATE: dict[str, list[Any]] = {
+    "disable_rules": [],
+    "allow_commands": [],
+}
+
+
+def _read_raw(path: Path) -> dict[str, Any]:
+    """Read+parse an allowlist file. Returns an empty template if absent."""
+    if not path.exists():
+        return {"disable_rules": [], "allow_commands": []}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {"disable_rules": [], "allow_commands": []}
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return {"disable_rules": [], "allow_commands": []}
+    if not isinstance(data, dict):
+        return {"disable_rules": [], "allow_commands": []}
+    rules = data.get("disable_rules") or []
+    cmds = data.get("allow_commands") or []
+    return {
+        "disable_rules": list(rules) if isinstance(rules, list) else [],
+        "allow_commands": list(cmds) if isinstance(cmds, list) else [],
+    }
+
+
+def _write_raw(path: Path, doc: dict[str, Any]) -> None:
+    """Atomically write the doc with mode 0o600 inside a 0o700 parent dir."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    text = json.dumps(doc, indent=2, sort_keys=False) + "\n"
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+    with contextlib.suppress(OSError):
+        path.chmod(0o600)
+
+
+def add_disable_rule(rule_id: str, *, scope: str = "project", cwd: Path | None = None) -> bool:
+    """Add ``rule_id`` to the chosen scope's ``disable_rules``.
+
+    Returns ``True`` if the rule was added, ``False`` if it was already
+    present (idempotent).
+    """
+    path = _resolve_scope_path(scope, cwd)
+    doc = _read_raw(path)
+    rules: list[Any] = doc["disable_rules"]
+    if rule_id in rules:
+        return False
+    rules.append(rule_id)
+    _write_raw(path, doc)
+    return True
+
+
+def remove_disable_rule(rule_id: str, *, scope: str = "project", cwd: Path | None = None) -> bool:
+    """Remove ``rule_id`` from the chosen scope's ``disable_rules``.
+
+    Returns ``True`` if the rule was removed, ``False`` if it wasn't
+    present (idempotent).
+    """
+    path = _resolve_scope_path(scope, cwd)
+    doc = _read_raw(path)
+    rules: list[Any] = doc["disable_rules"]
+    if rule_id not in rules:
+        return False
+    doc["disable_rules"] = [r for r in rules if r != rule_id]
+    _write_raw(path, doc)
+    return True
+
+
+def add_allow_command(
+    *,
+    rule: str,
+    command: str,
+    reason: str,
+    scope: str = "project",
+    cwd: Path | None = None,
+) -> bool:
+    """Add an exact-command override to the chosen scope's ``allow_commands``.
+
+    Returns ``True`` if added, ``False`` if an entry with the same
+    ``(rule, command)`` already exists (idempotent — does not update the
+    reason; remove first to change a reason).
+    """
+    path = _resolve_scope_path(scope, cwd)
+    doc = _read_raw(path)
+    cmds: list[Any] = doc["allow_commands"]
+    for e in cmds:
+        if isinstance(e, dict) and e.get("rule") == rule and e.get("command") == command:
+            return False
+    cmds.append({"rule": rule, "command": command, "reason": reason})
+    _write_raw(path, doc)
+    return True
+
+
+def remove_allow_command(
+    *,
+    rule: str,
+    command: str,
+    scope: str = "project",
+    cwd: Path | None = None,
+) -> bool:
+    """Remove an exact-command override matching ``(rule, command)``.
+
+    Returns ``True`` if removed, ``False`` if no matching entry was found.
+    """
+    path = _resolve_scope_path(scope, cwd)
+    doc = _read_raw(path)
+    cmds: list[Any] = doc["allow_commands"]
+    new = [
+        e
+        for e in cmds
+        if not (isinstance(e, dict) and e.get("rule") == rule and e.get("command") == command)
+    ]
+    if len(new) == len(cmds):
+        return False
+    doc["allow_commands"] = new
+    _write_raw(path, doc)
+    return True
+
+
+def _resolve_scope_path(scope: str, cwd: Path | None) -> Path:
+    if scope == "global":
+        return global_allowlist_path()
+    if scope == "project":
+        return project_allowlist_path(cwd)
+    msg = f"unknown scope {scope!r} (expected 'global' or 'project')"
+    raise ValueError(msg)
 
 
 def load_allowlist(cwd: Path | None = None) -> Allowlist:

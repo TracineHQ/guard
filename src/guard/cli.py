@@ -34,6 +34,15 @@ from typing import TYPE_CHECKING, Any
 
 from guard import __version__
 from guard._utils import GUARD_DECISIONS_PATH
+from guard.allowlist import (
+    KNOWN_RULE_IDS,
+    _resolve_scope_path,
+    add_allow_command,
+    add_disable_rule,
+    load_allowlist,
+    remove_allow_command,
+    remove_disable_rule,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -549,6 +558,141 @@ def _since_repr(since: timedelta | None) -> str:
     return f"{minutes}m"
 
 
+# === guard allowlist ===
+
+
+def cmd_allowlist_list() -> tuple[dict[str, Any], str]:
+    """Show effective merged allowlist (project + global)."""
+    al = load_allowlist()
+    payload = {
+        "disable_rules": sorted(al.disable_rules),
+        "allow_commands": [
+            {"rule": e.rule, "command": e.command, "reason": e.reason, "source": e.source}
+            for e in al.allow_commands
+        ],
+        "sources": [str(p) for p in al.sources],
+    }
+    if not al.disable_rules and not al.allow_commands:
+        pretty = "allowlist: empty (no project or global allowlist file present)\n"
+    else:
+        lines = ["allowlist (effective merged view):"]
+        if al.disable_rules:
+            lines.append("  disable_rules:")
+            lines.extend(f"    - {r}" for r in sorted(al.disable_rules))
+        if al.allow_commands:
+            lines.append("  allow_commands:")
+            for e in al.allow_commands:
+                lines.append(f"    - rule:    {e.rule}")
+                lines.append(f"      command: {e.command}")
+                lines.append(f"      reason:  {e.reason}")
+                lines.append(f"      source:  {e.source}")
+        if al.sources:
+            lines.append("  sources:")
+            lines.extend(f"    - {p}" for p in al.sources)
+        pretty = "\n".join(lines) + "\n"
+    return payload, pretty
+
+
+def cmd_allowlist_rules() -> tuple[dict[str, Any], str]:
+    """List all known rule_ids you can put on disable_rules / allow_commands.rule."""
+    payload = {"rules": list(KNOWN_RULE_IDS)}
+    pretty = "known rule_ids:\n" + "\n".join(f"  {r}" for r in KNOWN_RULE_IDS) + "\n"
+    return payload, pretty
+
+
+def cmd_allowlist_disable_rule(rule_id: str, *, scope: str) -> tuple[dict[str, Any], str]:
+    """Add ``rule_id`` to ``disable_rules`` in the chosen scope. Idempotent."""
+    if rule_id not in KNOWN_RULE_IDS:
+        msg = (
+            f"unknown rule_id {rule_id!r}; run `guard allowlist rules` for the full list. "
+            "(The allowlist will still accept it — guard does not gate on this — but typos "
+            "won't fire any matcher and you'll get false confidence.)"
+        )
+        sys.stderr.write(f"guard: warning: {msg}\n")
+    added = add_disable_rule(rule_id, scope=scope)
+    path = _resolve_scope_path(scope, None)
+    payload = {"rule_id": rule_id, "scope": scope, "added": added, "path": str(path)}
+    verb = "added" if added else "already present"
+    pretty = f"disable_rules: {rule_id} {verb} ({scope}: {path})\n"
+    return payload, pretty
+
+
+def cmd_allowlist_enable_rule(rule_id: str, *, scope: str) -> tuple[dict[str, Any], str]:
+    """Remove ``rule_id`` from ``disable_rules`` in the chosen scope. Idempotent."""
+    removed = remove_disable_rule(rule_id, scope=scope)
+    path = _resolve_scope_path(scope, None)
+    payload = {"rule_id": rule_id, "scope": scope, "removed": removed, "path": str(path)}
+    verb = "removed" if removed else "not present"
+    pretty = f"disable_rules: {rule_id} {verb} ({scope}: {path})\n"
+    return payload, pretty
+
+
+def cmd_allowlist_allow_command(
+    *, rule: str, command: str, reason: str, scope: str
+) -> tuple[dict[str, Any], str]:
+    """Add an exact-command override entry to ``allow_commands``. Idempotent."""
+    added = add_allow_command(rule=rule, command=command, reason=reason, scope=scope)
+    path = _resolve_scope_path(scope, None)
+    payload = {
+        "rule": rule,
+        "command": command,
+        "reason": reason,
+        "scope": scope,
+        "added": added,
+        "path": str(path),
+    }
+    verb = "added" if added else "already present"
+    pretty = f"allow_commands: {rule!r} + {command!r} {verb} ({scope}: {path})\n"
+    return payload, pretty
+
+
+def cmd_allowlist_remove_command(
+    *, rule: str, command: str, scope: str
+) -> tuple[dict[str, Any], str]:
+    """Remove the matching ``allow_commands`` entry. Idempotent."""
+    removed = remove_allow_command(rule=rule, command=command, scope=scope)
+    path = _resolve_scope_path(scope, None)
+    payload = {
+        "rule": rule,
+        "command": command,
+        "scope": scope,
+        "removed": removed,
+        "path": str(path),
+    }
+    verb = "removed" if removed else "not present"
+    pretty = f"allow_commands: {rule!r} + {command!r} {verb} ({scope}: {path})\n"
+    return payload, pretty
+
+
+_ALLOWLIST_DISPATCH: dict[str, str] = {
+    "list": "cmd_allowlist_list",
+    "rules": "cmd_allowlist_rules",
+}
+
+
+def _dispatch_allowlist(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> tuple[dict[str, Any], str] | None:
+    """Dispatch the ``guard allowlist <sub>`` subcommands. ``None`` means help-shown."""
+    allow_cmd = getattr(args, "allow_cmd", None)
+    scope = _resolve_scope(args)
+    if allow_cmd in _ALLOWLIST_DISPATCH:
+        fn = globals()[_ALLOWLIST_DISPATCH[allow_cmd]]
+        return fn()  # type: ignore[no-any-return]
+    if allow_cmd == "disable-rule":
+        return cmd_allowlist_disable_rule(args.rule_id, scope=scope)
+    if allow_cmd == "enable-rule":
+        return cmd_allowlist_enable_rule(args.rule_id, scope=scope)
+    if allow_cmd == "allow-command":
+        return cmd_allowlist_allow_command(
+            rule=args.rule, command=args.command, reason=args.reason, scope=scope
+        )
+    if allow_cmd == "remove-command":
+        return cmd_allowlist_remove_command(rule=args.rule, command=args.command, scope=scope)
+    parser.parse_args(["allowlist", "--help"])
+    return None
+
+
 # === argparse wiring ===
 
 
@@ -599,6 +743,27 @@ class _RawVersionAction(argparse.Action):
         del namespace, values, option_string
         sys.stdout.write(self._version + "\n")
         parser.exit(0)
+
+
+def _add_scope_args(parser: argparse.ArgumentParser) -> None:
+    """Add a mutually-exclusive ``--global`` / ``--project`` flag pair (default: project)."""
+    g = parser.add_mutually_exclusive_group()
+    g.add_argument(
+        "--global",
+        dest="scope_global",
+        action="store_true",
+        help="Apply to ~/.claude/guard/allowlist.json (overridable via $GUARD_DATA_DIR).",
+    )
+    g.add_argument(
+        "--project",
+        dest="scope_project",
+        action="store_true",
+        help="Apply to <cwd>/.claude/guard/allowlist.json (default).",
+    )
+
+
+def _resolve_scope(args: argparse.Namespace) -> str:
+    return "global" if getattr(args, "scope_global", False) else "project"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -684,6 +849,50 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
+    p_allow = sub.add_parser(
+        "allowlist",
+        help="Manage the project + global allowlist (disable_rules / allow_commands).",
+        epilog=(
+            "Examples:\n"
+            "  guard allowlist list\n"
+            "  guard allowlist rules\n"
+            "  guard allowlist disable-rule bash.disk_destruction --project\n"
+            "  guard allowlist enable-rule bash.disk_destruction --project\n"
+            "  guard allowlist allow-command --rule bash.disk_destruction \\\n"
+            '    --command "dd if=/dev/zero of=/tmp/x.qcow2 bs=1M count=1" \\\n'
+            '    --reason "build VM image fixture"\n'
+            "  guard allowlist remove-command --rule bash.disk_destruction \\\n"
+            '    --command "dd if=/dev/zero of=/tmp/x.qcow2 bs=1M count=1"'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_allow_sub = p_allow.add_subparsers(dest="allow_cmd")
+    p_allow_sub.add_parser("list", help="Show effective merged allowlist (project + global).")
+    p_allow_sub.add_parser("rules", help="List all known rule_ids you can put on the allowlist.")
+
+    p_disable = p_allow_sub.add_parser("disable-rule", help="Add a rule_id to disable_rules.")
+    p_disable.add_argument("rule_id", help="The rule id to disable, e.g. 'bash.disk_destruction'.")
+    _add_scope_args(p_disable)
+
+    p_enable = p_allow_sub.add_parser("enable-rule", help="Remove a rule_id from disable_rules.")
+    p_enable.add_argument("rule_id", help="The rule id to re-enable.")
+    _add_scope_args(p_enable)
+
+    p_acmd = p_allow_sub.add_parser("allow-command", help="Add an exact-command override.")
+    p_acmd.add_argument("--rule", required=True, help="The rule_id this override targets.")
+    p_acmd.add_argument(
+        "--command",
+        required=True,
+        help="Exact command string (compared with .strip()-equality at decide time).",
+    )
+    p_acmd.add_argument("--reason", required=True, help="Written justification (audit-logged).")
+    _add_scope_args(p_acmd)
+
+    p_rcmd = p_allow_sub.add_parser("remove-command", help="Remove an exact-command override.")
+    p_rcmd.add_argument("--rule", required=True)
+    p_rcmd.add_argument("--command", required=True)
+    _add_scope_args(p_rcmd)
+
     p_migrate = sub.add_parser(
         "migrate-log",
         help=(
@@ -728,7 +937,7 @@ def _emit(payload: dict[str, Any], pretty: str, *, as_json: bool) -> None:
         sys.stdout.write(pretty)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # noqa: C901 -- linear command-dispatch ladder, one branch per subcommand
     """CLI entry point. Returns the exit code."""
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -762,6 +971,11 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=bool(args.dry_run),
                 backup=bool(args.backup),
             )
+        elif cmd == "allowlist":
+            dispatched = _dispatch_allowlist(args, parser)
+            if dispatched is None:
+                return 0
+            payload, pretty = dispatched
         else:
             parser.print_help()
             return 0
