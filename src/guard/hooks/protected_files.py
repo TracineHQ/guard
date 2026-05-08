@@ -11,6 +11,7 @@ changes to the hook infrastructure are surfaced for review.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import sys
@@ -95,6 +96,82 @@ PROTECTED_PATTERNS: list[str] = [
 ]
 
 
+# === Project-local pattern extension ===
+#
+# Two override knobs let downstream projects extend ``PROTECTED_PATTERNS``
+# without forking. Both are stdlib-only and resolve at call time so test
+# fixtures (and live env edits) take effect without a module reload.
+#
+# 1. ``GUARD_PROTECTED_EXTRA`` env var — comma-separated list of extra
+#    patterns. Empty entries are skipped, surrounding whitespace trimmed.
+# 2. ``.claude/guard-protected.txt`` file (rooted at cwd) — one pattern
+#    per line; ``#`` starts a comment to end of line; blank lines OK.
+#
+# When both are present the FILE wins (it is the more deliberate
+# artifact; env can be set system-wide for unrelated reasons). Patterns
+# use the same syntax ``is_protected()`` already understands — suffix
+# match for file patterns (any segment containing ``.``), segment match
+# for directory patterns (last segment with no ``.``). No new grammar.
+
+_GUARD_PROTECTED_ENV = "GUARD_PROTECTED_EXTRA"
+_GUARD_PROTECTED_FILE_RELPATH = Path(".claude") / "guard-protected.txt"
+
+
+def _read_extra_patterns_from_env() -> list[str]:
+    raw = os.environ.get(_GUARD_PROTECTED_ENV, "")
+    if not raw:
+        return []
+    out: list[str] = []
+    for entry in raw.split(","):
+        s = entry.strip()
+        if s:
+            out.append(s)
+    return out
+
+
+def _read_extra_patterns_from_file(cwd: Path | None = None) -> list[str]:
+    base = cwd if cwd is not None else Path.cwd()
+    path = base / _GUARD_PROTECTED_FILE_RELPATH
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    out: list[str] = []
+    for raw_line in text.splitlines():
+        # Strip ``#`` comments + surrounding whitespace; skip blank lines.
+        line = raw_line.split("#", 1)[0].strip()
+        if line:
+            out.append(line)
+    return out
+
+
+def _extra_patterns(cwd: Path | None = None) -> list[str]:
+    """Return the file-then-env extension patterns (file precedence).
+
+    Resolves at call time. If a ``.claude/guard-protected.txt`` file is
+    readable, returns the patterns parsed from it (empty list if the
+    file exists but is empty after comment-stripping). Otherwise falls
+    back to the ``GUARD_PROTECTED_EXTRA`` env var. Returns ``[]`` when
+    both are absent.
+    """
+    base = cwd if cwd is not None else Path.cwd()
+    file_path = base / _GUARD_PROTECTED_FILE_RELPATH
+    if file_path.exists():
+        return _read_extra_patterns_from_file(base)
+    return _read_extra_patterns_from_env()
+
+
+def _effective_patterns(cwd: Path | None = None) -> tuple[str, ...]:
+    """Return the merged pattern tuple: built-in defaults + project extras.
+
+    Project-extra patterns are appended AFTER the built-ins so the
+    first-match iteration in ``is_protected()`` favours specific
+    built-in suffixes (e.g. ``.claude/CLAUDE.md`` before ``CLAUDE.md``)
+    while still letting the project add its own.
+    """
+    return (*PROTECTED_PATTERNS, *_extra_patterns(cwd))
+
+
 def is_protected(file_path: str) -> str | None:
     """Return the matched protected pattern for ``file_path``, else ``None``.
 
@@ -117,7 +194,7 @@ def is_protected(file_path: str) -> str | None:
         return None
 
     resolved_str = str(resolved)
-    for pattern in PROTECTED_PATTERNS:
+    for pattern in _effective_patterns():
         # Exact-suffix match (file pattern).
         if (
             resolved_str.endswith(pattern)
@@ -149,7 +226,7 @@ def is_protected_parent_dir(dir_path: str) -> str | None:
         return None
 
     resolved_str = str(resolved).rstrip("/")
-    for pattern in PROTECTED_PATTERNS:
+    for pattern in _effective_patterns():
         # ``pattern`` is the suffix path of a protected file. An extraction
         # into ``resolved_str`` could write to ``<resolved_str>/<tail>`` for
         # some suffix ``tail``. We consider the dir risky if it sits anywhere

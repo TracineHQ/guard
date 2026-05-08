@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — protected_files project-local extension
+
+- `GUARD_PROTECTED_EXTRA` env var (comma-separated) and
+  `.claude/guard-protected.txt` project file (one pattern per line,
+  `#` for comments) extend `PROTECTED_PATTERNS` without forking. File
+  wins over env. See `SKILL.md`.
+
 ### Added — orchestration destruction coverage
 
 - `bash_command_validator`: ~30 new synthetic-deny matchers covering
