@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from guard._utils import all_paths_in, emit_pretooluse_decision, log_decision, safe_main
+from guard.allowlist import hook_bypass_reason, load_allowlist
 
 _HOOK_ID = "guard.protected_files"
 
@@ -431,9 +432,26 @@ def hook(payload: dict[str, Any]) -> None:
     if matched is None:
         return
 
+    cwd_val = payload.get("cwd")
+    cwd_str = cwd_val if isinstance(cwd_val, str) else None
+    session_id = str(payload.get("session_id", ""))
+
+    bypass = hook_bypass_reason(load_allowlist(), _HOOK_ID, excerpt)
+    if bypass is not None:
+        log_decision(
+            hook_id=_HOOK_ID,
+            event="PreToolUse",
+            tool_name=tool_name,
+            decision="pass",
+            reason=bypass,
+            command_excerpt=excerpt,
+            session_id=session_id,
+            cwd=cwd_str,
+        )
+        return
+
     reason = f"Protected file: {matched} — confirm edit"
     envelope = emit_pretooluse_decision("ask", reason)
-    cwd = payload.get("cwd")
     log_decision(
         hook_id=_HOOK_ID,
         event="PreToolUse",
@@ -441,8 +459,8 @@ def hook(payload: dict[str, Any]) -> None:
         decision="ask",
         reason=reason,
         command_excerpt=excerpt,
-        session_id=str(payload.get("session_id", "")),
-        cwd=cwd if isinstance(cwd, str) else None,
+        session_id=session_id,
+        cwd=cwd_str,
     )
     sys.stdout.write(json.dumps(envelope))
 

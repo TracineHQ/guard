@@ -20,6 +20,7 @@ import sys
 from typing import Any
 
 from guard._utils import emit_pretooluse_decision, log_decision, safe_main
+from guard.allowlist import hook_bypass_reason, load_allowlist
 
 _HOOK_ID = "guard.git_c_validator"
 
@@ -421,6 +422,22 @@ def hook(payload: dict[str, Any]) -> None:
     rest = head[1:]
     has_config_or_dir_flag = any(t.startswith(("-C", "-c", "--config-env")) for t in rest)
     if not has_config_or_dir_flag and "commit" not in rest:
+        return
+
+    cwd_val = payload.get("cwd")
+    cwd_str = cwd_val if isinstance(cwd_val, str) else None
+    bypass = hook_bypass_reason(load_allowlist(), _HOOK_ID, command)
+    if bypass is not None:
+        log_decision(
+            hook_id=_HOOK_ID,
+            event="PreToolUse",
+            tool_name="Bash",
+            decision="pass",
+            reason=bypass,
+            command_excerpt=command,
+            session_id=str(payload.get("session_id", "")),
+            cwd=cwd_str,
+        )
         return
 
     envelope = decide(command)

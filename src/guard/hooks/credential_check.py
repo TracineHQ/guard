@@ -46,6 +46,7 @@ from guard._utils import (
     safe_main,
     token_basename,
 )
+from guard.allowlist import hook_bypass_reason, load_allowlist
 
 _HOOK_ID = "guard.credential_check"
 
@@ -409,6 +410,22 @@ def hook(payload: dict[str, Any]) -> None:
             excerpt = fp
 
     cwd = payload.get("cwd")
+    cwd_str = cwd if isinstance(cwd, str) else None
+
+    bypass = hook_bypass_reason(load_allowlist(), _HOOK_ID, excerpt or "")
+    if bypass is not None:
+        log_decision(
+            hook_id=_HOOK_ID,
+            event="PreToolUse",
+            tool_name=tool_name,
+            decision="pass",
+            reason=bypass,
+            command_excerpt=excerpt,
+            session_id=str(payload.get("session_id", "")),
+            cwd=cwd_str,
+        )
+        return
+
     reason = envelope["hookSpecificOutput"]["permissionDecisionReason"]
     log_decision(
         hook_id=_HOOK_ID,
@@ -418,7 +435,7 @@ def hook(payload: dict[str, Any]) -> None:
         reason=reason,
         command_excerpt=excerpt,
         session_id=str(payload.get("session_id", "")),
-        cwd=cwd if isinstance(cwd, str) else None,
+        cwd=cwd_str,
     )
     sys.stdout.write(json.dumps(envelope))
 

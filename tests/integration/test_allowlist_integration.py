@@ -197,3 +197,103 @@ def test_audit_log_records_allowlist_bypass(
     assert last["decision"] == "allow"
     assert "perf bench fixture: bs1m" in last["reason"]
     assert "rule=bash.disk_destruction" in last["reason"]
+
+
+# === Other hooks: whole-hook disable + path/command exact-match override ===
+
+
+def test_protected_files_disabled_by_allowlist(
+    allowlist_home: Path,
+    decision_log_env: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from guard.hooks.protected_files import hook
+
+    _write_allowlist(
+        allowlist_home / "allowlist.json", {"disable_rules": ["guard.protected_files"]}
+    )
+    payload = {
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": "/repo/CLAUDE.md",
+            "old_string": "x",
+            "new_string": "y",
+        },
+        "session_id": "s1",
+    }
+    hook(payload)
+    # No envelope emitted (Claude Code default-allows).
+    out = capsys.readouterr().out
+    assert out == ""
+    # But the bypass IS in the audit log.
+    last = json.loads(decision_log_env.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert last["decision"] == "pass"
+    assert "guard.protected_files" in last["reason"]
+
+
+def test_protected_files_exact_path_allowlisted(
+    allowlist_home: Path,
+    decision_log_env: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from guard.hooks.protected_files import hook
+
+    file_path = "/repo/CLAUDE.md"
+    _write_allowlist(
+        allowlist_home / "allowlist.json",
+        {
+            "allow_commands": [
+                {
+                    "rule": "guard.protected_files",
+                    "command": file_path,
+                    "reason": "intentional CLAUDE.md update for the rebrand task",
+                }
+            ]
+        },
+    )
+    payload = {
+        "tool_name": "Edit",
+        "tool_input": {"file_path": file_path, "old_string": "x", "new_string": "y"},
+        "session_id": "s1",
+    }
+    hook(payload)
+    assert capsys.readouterr().out == ""
+    last = json.loads(decision_log_env.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert last["decision"] == "pass"
+    assert "intentional CLAUDE.md update" in last["reason"]
+
+
+def test_protected_files_exact_path_does_not_match_other_paths(
+    allowlist_home: Path,
+    decision_log_env: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from guard.hooks.protected_files import hook
+
+    _write_allowlist(
+        allowlist_home / "allowlist.json",
+        {
+            "allow_commands": [
+                {
+                    "rule": "guard.protected_files",
+                    "command": "/repo/CLAUDE.md",
+                    "reason": "x",
+                }
+            ]
+        },
+    )
+    # Different protected file → still asks.
+    payload = {
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": "/repo/.cursorrules",
+            "old_string": "x",
+            "new_string": "y",
+        },
+        "session_id": "s1",
+    }
+    hook(payload)
+    out = capsys.readouterr().out
+    # An "ask" envelope was emitted.
+    assert "permissionDecision" in out
+    assert "ask" in out

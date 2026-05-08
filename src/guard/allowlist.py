@@ -176,6 +176,28 @@ def project_allowlist_path(cwd: Path | None = None) -> Path:
     return base / PROJECT_ALLOWLIST_RELPATH
 
 
+def hook_bypass_reason(allowlist: Allowlist, hook_id: str, excerpt: str) -> str | None:
+    """Return an audit-log ``reason`` string if the hook should bypass, else ``None``.
+
+    Convenience helper for hooks whose only rule_id is the hook_id itself
+    (e.g. ``protected_files``, ``git_c_validator``). For each such hook,
+    two allowlist mechanisms apply:
+
+    1. ``disable_rules: ["<hook_id>"]`` — mute the whole hook.
+    2. ``allow_commands: [{rule: "<hook_id>", command: "...", reason: ...}]``
+       — mute when the file path / command excerpt matches exactly.
+
+    Callers log a ``decision="pass"`` record with the returned string and
+    skip emitting an envelope, letting Claude Code default-allow.
+    """
+    if allowlist.is_rule_disabled(hook_id):
+        return f"allowlist: rule '{hook_id}' disabled by user config"
+    entry = allowlist.find_command(hook_id, excerpt)
+    if entry is not None:
+        return f"allowlist: {entry.reason} (rule={hook_id})"
+    return None
+
+
 def load_allowlist(cwd: Path | None = None) -> Allowlist:
     """Load and merge the global + project allowlists.
 

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from guard._utils import _log_debug, emit_pretooluse_decision, log_decision, safe_main
+from guard.allowlist import hook_bypass_reason, load_allowlist
 
 _HOOK_ID = "guard.commit_message_validator"
 
@@ -531,6 +532,21 @@ def hook(payload: dict[str, Any]) -> None:
 
     cwd = payload.get("cwd")
     cwd_str = cwd if isinstance(cwd, str) else None
+
+    bypass = hook_bypass_reason(load_allowlist(), _HOOK_ID, command)
+    if bypass is not None:
+        log_decision(
+            hook_id=_HOOK_ID,
+            event="PreToolUse",
+            tool_name="Bash",
+            decision="pass",
+            reason=bypass,
+            command_excerpt=command,
+            session_id=str(payload.get("session_id", "")),
+            cwd=cwd_str,
+        )
+        return
+
     envelope = decide(command, cwd=cwd_str)
     if envelope is None:
         return
