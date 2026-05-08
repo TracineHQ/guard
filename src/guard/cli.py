@@ -164,32 +164,121 @@ def effective_log_path() -> str:
 # one based on the ``--json`` flag (or stdout TTY heuristic).
 
 
+def _has_plugin_cache(home: Path) -> bool:
+    """True if ``~/.claude/plugins/cache/guard[@version]`` exists."""
+    root = home / ".claude" / "plugins" / "cache"
+    if not root.exists():
+        return False
+    try:
+        return any(
+            e.is_dir() and (e.name == "guard" or e.name.startswith("guard@"))
+            for e in root.iterdir()
+        )
+    except OSError:
+        return False
+
+
+def _settings_reference_guard(home: Path) -> bool:
+    """True if a user-scope settings file mentions a guard hook script."""
+    for name in ("settings.json", "settings.local.json"):
+        try:
+            text = (home / ".claude" / name).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if "guard/hooks/" in text or "guard.bash_command_validator" in text:
+            return True
+    return False
+
+
+def _log_has_guard_records() -> bool:
+    """True if the JSONL log contains any record with ``hook_id`` starting with ``guard.``."""
+    reader = JsonlReader(effective_log_path())
+    if not reader.exists():
+        return False
+    try:
+        for rec in reader.iter_records():
+            hook_id = rec.get("hook_id")
+            if isinstance(hook_id, str) and hook_id.startswith("guard."):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _check_wiring(home: Path | None = None) -> dict[str, Any]:
+    """Inspect the local Claude Code config for evidence guard's hooks are wired.
+
+    Returns a dict with three signals plus an aggregate boolean. The signals
+    are deliberately independent so a partial install (e.g. plugin cached
+    but settings not merged yet) still surfaces useful information.
+
+    - ``plugin_cache_present``: true if ``~/.claude/plugins/cache/guard``
+      exists, suggesting the plugin was installed via the marketplace.
+    - ``settings_references_guard``: true if any user-scope settings file
+      (``~/.claude/settings.json`` or ``settings.local.json``) contains a
+      string referencing a guard hook script. Picks up both plugin-merged
+      configs and hand-rolled settings.
+    - ``log_has_guard_records``: true if the JSONL log contains at least
+      one record from a ``guard.*`` hook_id, proving guard has actually
+      run end-to-end.
+    """
+    if home is None:
+        home = Path.home()
+    signals: dict[str, Any] = {
+        "plugin_cache_present": _has_plugin_cache(home),
+        "settings_references_guard": _settings_reference_guard(home),
+        "log_has_guard_records": _log_has_guard_records(),
+    }
+    signals["active"] = any(signals.values())
+    return signals
+
+
 def cmd_status() -> tuple[dict[str, Any], str]:
-    """Effective config + log location + line count + last record timestamp."""
+    """Effective config + wiring check + log location + line count + last record."""
     path = effective_log_path()
     reader = JsonlReader(path)
     line_count = reader.line_count()
     last = reader.last_record()
     last_ts = (last or {}).get("timestamp") if last else None
+    wiring = _check_wiring()
 
     payload: dict[str, Any] = {
         "version": __version__,
+        "active": wiring["active"],
+        "wiring": {k: v for k, v in wiring.items() if k != "active"},
         "log_path": path,
         "log_exists": reader.exists(),
         "line_count": line_count,
         "last_record_timestamp": last_ts,
-        "mode": "enforce",  # hardcoded for v1.1; config-driven later.
+        "mode": "enforce",
         "schema_version": 1,
     }
 
+    def tick(*, ok: bool) -> str:
+        return "yes" if ok else "no"
+
     lines = [
         f"guard {__version__}",
+        f"active: {tick(ok=wiring['active'])}",
+        f"  plugin cache:        {tick(ok=wiring['plugin_cache_present'])}",
+        f"  settings reference:  {tick(ok=wiring['settings_references_guard'])}",
+        f"  log has guard rec:   {tick(ok=wiring['log_has_guard_records'])}",
         "mode: enforce  (config-driven shadow/off lands in a future release)",
         f"log: {path}",
-        f"  exists: {'yes' if reader.exists() else 'no'}",
+        f"  exists: {tick(ok=reader.exists())}",
         f"  records: {line_count}",
         f"  last: {last_ts or '(none)'}",
     ]
+    if not wiring["active"]:
+        lines.extend(
+            [
+                "",
+                "guard is installed but does not appear to be wired into Claude Code.",
+                "  install:  /plugin marketplace add TracineHQ/guard",
+                "            /plugin install guard",
+                "  verify:   restart Claude Code, then run `guard status` again.",
+            ]
+        )
     return payload, "\n".join(lines) + "\n"
 
 
