@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed — shared safe-IO primitives
+
+- New `guard._safe_io` module consolidates the cwd/temp scope check,
+  sensitive-target denylist, stream-shape detection, and `O_NOFOLLOW`
+  + size-cap read into one audited surface. `commit_message_validator`
+  and `protected_files` (`patch -i <diff>` reader) now share the same
+  primitives. Diff reads bounded to 256 KiB; interpreter eval-body
+  substring scan bounded to 32 KiB.
+
 ### Added — protected_files project-local extension
 
 - `GUARD_PROTECTED_EXTRA` env var (comma-separated) and

@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from guard._safe_io import safe_read_text_capped
 from guard._utils import all_paths_in, emit_pretooluse_decision, log_decision, safe_main
 from guard.allowlist import hook_bypass_reason, load_allowlist
 
@@ -523,6 +524,9 @@ def _resolve_diff_path(tokens: list[str], command: str) -> str | None:
     return None
 
 
+_PATCH_DIFF_MAX_BYTES = 256 * 1024  # 256 KiB cap on diff reads
+
+
 def _patch_diff_targets(tokens: list[str], command: str) -> list[str]:
     """Extract paths named inside a unified diff fed to ``patch``.
 
@@ -531,19 +535,24 @@ def _patch_diff_targets(tokens: list[str], command: str) -> list[str]:
     - ``patch <target> < diff``         — single-file patch, target is positional.
     - ``patch < diff``                  — diff comes via stdin redirect; multiple targets in body.
 
-    Reads the diff file and scans for ``--- a/<path>`` / ``+++ b/<path>``
-    headers. Lines starting with ``--- /dev/null`` (the ``a/`` side of an
-    "added" file) are skipped — only the destination side names a real
-    target. Best-effort: if the diff isn't readable, returns ``[]``.
+    Reads the diff file via ``safe_read_text_capped`` (cwd/temp scope,
+    O_NOFOLLOW, sensitive-target denylist, 256 KiB cap) and scans for
+    ``--- a/<path>`` / ``+++ b/<path>`` headers. Lines starting with
+    ``--- /dev/null`` (the ``a/`` side of an "added" file) are skipped —
+    only the destination side names a real target. Best-effort: if the
+    diff isn't readable or fails any safety check, returns ``[]``.
     """
     if not any(tok.rsplit("/", 1)[-1] == "patch" for tok in tokens):
         return []
     diff_path = _resolve_diff_path(tokens, command)
     if diff_path is None:
         return []
-    try:
-        diff_text = Path(diff_path).read_text(encoding="utf-8", errors="replace")
-    except (OSError, UnicodeDecodeError):
+    diff_text = safe_read_text_capped(
+        diff_path,
+        cwd=os.getcwd(),  # noqa: PTH109 -- need a string for the safe-IO API
+        max_bytes=_PATCH_DIFF_MAX_BYTES,
+    )
+    if diff_text is None:
         return []
     out: list[str] = []
     for _prefix, path in _DIFF_PATH_RE.findall(diff_text):
@@ -589,6 +598,9 @@ _INTERPRETER_EVAL_FLAG_MAP: tuple[tuple[frozenset[str], frozenset[str]], ...] = 
 )
 
 
+_EVAL_BODY_SCAN_MAX_BYTES = 32 * 1024  # cap eval-body substring scan
+
+
 def _interpreter_eval_targets(tokens: list[str]) -> list[str]:
     """Scan an interpreter's ``-c`` / ``-e`` / ``-r`` eval body for literal protected paths.
 
@@ -598,6 +610,10 @@ def _interpreter_eval_targets(tokens: list[str]) -> list[str]:
     ``/.git/config``; ``shutil.copy(src, dst)`` where ``dst`` is a
     runtime variable yields nothing (the static matcher cannot solve
     that — the existing Edit/Write tool gate is the right defense).
+
+    The body scan is bounded to ``_EVAL_BODY_SCAN_MAX_BYTES`` so a
+    pathological multi-MB inline script can't degenerate into an
+    O(patterns * len) walk that stalls the hook.
     """
     out: list[str] = []
     patterns = _effective_patterns()
@@ -613,7 +629,7 @@ def _interpreter_eval_targets(tokens: list[str]) -> list[str]:
             rest = tokens[i + 1 :]
             for j, flag in enumerate(rest):
                 if flag in flagset and j + 1 < len(rest):
-                    body = rest[j + 1]
+                    body = rest[j + 1][:_EVAL_BODY_SCAN_MAX_BYTES]
                     out.extend(pat for pat in patterns if pat in body)
                     break
             break
