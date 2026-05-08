@@ -50,6 +50,7 @@ from guard._utils import (
 from guard._utils import (
     token_basename as _basename,
 )
+from guard.allowlist import Allowlist, load_allowlist
 from guard.registry import (
     ALWAYS_DENY,
     AUTONOMOUS_FEEDBACK,
@@ -3382,82 +3383,89 @@ def _is_dns_exfil_candidate(normalized: str) -> bool:
     return False
 
 
-_PER_FORM_MATCHERS: tuple[tuple[Callable[[str], bool], str], ...] = (
-    (_is_eval_builtin_invocation, _SYNTH_EVAL_BUILTIN_DENY),
-    (_has_dangerous_env_sink, _SYNTH_DANGEROUS_ENV_DENY),
-    (_is_dangerous_interpreter, _SYNTH_INTERPRETER_DENY),
-    (_is_dangerous_rm, _SYNTH_RM_DENY),
-    (_is_git_config_injection, _SYNTH_GIT_CONFIG_DENY),
-    (_is_pip_install_from_url, _SYNTH_PIP_INSTALL_URL_DENY),
-    (_is_kubectl_destructive, _SYNTH_KUBECTL_DESTRUCTION_DENY),
-    (_is_gh_api_destructive, _SYNTH_GH_API_DELETE_DENY),
-    (_is_gpg_secret_delete, _SYNTH_GPG_SECRET_DELETE_DENY),
-    (_is_aws_s3_destructive, _SYNTH_AWS_S3_DESTRUCTION_DENY),
-    (_is_chmod_dangerous, _SYNTH_CHMOD_777_ROOT_DENY),
+# 3-tuples: (matcher, label, rule_id). The rule_id is the stable string a
+# user puts in their allowlist's ``disable_rules`` (or in an
+# ``allow_commands`` ``rule`` field). Names are mechanical: the matcher
+# function name with the ``_is_`` / ``_has_`` prefix dropped, namespaced
+# under ``bash.``. Keep these stable across releases — changing one is a
+# breaking change for users who allowlisted under the old name.
+_PER_FORM_MATCHERS: tuple[tuple[Callable[[str], bool], str, str], ...] = (
+    (_is_eval_builtin_invocation, _SYNTH_EVAL_BUILTIN_DENY, "bash.eval_builtin"),
+    (_has_dangerous_env_sink, _SYNTH_DANGEROUS_ENV_DENY, "bash.dangerous_env_sink"),
+    (_is_dangerous_interpreter, _SYNTH_INTERPRETER_DENY, "bash.dangerous_interpreter"),
+    (_is_dangerous_rm, _SYNTH_RM_DENY, "bash.dangerous_rm"),
+    (_is_git_config_injection, _SYNTH_GIT_CONFIG_DENY, "bash.git_config_injection"),
+    (_is_pip_install_from_url, _SYNTH_PIP_INSTALL_URL_DENY, "bash.pip_install_url"),
+    (_is_kubectl_destructive, _SYNTH_KUBECTL_DESTRUCTION_DENY, "bash.kubectl_destructive"),
+    (_is_gh_api_destructive, _SYNTH_GH_API_DELETE_DENY, "bash.gh_api_destructive"),
+    (_is_gpg_secret_delete, _SYNTH_GPG_SECRET_DELETE_DENY, "bash.gpg_secret_delete"),
+    (_is_aws_s3_destructive, _SYNTH_AWS_S3_DESTRUCTION_DENY, "bash.aws_s3_destructive"),
+    (_is_chmod_dangerous, _SYNTH_CHMOD_777_ROOT_DENY, "bash.chmod_dangerous"),
     # P0+P1 additions — sensitive writes, persistence, cloud, DB, encoding.
-    (_is_sensitive_destination_write, _SYNTH_SENSITIVE_WRITE_DENY),
-    (_is_persistence_command, _SYNTH_PERSISTENCE_DENY),
-    (_is_chmod_setuid, _SYNTH_CHMOD_SETUID_DENY),
-    (_is_chmod_sensitive_target, _SYNTH_CHMOD_SENSITIVE_TARGET_DENY),
-    (_is_sudo_escalation, _SYNTH_SUDO_ESCALATION_DENY),
-    (_is_kernel_module_load, _SYNTH_KERNEL_MOD_DENY),
-    (_is_process_attach, _SYNTH_PROCESS_ATTACH_DENY),
-    (_is_db_cli_destructive, _SYNTH_DB_DESTRUCTION_DENY),
-    (_is_dropdb_or_mysqladmin_drop, _SYNTH_DB_DESTRUCTION_DENY),
-    (_is_mongo_destructive, _SYNTH_DB_DESTRUCTION_DENY),
-    (_is_disk_destruction, _SYNTH_DISK_DESTRUCTION_DENY),
-    (_is_network_policy_wipe, _SYNTH_NETWORK_WIPE_DENY),
-    (_is_aws_destructive, _SYNTH_CLOUD_DESTRUCTION_DENY),
-    (_is_gcloud_destructive, _SYNTH_CLOUD_DESTRUCTION_DENY),
-    (_is_az_destructive, _SYNTH_CLOUD_DESTRUCTION_DENY),
-    (_is_iac_destruction, _SYNTH_IAC_DESTRUCTION_DENY),
-    (_is_npm_url_install, _SYNTH_REMOTE_PACKAGE_DENY),
-    (_is_npx_remote, _SYNTH_REMOTE_PACKAGE_DENY),
-    (_is_cargo_remote_install, _SYNTH_REMOTE_PACKAGE_DENY),
-    (_is_go_remote_install, _SYNTH_REMOTE_PACKAGE_DENY),
-    (_is_gem_remote_install, _SYNTH_REMOTE_PACKAGE_DENY),
-    (_is_helm_remote_install, _SYNTH_REMOTE_PACKAGE_DENY),
-    (_is_exec_wrapper_with_dangerous_payload, _SYNTH_EXEC_WRAPPER_DENY),
-    (_is_env_split_string, _SYNTH_ENV_SPLIT_DENY),
-    (_is_trap_exploit, _SYNTH_TRAP_EXPLOIT_DENY),
-    (_is_function_definition, _SYNTH_FUNC_DEF_DENY),
-    (_is_glob_head, _SYNTH_GLOB_HEAD_DENY),
-    (_is_remote_shell_wrapper, _SYNTH_REMOTE_SHELL_DENY),
-    (_is_dns_exfil_candidate, _SYNTH_DNS_EXFIL_DENY),
-    (_is_git_force_refspec, _SYNTH_GIT_FORCE_REFSPEC_DENY),
-    (_is_git_submodule_add, _SYNTH_GIT_SUBMODULE_ADD_DENY),
-    (_is_git_worktree_add, _SYNTH_GIT_WORKTREE_ADD_DENY),
-    (_is_pipe_to_interpreter, _SYNTH_PIPE_TO_INTERPRETER_DENY),
+    (_is_sensitive_destination_write, _SYNTH_SENSITIVE_WRITE_DENY, "bash.sensitive_write"),
+    (_is_persistence_command, _SYNTH_PERSISTENCE_DENY, "bash.persistence"),
+    (_is_chmod_setuid, _SYNTH_CHMOD_SETUID_DENY, "bash.chmod_setuid"),
+    (_is_chmod_sensitive_target, _SYNTH_CHMOD_SENSITIVE_TARGET_DENY, "bash.chmod_sensitive_target"),
+    (_is_sudo_escalation, _SYNTH_SUDO_ESCALATION_DENY, "bash.sudo_escalation"),
+    (_is_kernel_module_load, _SYNTH_KERNEL_MOD_DENY, "bash.kernel_module_load"),
+    (_is_process_attach, _SYNTH_PROCESS_ATTACH_DENY, "bash.process_attach"),
+    (_is_db_cli_destructive, _SYNTH_DB_DESTRUCTION_DENY, "bash.db_cli_destructive"),
+    (_is_dropdb_or_mysqladmin_drop, _SYNTH_DB_DESTRUCTION_DENY, "bash.dropdb_or_mysqladmin"),
+    (_is_mongo_destructive, _SYNTH_DB_DESTRUCTION_DENY, "bash.mongo_destructive"),
+    (_is_disk_destruction, _SYNTH_DISK_DESTRUCTION_DENY, "bash.disk_destruction"),
+    (_is_network_policy_wipe, _SYNTH_NETWORK_WIPE_DENY, "bash.network_policy_wipe"),
+    (_is_aws_destructive, _SYNTH_CLOUD_DESTRUCTION_DENY, "bash.aws_destructive"),
+    (_is_gcloud_destructive, _SYNTH_CLOUD_DESTRUCTION_DENY, "bash.gcloud_destructive"),
+    (_is_az_destructive, _SYNTH_CLOUD_DESTRUCTION_DENY, "bash.az_destructive"),
+    (_is_iac_destruction, _SYNTH_IAC_DESTRUCTION_DENY, "bash.iac_destruction"),
+    (_is_npm_url_install, _SYNTH_REMOTE_PACKAGE_DENY, "bash.npm_url_install"),
+    (_is_npx_remote, _SYNTH_REMOTE_PACKAGE_DENY, "bash.npx_remote"),
+    (_is_cargo_remote_install, _SYNTH_REMOTE_PACKAGE_DENY, "bash.cargo_remote_install"),
+    (_is_go_remote_install, _SYNTH_REMOTE_PACKAGE_DENY, "bash.go_remote_install"),
+    (_is_gem_remote_install, _SYNTH_REMOTE_PACKAGE_DENY, "bash.gem_remote_install"),
+    (_is_helm_remote_install, _SYNTH_REMOTE_PACKAGE_DENY, "bash.helm_remote_install"),
+    (_is_exec_wrapper_with_dangerous_payload, _SYNTH_EXEC_WRAPPER_DENY, "bash.exec_wrapper"),
+    (_is_env_split_string, _SYNTH_ENV_SPLIT_DENY, "bash.env_split_string"),
+    (_is_trap_exploit, _SYNTH_TRAP_EXPLOIT_DENY, "bash.trap_exploit"),
+    (_is_function_definition, _SYNTH_FUNC_DEF_DENY, "bash.function_definition"),
+    (_is_glob_head, _SYNTH_GLOB_HEAD_DENY, "bash.glob_head"),
+    (_is_remote_shell_wrapper, _SYNTH_REMOTE_SHELL_DENY, "bash.remote_shell_wrapper"),
+    (_is_dns_exfil_candidate, _SYNTH_DNS_EXFIL_DENY, "bash.dns_exfil"),
+    (_is_git_force_refspec, _SYNTH_GIT_FORCE_REFSPEC_DENY, "bash.git_force_refspec"),
+    (_is_git_submodule_add, _SYNTH_GIT_SUBMODULE_ADD_DENY, "bash.git_submodule_add"),
+    (_is_git_worktree_add, _SYNTH_GIT_WORKTREE_ADD_DENY, "bash.git_worktree_add"),
+    (_is_pipe_to_interpreter, _SYNTH_PIPE_TO_INTERPRETER_DENY, "bash.pipe_to_interpreter"),
 )
 
 
-def _match_synthetic_deny(segment: str) -> str | None:
-    """Return a synthetic-deny label if matchers fire, else ``None``.
+def _match_synthetic_deny(segment: str) -> tuple[str, str] | None:
+    """Return ``(label, rule_id)`` if a synthetic matcher fires, else ``None``.
 
     Covers non-canonical interpreters, dangerous rm shapes, and the git
     config-injection sinks. Iterates ``_candidate_forms(segment)`` so env /
     git / runner-wrapper bypasses are evaluated against the same matchers
-    as their bare forms.
+    as their bare forms. The ``rule_id`` is the stable allowlist key — see
+    ``_PER_FORM_MATCHERS`` for the canonical list.
     """
     if not segment:
         return None
     forms = _candidate_forms(segment)
     for cand in forms:
-        for matcher, label in _PER_FORM_MATCHERS:
+        for matcher, label, rule_id in _PER_FORM_MATCHERS:
             if matcher(cand):
-                return label
+                return label, rule_id
     # Variable-expanded head token: only the raw normalized form is what
     # matters; runner stripping would just hide the ``$VAR`` head.
     if _has_var_expanded_head(forms[0]):
-        return _SYNTH_VAR_EXPAND_DENY
+        return _SYNTH_VAR_EXPAND_DENY, "bash.var_expanded_head"
     # Shell-wrapper invocations: deny outright regardless of payload.
     if _is_shell_wrapper_invocation(segment):
-        return _SYNTH_SHELL_WRAPPER_DENY
+        return _SYNTH_SHELL_WRAPPER_DENY, "bash.shell_wrapper"
     # Wrapper-stacking past the unwrap cap: if no per-form matcher fired and
     # the peel cascade would still strip another layer, the segment is a
     # deliberate bypass attempt.
     if _exceeds_unwrap_cap(segment):
-        return _SYNTH_WRAPPER_STACKING_DENY
+        return _SYNTH_WRAPPER_STACKING_DENY, "bash.wrapper_stacking"
     return None
 
 
@@ -3481,14 +3489,18 @@ def _expand_runner_payload_segments(seg: str) -> list[str]:
     return split_pipeline(inner_canon)
 
 
-def _get_always_deny(segments: list[str]) -> dict[str, str] | None:
-    """Return a deny envelope if any segment hits the ALWAYS_DENY set, else ``None``.
+def _get_always_deny(segments: list[str]) -> tuple[dict[str, str], str] | None:
+    """Return ``(deny_envelope, rule_id)`` if any segment hits ALWAYS_DENY, else ``None``.
 
     Checks both registry literals (via ``_match_always_deny``) and synthetic
     matchers for non-canonical interpreter binaries and catastrophic rm
     shapes that the literal list cannot cover exhaustively. For shell-wrapper
     invocations (``bash -c "..."``), recursively re-evaluates the inner
     payload as a full pipeline.
+
+    The ``rule_id`` returned is the allowlist key. Registry literals all map
+    to the coarse-grained ``"bash.always_deny"``; synthetic matchers each
+    have their own fine-grained id (see ``_PER_FORM_MATCHERS``).
     """
     queue: list[str] = list(segments)
     seen: set[str] = set()
@@ -3505,11 +3517,12 @@ def _get_always_deny(segments: list[str]) -> dict[str, str] | None:
                 if rule_reason
                 else f"Blocked: `{seg[:80]}` is on the always-deny list."
             )
-            return _deny(reason)
+            return _deny(reason), "bash.always_deny"
         synth = _match_synthetic_deny(seg)
         if synth is not None:
-            reason = f"Blocked: `{seg[:80]}` — {_SYNTH_DENY_REASONS[synth]}"
-            return _deny(reason)
+            label, rule_id = synth
+            reason = f"Blocked: `{seg[:80]}` — {_SYNTH_DENY_REASONS[label]}"
+            return _deny(reason), rule_id
         # Shell-wrapper recursion: ``bash -c "rm -rf /; other"`` has
         # operators inside the payload that the outer split missed.
         queue.extend(_expand_runner_payload_segments(seg))
@@ -3586,6 +3599,41 @@ def _deny(reason: str) -> dict[str, str]:
     return {"permissionDecision": "deny", "permissionDecisionReason": reason}
 
 
+def _maybe_allow_via_allowlist(
+    allowlist: Allowlist,
+    rule_id: str,
+    original_command: str,
+    pending_decision: dict[str, str],
+) -> dict[str, str] | None:
+    """Return an allow envelope if the user's allowlist permits this denial.
+
+    The override applies in two cases:
+    - ``rule_id`` is in ``disable_rules`` — the entire matcher is muted.
+    - An ``allow_commands`` entry has the same ``rule`` and a ``command``
+      string equal (after .strip()) to ``original_command`` — exact-command
+      override with a written justification.
+
+    Both bypasses are logged via ``log_decision()`` so the audit trail
+    captures the rule_id, the reason, and the original command. Returns
+    ``None`` if no allowlist rule applies — the caller proceeds with the
+    denial as written. ``pending_decision`` is currently unused (the deny
+    envelope is reconstructed from rule_id context) but reserved for a
+    future "shadow"-mode implementation that records what would have been
+    denied.
+    """
+    del pending_decision
+    if allowlist.is_rule_disabled(rule_id):
+        reason = f"allowlist: rule '{rule_id}' disabled by user config"
+        _log_local(original_command, "allow", reason)
+        return _allow(reason)
+    entry = allowlist.find_command(rule_id, original_command)
+    if entry is not None:
+        reason = f"allowlist: {entry.reason} (rule={rule_id})"
+        _log_local(original_command, "allow", reason)
+        return _allow(reason)
+    return None
+
+
 def _evaluate_segments(
     command: str,
     segments: list[str],
@@ -3608,15 +3656,27 @@ def _evaluate_segments(
     return _allow(reason)
 
 
-def decide(command: str) -> dict[str, str] | None:
-    """Decide whether to allow a bash command. ``None`` means passthrough."""
+def decide(command: str, original_command: str | None = None) -> dict[str, str] | None:
+    """Decide whether to allow a bash command. ``None`` means passthrough.
+
+    ``original_command`` is the unmodified user-typed command string used for
+    allowlist exact-match lookups. When ``None``, defaults to ``command``.
+    """
+    if original_command is None:
+        original_command = command
     # Fold POSIX line continuations and unicode whitespace before any other
     # processing so downstream pipeline split / normalization sees a canonical
     # ASCII form.
     command = _canonicalize(command)
+    allowlist = load_allowlist()
 
     leak = get_credential_leak_deny(command)
     if leak is not None:
+        bypass = _maybe_allow_via_allowlist(
+            allowlist, "bash.credential_leak", original_command, leak
+        )
+        if bypass is not None:
+            return bypass
         _log_local(command, "deny", "credential-leak")
         return leak
 
@@ -3625,9 +3685,13 @@ def decide(command: str) -> dict[str, str] | None:
     if not segments:
         return None
 
-    deny = _get_always_deny(segments)
-    if deny is not None:
-        _log_local(command, "deny", "always-deny")
+    deny_with_id = _get_always_deny(segments)
+    if deny_with_id is not None:
+        deny, rule_id = deny_with_id
+        bypass = _maybe_allow_via_allowlist(allowlist, rule_id, original_command, deny)
+        if bypass is not None:
+            return bypass
+        _log_local(command, "deny", f"always-deny ({rule_id})")
         return deny
 
     # === Pre-evaluation: dangerous-construct deny in BOTH modes ===

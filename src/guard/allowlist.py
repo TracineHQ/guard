@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -157,8 +158,16 @@ def _load_one(path: Path, source_label: str) -> tuple[list[str], list[AllowEntry
 
 
 def global_allowlist_path() -> Path:
-    """Return the path of the global allowlist file (may not exist)."""
-    return GUARD_HOME / "allowlist.json"
+    """Return the path of the global allowlist file (may not exist).
+
+    Reads ``GUARD_DATA_DIR`` from the environment at call time so test
+    fixtures that point it at a tmp dir post-import take effect (the
+    module-level ``GUARD_HOME`` is fixed at import time and would
+    otherwise cache the real ``~/.claude/guard``).
+    """
+    env_dir = os.environ.get("GUARD_DATA_DIR")
+    base = Path(env_dir) if env_dir else GUARD_HOME
+    return base / "allowlist.json"
 
 
 def project_allowlist_path(cwd: Path | None = None) -> Path:
