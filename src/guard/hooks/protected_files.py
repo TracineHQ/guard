@@ -65,6 +65,32 @@ PROTECTED_PATTERNS: list[str] = [
     ".git/info/exclude",
     ".gitmodules",
     ".gitattributes",
+    # Agent-config poisoning surface. Writes to these files reshape future
+    # agent behavior across every subsequent session — the lowest-friction
+    # LLM-on-LLM persistence vector. Force ASK on every edit so the human
+    # sees a behavior-change attempt before it lands.
+    # User-global instructions (every session reads these). Listed BEFORE
+    # the project-level patterns so the more specific suffix wins the
+    # first-match iteration.
+    ".claude/CLAUDE.md",
+    ".aider.conf.yml.user",
+    # Project-level instructions read by Claude Code / Cursor / Aider.
+    "CLAUDE.md",
+    ".cursorrules",
+    ".cursor/rules",
+    ".aider.conf.yml",
+    ".continue/config.json",
+    # MCP server registrations — adding one mounts new tools into the
+    # agent's capability surface.
+    ".claude/mcp_servers",
+    ".claude/mcp.json",
+    # Cloud profile selection. ``~/.aws/config`` sets the default profile
+    # the agent later assumes; flipping it from "personal" to "prod-admin"
+    # is a privilege-escalation primitive that bypasses every shell matcher.
+    ".aws/config",
+    # Guard's own allowlist file — an agent that can write here grants
+    # itself overrides. The ``protected_files`` ASK forces human review.
+    ".claude/guard/allowlist.json",
 ]
 
 

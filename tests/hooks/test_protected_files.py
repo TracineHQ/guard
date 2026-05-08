@@ -38,15 +38,30 @@ class TestIsProtected:
         # Shouldn't match when 'hooks/' prefix is missing from the suffix
         assert is_protected("/some/path/not_hooks/command_registry.py") is None
 
-    def test_all_patterns_end_with_py_json_or_git_path(self):
-        # Patterns now include .py hook files, .json settings files, and
-        # git-infra paths (.git/hooks, .git/config, .gitmodules, etc.).
+    def test_all_patterns_have_recognizable_shape(self):
+        # Patterns include hook source (.py), settings (.json), git-infra
+        # paths (.git/hooks, .gitmodules), agent-config files (.md, .yml,
+        # .cursorrules, .aider.conf.yml.user), and a small set of dot-dirs
+        # (mcp_servers/, cursor/rules, etc.) where the last segment carries
+        # no extension.
+        recognized_suffixes = (
+            ".py",
+            ".json",
+            ".md",
+            ".yml",
+            ".yaml",
+            ".cursorrules",
+            ".user",
+            "/config",
+            "/hooks",
+            "/rules",
+            "/mcp_servers",
+        )
+        recognized_prefixes = (".git/", ".gitmodules", ".gitattributes")
         for p in PROTECTED_PATTERNS:
             assert (
-                p.endswith((".py", ".json"))
-                or p.startswith((".git/", ".gitmodules", ".gitattributes"))
-                or p == ".git"
-            )
+                p.endswith(recognized_suffixes) or p.startswith(recognized_prefixes) or p == ".git"
+            ), f"pattern {p!r} is neither a known suffix nor a git-infra path"
 
     def test_matches_claude_settings_json(self):
         # Edits to ~/.claude/settings.json must surface for review — that
@@ -57,6 +72,40 @@ class TestIsProtected:
     def test_matches_claude_settings_local_json(self):
         match = is_protected("/Users/x/.claude/settings.local.json")
         assert match == ".claude/settings.local.json"
+
+    # --- Agent-config poisoning surface (pass-4 T4.2) -------------------
+
+    def test_matches_project_claude_md(self):
+        assert is_protected("/repo/CLAUDE.md") == "CLAUDE.md"
+
+    def test_matches_user_claude_md(self):
+        assert is_protected("/Users/x/.claude/CLAUDE.md") == ".claude/CLAUDE.md"
+
+    def test_matches_cursorrules(self):
+        assert is_protected("/repo/.cursorrules") == ".cursorrules"
+
+    def test_matches_cursor_rules_dir(self):
+        assert is_protected("/repo/.cursor/rules/foo.md") == ".cursor/rules"
+
+    def test_matches_aider_conf(self):
+        assert is_protected("/repo/.aider.conf.yml") == ".aider.conf.yml"
+
+    def test_matches_continue_config(self):
+        assert is_protected("/repo/.continue/config.json") == ".continue/config.json"
+
+    def test_matches_mcp_servers_dir(self):
+        assert is_protected("/Users/x/.claude/mcp_servers/foo.json") == ".claude/mcp_servers"
+
+    def test_matches_mcp_json(self):
+        assert is_protected("/Users/x/.claude/mcp.json") == ".claude/mcp.json"
+
+    def test_matches_aws_config(self):
+        assert is_protected("/Users/x/.aws/config") == ".aws/config"
+
+    def test_matches_guard_allowlist(self):
+        assert (
+            is_protected("/Users/x/.claude/guard/allowlist.json") == ".claude/guard/allowlist.json"
+        )
 
 
 class TestHook:
