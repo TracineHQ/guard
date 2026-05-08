@@ -300,6 +300,28 @@ def bash_write_targets(command: str) -> list[str]:
     # files at a path argument that doesn't go through ``>`` / ``cp`` /
     # ``tee`` / in-place editor shapes.
     targets.extend(_truncate_patch_tar_targets(tokens))
+
+    # Ex / vim batch-mode editors: ``ex -sc <cmd> <target>``, ``vim -es ...``.
+    # The trailing non-flag positional is the file the script writes back.
+    targets.extend(_ex_vim_targets(tokens))
+
+    # Patch via stdin redirect: ``patch < diff``. Read the diff body and
+    # extract ``--- a/<path>`` / ``+++ b/<path>`` lines as candidate
+    # targets. Best-effort — if the diff isn't readable we skip silently.
+    targets.extend(_patch_diff_targets(tokens, command))
+
+    # ``find <root> ... -exec <cmd> ... \;`` — when ``<root>`` itself sits
+    # under a protected path, the doctrine path is implicit in ``{}``
+    # substitutions invisible to argv inspection. Conservative-but-safe
+    # rule: emit ``<root>`` as a candidate target. ``is_protected`` then
+    # decides if the whole command should ASK.
+    targets.extend(_find_exec_targets(tokens))
+
+    # Per-interpreter eval-flag map: ``python -c '...'``, ``php -r '...'``,
+    # etc. Scan the eval-string body for literal protected-pattern
+    # substrings (best-effort; dynamically-constructed paths cannot be
+    # resolved statically and fall through to the Edit/Write tool guard).
+    targets.extend(_interpreter_eval_targets(tokens))
     return targets
 
 
@@ -418,6 +440,183 @@ def _inplace_editor_targets(tokens: list[str]) -> list[str]:
                     if non_flag:
                         out.extend(non_flag[1:])
                     break
+    return out
+
+
+def _ex_vim_targets(tokens: list[str]) -> list[str]:
+    """Extract write targets from ``ex -sc <cmd> <target>`` / ``vim -es ...``.
+
+    ``ex`` and ``vim -es`` (silent batch mode) are scriptable editors that
+    commit changes via ``:wq`` style commands. The trailing positional
+    after the script is the file. Vim variants:
+
+    - ``ex -sc 'wq' /tmp/file``        → ``/tmp/file``
+    - ``vim -es -c 'wq' /tmp/file``    → ``/tmp/file``
+    - ``vim -es +wq /tmp/file``        → ``/tmp/file``
+    - ``vim /tmp/file``                → not extracted (interactive mode;
+      no batch script committing)
+    """
+    out: list[str] = []
+    skip_next = False
+    for i, tok in enumerate(tokens):
+        if skip_next:
+            skip_next = False
+            continue
+        head = tok.rsplit("/", 1)[-1]
+        rest = tokens[i + 1 :]
+        if head == "ex":
+            # ``ex -sc <cmd> <target>`` — silent batch. Skip flag values.
+            out.extend(_ex_positionals(rest))
+            continue
+        if head in {"vim", "nvim"}:
+            # Only treat as write when a batch-mode flag is present:
+            # ``-es`` / ``-Es`` / ``-eS`` / ``--script``, or the
+            # ``-e -s`` two-token spelling. Bare ``vim <file>`` is
+            # interactive and is skipped.
+            has_batch_short = any(t in {"-es", "-Es", "-eS", "--script"} for t in rest)
+            has_batch_split = "-e" in rest and "-s" in rest
+            if not (has_batch_short or has_batch_split):
+                continue
+            out.extend(_ex_positionals(rest))
+    del skip_next
+    return out
+
+
+def _ex_positionals(rest: list[str]) -> list[str]:
+    """Yield non-flag positional args, skipping the value after a ``-c``/``-S`` flag.
+
+    ``ex -sc 'wq' file`` → after ``-sc`` the next token is the script,
+    skipped. ``vim -es -c 'wq' file`` → ``-c <script>`` pair handled.
+    ``+wq`` is itself a flag-shaped token (starts with ``+``), so it is
+    skipped without consuming a separate value.
+    """
+    out: list[str] = []
+    skip_next = False
+    for t in rest:
+        if skip_next:
+            skip_next = False
+            continue
+        if t in {"-c", "-S", "--cmd", "-T", "--servername"}:
+            skip_next = True
+            continue
+        if t.startswith(("-", "+")):
+            # ``-sc`` is a fused short cluster; ``+wq`` is a vim ex-cmd.
+            # Both are non-positional; do not consume.
+            continue
+        out.append(t)
+    return out
+
+
+_DIFF_PATH_RE = re.compile(r"^[+-]{3}\s+([ab]/)?(\S+)", re.MULTILINE)
+
+
+def _resolve_diff_path(tokens: list[str], command: str) -> str | None:
+    """Locate the diff file from ``-i <diff>`` / ``--input=<diff>`` / ``< <diff>``."""
+    for i, tok in enumerate(tokens):
+        if tok == "-i" and i + 1 < len(tokens):
+            return tokens[i + 1]
+        if tok.startswith("--input="):
+            return tok[len("--input=") :]
+    m = re.search(r"(?:^|\s)<\s*(\S+)", command)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _patch_diff_targets(tokens: list[str], command: str) -> list[str]:
+    """Extract paths named inside a unified diff fed to ``patch``.
+
+    Three shapes:
+    - ``patch -i diff.patch [<target>]`` — diff path is the ``-i`` value.
+    - ``patch <target> < diff``         — single-file patch, target is positional.
+    - ``patch < diff``                  — diff comes via stdin redirect; multiple targets in body.
+
+    Reads the diff file and scans for ``--- a/<path>`` / ``+++ b/<path>``
+    headers. Lines starting with ``--- /dev/null`` (the ``a/`` side of an
+    "added" file) are skipped — only the destination side names a real
+    target. Best-effort: if the diff isn't readable, returns ``[]``.
+    """
+    if not any(tok.rsplit("/", 1)[-1] == "patch" for tok in tokens):
+        return []
+    diff_path = _resolve_diff_path(tokens, command)
+    if diff_path is None:
+        return []
+    try:
+        diff_text = Path(diff_path).read_text(encoding="utf-8", errors="replace")
+    except (OSError, UnicodeDecodeError):
+        return []
+    out: list[str] = []
+    for _prefix, path in _DIFF_PATH_RE.findall(diff_text):
+        if path in ("/dev/null", "dev/null"):
+            continue
+        out.append(path)
+    return out
+
+
+def _find_exec_targets(tokens: list[str]) -> list[str]:
+    r"""Return ``[<root>]`` for ``find <root> ... -exec ... \;`` invocations.
+
+    The doctrine path appears at runtime via ``{}`` substitution, not
+    literal text in argv. Conservative-but-safe rule: emit the search
+    root so that ``is_protected(<root>)`` decides. ``find <root>``
+    without ``-exec`` is read-only and not flagged.
+    """
+    for i, tok in enumerate(tokens):
+        head = tok.rsplit("/", 1)[-1]
+        if head != "find":
+            continue
+        rest = tokens[i + 1 :]
+        if not any(t in {"-exec", "-execdir"} for t in rest):
+            continue
+        # Search root: the first non-flag, non-expression token after ``find``.
+        # ``find . -name ...`` → ``.``. ``find /etc -exec ...`` → ``/etc``.
+        for t in rest:
+            if not t.startswith("-") and not t.startswith("("):
+                return [t]
+        # No explicit root — ``find -exec ...`` defaults to ``.``.
+        return ["."]
+    return []
+
+
+# Per-interpreter eval-flag map. Each entry is ``(basename_set, flag_set)``.
+# When a tokenized command has ``<binary>`` matching the basename set and a
+# subsequent token in the flag set, the next token is the eval body.
+_INTERPRETER_EVAL_FLAG_MAP: tuple[tuple[frozenset[str], frozenset[str]], ...] = (
+    (frozenset({"python", "python3"}), frozenset({"-c"})),
+    (frozenset({"node", "nodejs", "deno", "bun"}), frozenset({"-e", "--eval", "-c"})),
+    (frozenset({"perl", "ruby"}), frozenset({"-e"})),
+    (frozenset({"php"}), frozenset({"-r"})),
+)
+
+
+def _interpreter_eval_targets(tokens: list[str]) -> list[str]:
+    """Scan an interpreter's ``-c`` / ``-e`` / ``-r`` eval body for literal protected paths.
+
+    Best-effort static scan: looks for any ``_effective_patterns()`` entry
+    appearing as a substring inside the eval body and emits each match
+    as a candidate target. ``open('/.git/config','w')`` therefore yields
+    ``/.git/config``; ``shutil.copy(src, dst)`` where ``dst`` is a
+    runtime variable yields nothing (the static matcher cannot solve
+    that — the existing Edit/Write tool gate is the right defense).
+    """
+    out: list[str] = []
+    patterns = _effective_patterns()
+    for i, tok in enumerate(tokens):
+        head = tok.rsplit("/", 1)[-1]
+        # Strip a trailing version suffix: ``python3.11`` → ``python3``.
+        head_versionless = re.sub(r"^(python|node|deno|bun)[\d.]+$", r"\1", head)
+        if head_versionless == "python3":
+            head_versionless = "python3"
+        for binset, flagset in _INTERPRETER_EVAL_FLAG_MAP:
+            if head not in binset and head_versionless not in binset:
+                continue
+            rest = tokens[i + 1 :]
+            for j, flag in enumerate(rest):
+                if flag in flagset and j + 1 < len(rest):
+                    body = rest[j + 1]
+                    out.extend(pat for pat in patterns if pat in body)
+                    break
+            break
     return out
 
 

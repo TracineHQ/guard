@@ -13,6 +13,22 @@ adheres to [Semantic Versioning](https://semver.org/).
   `#` for comments) extend `PROTECTED_PATTERNS` without forking. File
   wins over env. See `SKILL.md`.
 
+### Added — protected_files extractor coverage
+
+- `ex -sc <cmd> <target>` and `vim -es -c <cmd> <target>` /
+  `vim -es +<cmd> <target>` batch-mode editors now extract the trailing
+  positional as a write target. Bare interactive `vim <file>` is NOT
+  flagged.
+- `patch -i <diff>` and `patch < <diff>` (stdin redirect) now read the
+  diff body and extract `--- a/<path>` / `+++ b/<path>` headers as
+  candidate targets. `--- /dev/null` (added-file marker) is ignored.
+- `find <root> -exec <cmd> ... \;` emits `<root>` as a candidate so a
+  recursive search rooted in a protected directory gets ASK'd.
+- Per-interpreter eval-flag map: `python|python3 -c`, `node|deno|bun
+  -c|-e|--eval`, `perl|ruby -e`, `php -r`. The body of the eval string
+  is scanned for literal protected-pattern substrings; matches surface
+  the protected path. Versioned basenames (`python3.11`) handled.
+
 ### Added — orchestration destruction coverage
 
 - `bash_command_validator`: ~30 new synthetic-deny matchers covering

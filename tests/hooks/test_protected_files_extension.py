@@ -28,9 +28,7 @@ if TYPE_CHECKING:
 # === GUARD_PROTECTED_EXTRA env var ===
 
 
-def test_env_unset_yields_no_extras(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_env_unset_yields_no_extras(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GUARD_PROTECTED_EXTRA", raising=False)
     monkeypatch.chdir(tmp_path)
     assert _extra_patterns() == []
@@ -42,25 +40,19 @@ def test_env_single_pattern(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert _extra_patterns() == ["bin"]
 
 
-def test_env_multiple_comma_separated(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_env_multiple_comma_separated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GUARD_PROTECTED_EXTRA", "bin, standards , dispatch")
     monkeypatch.chdir(tmp_path)
     assert _extra_patterns() == ["bin", "standards", "dispatch"]
 
 
-def test_env_skips_blank_entries(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_env_skips_blank_entries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GUARD_PROTECTED_EXTRA", "bin,, , standards,")
     monkeypatch.chdir(tmp_path)
     assert _extra_patterns() == ["bin", "standards"]
 
 
-def test_env_empty_string_is_no_extras(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_env_empty_string_is_no_extras(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GUARD_PROTECTED_EXTRA", "")
     monkeypatch.chdir(tmp_path)
     assert _extra_patterns() == []
@@ -81,9 +73,7 @@ def test_file_one_per_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     assert _extra_patterns() == ["bin", "standards", "dispatch"]
 
 
-def test_file_strips_hash_comments(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_file_strips_hash_comments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     _write_file(
         tmp_path,
@@ -100,9 +90,7 @@ def test_file_handles_blank_lines_and_whitespace(
     assert _extra_patterns() == ["bin", "standards"]
 
 
-def test_file_unreadable_falls_back_to_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_file_unreadable_falls_back_to_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Existing file but not readable -> the read returns [] and we still hit env."""
     monkeypatch.setenv("GUARD_PROTECTED_EXTRA", "from-env")
     monkeypatch.chdir(tmp_path)
@@ -114,9 +102,7 @@ def test_file_unreadable_falls_back_to_env(
     assert _extra_patterns() == []
 
 
-def test_file_absent_falls_back_to_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_file_absent_falls_back_to_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GUARD_PROTECTED_EXTRA", "from-env")
     monkeypatch.chdir(tmp_path)
     assert _extra_patterns() == ["from-env"]
@@ -149,9 +135,7 @@ def test_effective_patterns_appends_extras_after_builtins(
     assert "CLAUDE.md" in pats
 
 
-def test_is_protected_honors_env_extension(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_is_protected_honors_env_extension(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GUARD_PROTECTED_EXTRA", "bin")
     monkeypatch.chdir(tmp_path)
     # Directory-segment match (no `.` in last segment).
