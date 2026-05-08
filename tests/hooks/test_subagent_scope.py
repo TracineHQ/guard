@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """Tests for subagent_scope hook."""
 
 from __future__ import annotations

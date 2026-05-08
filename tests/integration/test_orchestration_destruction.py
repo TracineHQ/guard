@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """Coverage for orchestration-tool destruction shapes added to the registry.
 
 Each command below has no legitimate single-step dev variant; the matching
@@ -37,11 +39,11 @@ DENY_CASES = [
     "aws s3api delete-objects --bucket my-bucket --delete '...'",
     "aws s3api delete-bucket-policy --bucket my-bucket",
     # --- gh: literal + raw-API bypass ---
-    "gh repo delete TracineHQ/guard --yes",
+    "gh repo delete acme/example --yes",
     "gh repo delete owner/repo",
     "gh release delete v1.0.0 --yes",
     "gh release delete v0.5.0",
-    "gh api -X DELETE /repos/TracineHQ/guard",
+    "gh api -X DELETE /repos/acme/example",
     "gh api --method DELETE /repos/owner/repo",
     "gh api -XDELETE /repos/owner/repo",
     "gh api -X delete /repos/owner/repo",

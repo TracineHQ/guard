@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """End-to-end plugin install + smoke test.
 
 Stages the guard plugin into a temporary directory the way Claude Code's

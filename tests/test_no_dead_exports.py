@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """Guard against orphaned exports.
 
 When a "deny set" or "rule list" is defined in `registry.py` (or an

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """Shared pytest fixtures for the guard test suite."""
 
 from __future__ import annotations

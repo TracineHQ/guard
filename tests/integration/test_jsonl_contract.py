@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """JSONL output-format contract test (docs/output-format.md schema v1).
 
 Drives each of the 8 hooks as a real subprocess with a payload that triggers

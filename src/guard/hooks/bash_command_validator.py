@@ -2267,6 +2267,14 @@ _SENSITIVE_DEST_HOME_PATTERNS = (
     "Library/LaunchAgents/",
     "Library/LaunchDaemons/",
     ".local/bin/",
+    # Guard's own audit log + autonomous-mode queue. Without this, an agent
+    # can ``> ~/.claude/guard-decisions.jsonl`` to truncate the audit trail
+    # or ``echo > ~/.claude/guard-autonomous-queue.jsonl`` to forge entries.
+    # The append-side writer already uses O_NOFOLLOW + O_APPEND for symlink
+    # safety; this closes the truncate/overwrite vector via WRITE_HEAD verbs.
+    ".claude/guard-decisions.jsonl",
+    ".claude/guard-autonomous-queue.jsonl",
+    ".claude/guard/",
 )
 _WRITE_HEAD_VERBS = {
     "tee",
@@ -2318,7 +2326,7 @@ def _operand_is_sensitive(operand: str) -> bool:
         tail = op[len("~/") :]
         if any(tail.startswith(p) for p in _SENSITIVE_DEST_HOME_PATTERNS):
             return True
-    # Absolute home paths like ``/Users/dev/.ssh/authorized_keys`` and
+    # Absolute home paths like ``/Users/<user>/.ssh/authorized_keys`` and
     # ``/home/user/.ssh/authorized_keys`` — match by the .ssh/... tail.
     return any(("/" + p) in op for p in _SENSITIVE_DEST_HOME_PATTERNS)
 
@@ -3285,7 +3293,7 @@ def _is_git_submodule_add(normalized: str) -> bool:
 
 # System roots where ``git worktree add`` has no legitimate reason to write.
 # Excludes /Users/, /home/, /private/ — those host all real user worktrees
-# (e.g. /Users/dev/develop/repo/wt is the canonical macOS shape).
+# (e.g. /Users/<user>/develop/repo/wt is the canonical macOS shape).
 _WORKTREE_DANGEROUS_PREFIXES = (
     "/etc/",
     "/usr/",
@@ -3315,7 +3323,7 @@ def _is_git_worktree_add(normalized: str) -> bool:
 
     Allow ``git worktree list/lock/move/prune/remove/repair`` and the common
     legitimate shapes (``git worktree add ../scratch HEAD``,
-    ``git worktree add /tmp/wt HEAD``, ``git worktree add /Users/dev/.../wt``).
+    ``git worktree add /tmp/wt HEAD``, ``git worktree add /Users/<user>/.../wt``).
     Only deny when the target resolves under a system root (/etc, /usr, /var,
     /System, ...) where a worktree would clobber OS files. Properly handles
     value-consuming flags (``-b <branch>``) so they don't shadow the path arg.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """Contract: every registry.ALWAYS_DENY entry must be enforced by bash_command_validator.
 
 If a future change orphans ALWAYS_DENY (or any specific entry), this test fires.

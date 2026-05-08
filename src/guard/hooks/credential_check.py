@@ -210,8 +210,8 @@ def _expand(path: str) -> str:
 def _candidate_paths(path: str) -> list[str]:
     """Return both the resolved and lexical-normalized forms of ``path``.
 
-    ``Path.resolve()`` follows symlinks: on macOS ``/tmp/../Users/dev/.ssh/id_rsa``
-    resolves to ``/private/Users/dev/.ssh/id_rsa`` because ``/tmp`` is a symlink
+    ``Path.resolve()`` follows symlinks: on macOS ``/tmp/../Users/<user>/.ssh/id_rsa``
+    resolves to ``/private/Users/<user>/.ssh/id_rsa`` because ``/tmp`` is a symlink
     to ``/private/tmp``. The credential matchers anchor on ``$HOME`` (``/Users/dev``)
     so the resolved form misses. Match against both to close that gap.
     """

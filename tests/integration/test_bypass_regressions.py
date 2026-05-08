@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """Regression tests for verified shell-validator bypasses.
 
 Each assertion pins a previously-confirmed passthrough (``decide`` returning

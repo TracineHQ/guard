@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """Safety-hardening regression tests.
 
 Each test pins a specific bypass shape. Removing the corresponding fix

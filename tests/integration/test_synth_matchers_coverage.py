@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """End-to-end coverage for the synthetic-deny matcher families.
 
 One test group per matcher family. Each group has DENY_CASES (must
@@ -1359,6 +1361,29 @@ DISK_IMAGE_DENY = [
 @pytest.mark.parametrize("command", DISK_IMAGE_DENY)
 def test_disk_image_destruction_denied(command: str) -> None:
     assert _is_deny(decide(command)), f"disk-image bypass: {command!r}"
+
+
+# ============================================================================
+# A5: Guard's own audit log + allowlist dir on the sensitive-destination list
+# ============================================================================
+# An agent that can truncate or forge guard's audit log defeats post-incident
+# forensics. These paths now deny on any WRITE_HEAD verb (tee/cp/mv/
+# truncate/install/ln/dd/rsync/scp/patch/rclone).
+
+GUARD_LOG_PROTECT_DENY = [
+    "cp /tmp/forge.jsonl ~/.claude/guard-decisions.jsonl",
+    "tee ~/.claude/guard-decisions.jsonl",
+    "truncate -s 0 ~/.claude/guard-decisions.jsonl",
+    "mv /tmp/x ~/.claude/guard-autonomous-queue.jsonl",
+    "cp /tmp/x ~/.claude/guard/allowlist.json",
+    "tee ~/.claude/guard/allowlist.json",
+    "ln -sf /tmp/evil ~/.claude/guard-decisions.jsonl",
+]
+
+
+@pytest.mark.parametrize("command", GUARD_LOG_PROTECT_DENY)
+def test_guard_log_paths_protected(command: str) -> None:
+    assert _is_deny(decide(command)), f"guard log forge bypass: {command!r}"
 
 
 # Brace forms that must NOT trip the expander into a false positive
