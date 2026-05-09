@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """Top-level smoke test: critical guard modules load and expose the symbols
 that the hooks and external consumers depend on."""
 

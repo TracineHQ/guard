@@ -20,6 +20,7 @@ import sys
 from typing import Any
 
 from guard._utils import emit_pretooluse_decision, log_decision, safe_main
+from guard.allowlist import hook_bypass_reason, load_allowlist
 
 _HOOK_ID = "guard.git_c_validator"
 
@@ -294,9 +295,17 @@ def _check_dangerous_kv(kv: str) -> tuple[str, str] | None:
 
 
 def _has_dangerous_paths_config(command: str) -> tuple[str, str] | None:
-    """Return ``(key, value)`` if ``-c <core.hooksPath|core.attributesFile>=...`` is present.
+    """Return ``(key, value)`` if a ``-c`` paths-config override is present.
 
-    Matches git's real syntax: ``-c`` and ``key=value`` as separate tokens.
+    Matches all four argv shapes git accepts:
+    - ``-c key=value``                  (canonical, two tokens)
+    - ``-c=key=value``                  (single-token form)
+    - ``-ckey=value``                   (fused short-flag form)
+    - ``--config-env=key=ENVVAR``       (env-indirect override; we deny on key alone)
+
+    The fused form (``-ccore.hooksPath=/tmp/evil``) was the original bypass:
+    a per-token ``parts[i] == "-c"`` walk would skip it entirely. Now we
+    handle the fused form first, then fall through to the multi-token forms.
     Denies any value, not just traversal — absolute paths to attacker-controlled
     locations bypass a traversal-only check. The next git subcommand in the
     same invocation would load hooks/attributes from the override target.
@@ -309,10 +318,44 @@ def _has_dangerous_paths_config(command: str) -> tuple[str, str] | None:
         return None
     i = 1
     while i < len(parts):
-        if parts[i] == "-c" and i + 1 < len(parts):
+        tok = parts[i]
+        # Canonical: -c <key=value>
+        if tok == "-c" and i + 1 < len(parts):
             hit = _check_dangerous_kv(parts[i + 1])
             if hit is not None:
                 return hit
+            i += 2
+            continue
+        # Equals form: -c=key=value (rare but valid)
+        if tok.startswith("-c=") and len(tok) > len("-c="):
+            hit = _check_dangerous_kv(tok[len("-c=") :])
+            if hit is not None:
+                return hit
+            i += 1
+            continue
+        # Fused short flag: -ccore.hooksPath=/tmp/evil
+        if tok.startswith("-c") and len(tok) > 2 and "=" in tok:
+            hit = _check_dangerous_kv(tok[2:])
+            if hit is not None:
+                return hit
+            i += 1
+            continue
+        # Long-form env override: --config-env=key=ENVVAR
+        if tok.startswith("--config-env="):
+            payload = tok[len("--config-env=") :]
+            # payload is key=ENVVAR; take the key half and check it.
+            if "=" in payload:
+                env_key = payload.split("=", 1)[0]
+                if _normalize_config_key(env_key) in _DANGEROUS_PATHS_CONFIG_KEYS:
+                    return env_key, "<env-indirect>"
+            i += 1
+            continue
+        if tok == "--config-env" and i + 1 < len(parts):
+            payload = parts[i + 1]
+            if "=" in payload:
+                env_key = payload.split("=", 1)[0]
+                if _normalize_config_key(env_key) in _DANGEROUS_PATHS_CONFIG_KEYS:
+                    return env_key, "<env-indirect>"
             i += 2
             continue
         i += 1
@@ -363,9 +406,38 @@ def hook(payload: dict[str, Any]) -> None:
     if not isinstance(tool_input, dict):
         return
     command = tool_input.get("command", "")
-    if not isinstance(command, str) or (
-        "git -C" not in command and "git commit" not in command and "git -c " not in command
-    ):
+    if not isinstance(command, str) or not command:
+        return
+    # Token-aware gate: any `git` invocation with a `-C`/`-c` global option
+    # (in any of its argv shapes — bare, fused, equals, --config-env) or a
+    # `git commit` subcommand reaches `decide()`. The previous substring
+    # gate ("git -c " with trailing space) skipped the fused form
+    # `git -ccore.hooksPath=...`, leaving the new fused-form parser dead.
+    try:
+        head = shlex.split(command)
+    except ValueError:
+        head = command.split()
+    if not head or head[0] != "git":
+        return
+    rest = head[1:]
+    has_config_or_dir_flag = any(t.startswith(("-C", "-c", "--config-env")) for t in rest)
+    if not has_config_or_dir_flag and "commit" not in rest:
+        return
+
+    cwd_val = payload.get("cwd")
+    cwd_str = cwd_val if isinstance(cwd_val, str) else None
+    bypass = hook_bypass_reason(load_allowlist(), _HOOK_ID, command)
+    if bypass is not None:
+        log_decision(
+            hook_id=_HOOK_ID,
+            event="PreToolUse",
+            tool_name="Bash",
+            decision="pass",
+            reason=bypass,
+            command_excerpt=command,
+            session_id=str(payload.get("session_id", "")),
+            cwd=cwd_str,
+        )
         return
 
     envelope = decide(command)

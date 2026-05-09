@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """Tests for bash_command_validator hook."""
 
 from __future__ import annotations
@@ -237,9 +239,9 @@ class TestSubprocessIntegration:
         decision, _ = _run('# query\nsqlite3 db.sqlite "SELECT * FROM users"', tmp_path)
         assert decision == "allow"
 
-    def test_sqlite3_drop_passthrough(self, tmp_path):
+    def test_sqlite3_drop_denied(self, tmp_path):
         decision, _ = _run('# cleanup\nsqlite3 db.sqlite "DROP TABLE users"', tmp_path)
-        assert decision == "passthrough"
+        assert decision == "deny"
 
     def test_bash_command_validator_denies_unsafe_input(self, tmp_path):
         # gh auth token is hard-denied
@@ -466,7 +468,8 @@ def test_quoted_whitespace_interpreter_denied(cmd):
 # automatically regression-tested for the quoted-whitespace bypass.
 def _always_deny_quoted_whitespace_inputs():
     cases = []
-    for prefix in ALWAYS_DENY:
+    # Sort so xdist workers collect parametrize cases in a stable order.
+    for prefix in sorted(ALWAYS_DENY):
         toks = prefix.split()
         if len(toks) < 2:
             continue
@@ -634,8 +637,10 @@ def test_every_dangerous_rm_operand_denied(operand):
 
 
 # Every ALWAYS_DENY git literal must be reachable behind global git options.
+# Sort so xdist workers collect the parametrize set in a stable order
+# (ALWAYS_DENY is a frozenset — unsorted iteration breaks --dist=loadgroup).
 def _git_always_deny_literals():
-    return [p for p in ALWAYS_DENY if p.startswith("git ")]
+    return sorted(p for p in ALWAYS_DENY if p.startswith("git "))
 
 
 @pytest.mark.parametrize("literal", _git_always_deny_literals())

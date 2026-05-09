@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """Integration tests — every hook runs as a real subprocess on benign and
 representative-unsafe payloads. These tests verify that hooks never crash
 and that they produce well-formed output for the harness."""

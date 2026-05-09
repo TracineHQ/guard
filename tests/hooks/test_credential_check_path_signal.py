@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """Universal-path-scanner tests for credential_check.
 
 Covers the rework that converts credential checking from per-tool/per-verb

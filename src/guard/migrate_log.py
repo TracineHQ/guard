@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """One-shot migration of guard's JSONL decision log to schema v1.
 
 This is internal cleanup, not a long-term legacy-compat layer. During pre-v1.1

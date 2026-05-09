@@ -163,6 +163,103 @@ def test_status_no_log(decision_log_env: Path) -> None:
     assert "exists: no" in pretty
 
 
+# === guard status: wiring check ===
+
+
+def test_check_wiring_all_negative(tmp_path: Path, decision_log_env: Path) -> None:
+    from guard.cli import _check_wiring
+
+    signals = _check_wiring(home=tmp_path)
+    assert signals["plugin_cache_present"] is False
+    assert signals["settings_references_guard"] is False
+    assert signals["log_has_guard_records"] is False
+    assert signals["active"] is False
+
+
+def test_check_wiring_plugin_cache_versioned_dir(tmp_path: Path, decision_log_env: Path) -> None:
+    from guard.cli import _check_wiring
+
+    cache = tmp_path / ".claude" / "plugins" / "cache" / "guard@1.0.0"
+    cache.mkdir(parents=True)
+    signals = _check_wiring(home=tmp_path)
+    assert signals["plugin_cache_present"] is True
+    assert signals["active"] is True
+
+
+def test_check_wiring_plugin_cache_unversioned_dir(tmp_path: Path, decision_log_env: Path) -> None:
+    from guard.cli import _check_wiring
+
+    (tmp_path / ".claude" / "plugins" / "cache" / "guard").mkdir(parents=True)
+    signals = _check_wiring(home=tmp_path)
+    assert signals["plugin_cache_present"] is True
+    assert signals["active"] is True
+
+
+def test_check_wiring_settings_reference(tmp_path: Path, decision_log_env: Path) -> None:
+    from guard.cli import _check_wiring
+
+    cdir = tmp_path / ".claude"
+    cdir.mkdir()
+    (cdir / "settings.json").write_text(
+        json.dumps(
+            {"hooks": {"PreToolUse": [{"hooks": [{"command": "guard.bash_command_validator"}]}]}}
+        ),
+        encoding="utf-8",
+    )
+    signals = _check_wiring(home=tmp_path)
+    assert signals["settings_references_guard"] is True
+    assert signals["active"] is True
+
+
+def test_check_wiring_settings_local_path_match(tmp_path: Path, decision_log_env: Path) -> None:
+    from guard.cli import _check_wiring
+
+    cdir = tmp_path / ".claude"
+    cdir.mkdir()
+    (cdir / "settings.local.json").write_text(
+        '{"hooks":[{"command":"~/some/guard/hooks/run.py"}]}',
+        encoding="utf-8",
+    )
+    signals = _check_wiring(home=tmp_path)
+    assert signals["settings_references_guard"] is True
+
+
+def test_check_wiring_log_has_guard_records(tmp_path: Path, populated_log: Path) -> None:
+    from guard.cli import _check_wiring
+
+    signals = _check_wiring(home=tmp_path)
+    assert signals["log_has_guard_records"] is True
+    assert signals["active"] is True
+
+
+def test_status_active_yes_when_wired(
+    tmp_path: Path, populated_log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import guard.cli as cli_mod
+
+    monkeypatch.setattr(cli_mod.Path, "home", classmethod(lambda _cls: tmp_path))
+    (tmp_path / ".claude" / "plugins" / "cache" / "guard").mkdir(parents=True)
+
+    payload, pretty = cli_mod.cmd_status()
+    assert payload["active"] is True
+    assert payload["wiring"]["plugin_cache_present"] is True
+    assert "active: yes" in pretty
+
+
+def test_status_active_no_emits_remediation(
+    tmp_path: Path, decision_log_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import guard.cli as cli_mod
+
+    monkeypatch.setattr(cli_mod.Path, "home", classmethod(lambda _cls: tmp_path))
+
+    payload, pretty = cli_mod.cmd_status()
+    assert payload["active"] is False
+    assert "active: no" in pretty
+    assert "does not appear to be wired" in pretty
+    assert "/plugin install guard" in pretty
+
+
 # === guard noisy ===
 
 

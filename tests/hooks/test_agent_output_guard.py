@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """Tests for agent_output_guard hook."""
 
 from __future__ import annotations

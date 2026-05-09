@@ -35,10 +35,28 @@ classifiers = [
 dev = [
   "pytest>=9.0.3",
   "pytest-cov>=7.1.0",
+  "pytest-xdist>=3.8.0",
   "pre-commit>=4.6.0",
   "ruff>=0.15.12",
   "mypy>=1.20.2",
   "vulture>=2.16",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+# -n auto = pytest-xdist worker per CPU core (logical).
+# --dist=loadfile keeps every test in the same file on the same worker so
+# module-scoped fixtures (notably the shared JSONL log in test_plugin_e2e)
+# behave the same under parallel and serial runs. Different test files
+# still run in parallel — gives ~6x wall-time speedup over the default.
+addopts = [
+  "-n",
+  "auto",
+  "--dist",
+  "loadfile",
 ]
 
 [project.scripts]
@@ -90,8 +108,36 @@ pydocstyle.convention = "google"
   "ARG002",    # side-effect-only pytest fixtures on test methods
   "PTH111",    # os.path used in payload strings, not real path objects
   "E402",      # grouped imports below header sections are intentional
+  "PT014",     # duplicate parametrize cases sometimes useful for human-readable grouping
+  "E501",      # long DENY/LEGIT case strings; readability beats wrap
 ]
 "src/guard/__init__.py" = ["D104"]
+"src/guard/hooks/bash_command_validator.py" = [
+  # The validator is a dispatcher of token-walk matchers — len-checks against
+  # 2/3/4 tokens are intrinsic to argv parsing, and each matcher has many
+  # small early-returns (one per detected shape). Naming each `_TOKENS_MIN`
+  # constant inflates the module without clarifying.
+  "PLR2004",   # magic value (token-count constants are obvious in context)
+  "PLR0911",   # too many return statements (each matcher is a chain of detect-and-deny)
+  "PLR0912",   # too many branches (matcher dispatchers)
+  "C901",      # cyclomatic complexity (matchers cover many shapes)
+  "SIM102",    # nested ifs are clearer for matcher dispatch
+  "SIM103",    # explicit return is clearer than `return cond`
+  "PLR1714",   # tuple `in` checks vs `or` — both fine, not worth churn
+  "S105",      # _SYNTH_*_DENY label names false-trip the password heuristic
+  "E501",      # long doc strings with rule lists
+]
+"src/guard/hooks/git_c_validator.py" = [
+  "PLR2004",   # magic token-index constants in argv parsing
+  "PLR0911",   # multi-form -c parser has one return per shape
+  "PLR0912",   # branches mirror the four argv shapes
+  "C901",      # cyclomatic complexity per shape
+]
+"src/guard/hooks/commit_message_validator.py" = [
+  "PLR0911",   # decide() returns one branch per sentinel/checker
+  "C901",      # _read_message_file dispatches stream/scope/sensitive/io
+  "S108",      # /tmp/ and /var/tmp/ are scope allowlist literals, not temp-file creates
+]
 
 [tool.mypy]
 python_version = "3.11"
@@ -106,4 +152,9 @@ ignore_decorators = ["@pytest.fixture", "@pytest.mark.parametrize"]
 
 [tool.bandit]
 exclude_dirs = ["tests", "dist", "build"]
-skips = []
+# B105 (hardcoded password): trips on _SYNTH_*_DENY label strings (e.g.
+#   "<gpg secret-key deletion>") that are dispatcher reason labels, not
+#   credentials. B108 (insecure temp dir): trips on the
+#   commit_message_validator scope-allowlist literals ("/tmp/", "/var/tmp/")
+#   that classify paths, not create files.
+skips = ["B105", "B108"]

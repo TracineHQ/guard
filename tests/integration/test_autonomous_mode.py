@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """End-to-end: when CLAUDE_AUTONOMOUS=1, bash_command_validator default-denies
 unsafe segments and surfaces AUTONOMOUS_FEEDBACK custom messages.
 

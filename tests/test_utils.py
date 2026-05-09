@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """Tests for guard._utils."""
 
 from __future__ import annotations
@@ -449,6 +451,122 @@ def test_is_autonomous_mode_rejects_falsy(monkeypatch) -> None:
     for value in ("", "0", "false", "no", "off", "anything-else"):
         monkeypatch.setenv("CLAUDE_AUTONOMOUS", value)
         assert not is_autonomous_mode(), f"falsy value accepted: {value!r}"
+
+
+# Synthetic credential shapes used to verify the log-redaction catalog.
+# All values are intentionally fake — pragma allowlists silence the
+# detect-secrets pre-push hook on each line.
+REDACTION_CASES = [
+    ("AKIAIOSFODNN7EXAMPLE", "[REDACTED-AWS-ID]"),  # pragma: allowlist secret
+    ("ASIAEXAMPLE12345ABCD", "[REDACTED-AWS-ID]"),  # pragma: allowlist secret
+    ("sk-ant-api03-" + "a" * 64, "[REDACTED-ANTHROPIC-KEY]"),  # pragma: allowlist secret
+    ("sk-proj-" + "B" * 32, "[REDACTED-OPENAI-PROJECT-KEY]"),  # pragma: allowlist secret
+    ("github_pat_" + "A" * 82, "[REDACTED-GITHUB-PAT]"),  # pragma: allowlist secret
+    ("ghp_" + "0" * 36, "[REDACTED-GITHUB-TOKEN]"),  # pragma: allowlist secret
+    ("ghs_" + "0" * 36, "[REDACTED-GITHUB-TOKEN]"),  # pragma: allowlist secret
+    ("glpat-" + "A" * 20, "[REDACTED-GITLAB-PAT]"),  # pragma: allowlist secret
+    ("xoxb-1234567890-abcdef", "[REDACTED-SLACK-TOKEN]"),  # pragma: allowlist secret
+    ("xoxe-1234567890-abcdef", "[REDACTED-SLACK-TOKEN]"),  # pragma: allowlist secret
+    ("rk_live_" + "A" * 24, "[REDACTED-STRIPE-KEY]"),  # pragma: allowlist secret
+    ("sk_test_" + "A" * 24, "[REDACTED-STRIPE-KEY]"),  # pragma: allowlist secret
+    ("SG." + "A" * 22 + "." + "B" * 43, "[REDACTED-SENDGRID-KEY]"),  # pragma: allowlist secret
+    ("npm_" + "A" * 36, "[REDACTED-NPM-TOKEN]"),  # pragma: allowlist secret
+    ("pypi-AgEIcHlwaS5vcmc" + "A" * 80, "[REDACTED-PYPI-TOKEN]"),  # pragma: allowlist secret
+    (
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV",  # pragma: allowlist secret
+        "[REDACTED-JWT]",
+    ),
+]
+
+
+@pytest.mark.parametrize(("secret", "marker"), REDACTION_CASES)
+def test_log_decision_redacts_known_secret_shapes(
+    secret: str,
+    marker: str,
+    guard_decisions_jsonl: Path,
+) -> None:
+    """Each known credential shape must be replaced before persistence."""
+    log_decision(
+        hook_id="guard.test",
+        event="PreToolUse",
+        tool_name="Bash",
+        decision="deny",
+        reason=f"caught: {secret}",
+        command_excerpt=f"echo {secret}",
+        session_id="redaction-test",
+    )
+    line = guard_decisions_jsonl.read_text("utf-8").strip()
+    assert secret not in line, f"{secret!r} survived redaction in: {line}"
+    assert marker in line, f"{marker} missing from log line: {line}"
+
+
+def test_log_decision_redacts_pem_block(guard_decisions_jsonl: Path) -> None:
+    """Multi-line PEM private key blocks must collapse to a single placeholder."""
+    pem = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"  # pragma: allowlist secret
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABFwAAAAdz\n"  # pragma: allowlist secret
+        "c2gtcnNhAAAAAwEAAQ==\n"  # pragma: allowlist secret
+        "-----END OPENSSH PRIVATE KEY-----"  # pragma: allowlist secret
+    )
+    log_decision(
+        hook_id="guard.test",
+        event="PreToolUse",
+        tool_name="Write",
+        decision="deny",
+        reason=f"sees key: {pem}",
+        session_id="redaction-test",
+    )
+    line = guard_decisions_jsonl.read_text("utf-8").strip()
+    assert "BEGIN OPENSSH PRIVATE KEY" not in line  # pragma: allowlist secret
+    assert "[REDACTED-PRIVATE-KEY]" in line
+
+
+def test_log_decision_redacts_authorization_bearer(guard_decisions_jsonl: Path) -> None:
+    log_decision(
+        hook_id="guard.test",
+        event="PreToolUse",
+        tool_name="Bash",
+        decision="deny",
+        reason="curl with auth",
+        command_excerpt='curl -H "Authorization: Bearer abcdef-real-token-here" https://x',
+        session_id="redaction-test",
+    )
+    line = guard_decisions_jsonl.read_text("utf-8").strip()
+    assert "abcdef-real-token-here" not in line
+    assert "[REDACTED]" in line
+
+
+def test_log_decision_redacts_credential_named_kv(guard_decisions_jsonl: Path) -> None:
+    log_decision(
+        hook_id="guard.test",
+        event="PreToolUse",
+        tool_name="Bash",
+        decision="deny",
+        reason="env-set leak",
+        command_excerpt="aws_secret_access_key=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",  # pragma: allowlist secret
+        session_id="redaction-test",
+    )
+    line = guard_decisions_jsonl.read_text("utf-8").strip()
+    assert "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY" not in line  # pragma: allowlist secret
+    assert "[REDACTED]" in line
+
+
+def test_append_jsonl_refuses_to_follow_symlink(tmp_path: Path) -> None:
+    """O_NOFOLLOW: pre-planted symlink at the log path must not be followed.
+
+    Without this, an attacker that pre-creates
+    ``~/.claude/guard-decisions.jsonl -> /etc/cron.d/x`` could turn guard's
+    append into an arbitrary-write primitive.
+    """
+    target = tmp_path / "actual-target.txt"
+    target.write_text("untouched")
+    link_path = tmp_path / "guard-decisions.jsonl"
+    link_path.symlink_to(target)
+
+    append_jsonl(link_path, {"schema_version": 1, "decision": "allow"})
+
+    # Target must be byte-for-byte unchanged; the append silently fails.
+    assert target.read_text() == "untouched"
 
 
 def test_append_jsonl_concurrent_writes_all_parse(tmp_path: Path) -> None:

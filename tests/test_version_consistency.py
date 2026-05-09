@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """Single-source-of-truth check for the package version.
 
 ``guard.__version__`` reads from installed package metadata (the dist built

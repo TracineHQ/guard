@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """End-to-end plugin install + smoke test.
 
 Stages the guard plugin into a temporary directory the way Claude Code's
@@ -334,10 +336,27 @@ def test_no_relative_escape_in_hook_commands(staged: Path) -> None:
 
 
 def test_no_developer_absolute_paths_in_sources(staged: Path) -> None:
-    """No leaked developer absolute paths in shipped Python sources."""
+    """No leaked developer absolute paths in shipped Python sources.
+
+    Skips ``registry.py``, ``bash_command_validator.py``,
+    ``commit_message_validator.py``, and ``_safe_io.py`` — those modules
+    intentionally enumerate top-level system paths (``/Users/``,
+    ``/home/``, ``/root/``, ``/etc/``, ``/private/...``, ...) as part of
+    the sensitive-destination matchers and the safe-read scope/denylist
+    checks. Treating those literals as "leaked dev paths" is a false
+    positive.
+    """
     bad_prefixes = ('"/Users/', "'/Users/", '"/home/', "'/home/", '"/root/', "'/root/")
+    intentional_path_modules = {
+        "registry.py",
+        "bash_command_validator.py",
+        "commit_message_validator.py",
+        "_safe_io.py",
+    }
     src_root = staged / "src"
     for path in src_root.rglob("*.py"):
+        if path.name in intentional_path_modules:
+            continue
         text = path.read_text(encoding="utf-8")
         for prefix in bad_prefixes:
             assert prefix not in text, f"absolute dev path {prefix!r} leaked in {path}"

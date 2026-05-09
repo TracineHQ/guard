@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
 """Tests for protected_files hook."""
 
 from __future__ import annotations
@@ -36,11 +38,30 @@ class TestIsProtected:
         # Shouldn't match when 'hooks/' prefix is missing from the suffix
         assert is_protected("/some/path/not_hooks/command_registry.py") is None
 
-    def test_all_patterns_end_with_py_or_json(self):
-        # Patterns now include both .py hook files and .json settings files;
-        # widen the invariant to cover both.
+    def test_all_patterns_have_recognizable_shape(self):
+        # Patterns include hook source (.py), settings (.json), git-infra
+        # paths (.git/hooks, .gitmodules), agent-config files (.md, .yml,
+        # .cursorrules, .aider.conf.yml.user), and a small set of dot-dirs
+        # (mcp_servers/, cursor/rules, etc.) where the last segment carries
+        # no extension.
+        recognized_suffixes = (
+            ".py",
+            ".json",
+            ".md",
+            ".yml",
+            ".yaml",
+            ".cursorrules",
+            ".user",
+            "/config",
+            "/hooks",
+            "/rules",
+            "/mcp_servers",
+        )
+        recognized_prefixes = (".git/", ".gitmodules", ".gitattributes")
         for p in PROTECTED_PATTERNS:
-            assert p.endswith((".py", ".json"))
+            assert (
+                p.endswith(recognized_suffixes) or p.startswith(recognized_prefixes) or p == ".git"
+            ), f"pattern {p!r} is neither a known suffix nor a git-infra path"
 
     def test_matches_claude_settings_json(self):
         # Edits to ~/.claude/settings.json must surface for review — that
@@ -51,6 +72,93 @@ class TestIsProtected:
     def test_matches_claude_settings_local_json(self):
         match = is_protected("/Users/x/.claude/settings.local.json")
         assert match == ".claude/settings.local.json"
+
+    # --- Agent-config poisoning surface (pass-4 T4.2) -------------------
+
+    def test_matches_project_claude_md(self):
+        assert is_protected("/repo/CLAUDE.md") == "CLAUDE.md"
+
+    def test_matches_user_claude_md(self):
+        assert is_protected("/Users/x/.claude/CLAUDE.md") == ".claude/CLAUDE.md"
+
+    def test_matches_cursorrules(self):
+        assert is_protected("/repo/.cursorrules") == ".cursorrules"
+
+    def test_matches_cursor_rules_dir(self):
+        assert is_protected("/repo/.cursor/rules/foo.md") == ".cursor/rules"
+
+    def test_matches_aider_conf(self):
+        assert is_protected("/repo/.aider.conf.yml") == ".aider.conf.yml"
+
+    def test_matches_continue_config(self):
+        assert is_protected("/repo/.continue/config.json") == ".continue/config.json"
+
+    def test_matches_mcp_servers_dir(self):
+        assert is_protected("/Users/x/.claude/mcp_servers/foo.json") == ".claude/mcp_servers"
+
+    def test_matches_mcp_json(self):
+        assert is_protected("/Users/x/.claude/mcp.json") == ".claude/mcp.json"
+
+    def test_matches_aws_config(self):
+        assert is_protected("/Users/x/.aws/config") == ".aws/config"
+
+    def test_matches_guard_allowlist(self):
+        assert (
+            is_protected("/Users/x/.claude/guard/allowlist.json") == ".claude/guard/allowlist.json"
+        )
+
+
+class TestCaseInsensitiveFs:
+    """On macOS APFS / Windows NTFS, ``.Claude`` and ``.claude`` resolve to
+    the same on-disk file. Pattern matching must normalise case there or an
+    attacker can edit ``.Claude/CLAUDE.md`` and evade ``is_protected``.
+
+    These tests force ``_CASE_INSENSITIVE_FS = True`` regardless of the host
+    platform so the behaviour is verified in CI on Linux.
+    """
+
+    def test_uppercased_dir_segment_matches_when_fs_is_case_insensitive(self, monkeypatch):
+        from guard.hooks import protected_files as pf
+
+        monkeypatch.setattr(pf, "_CASE_INSENSITIVE_FS", True)
+        # ``.Claude`` capitalised — would NOT match on a case-sensitive FS,
+        # MUST match on darwin/win32.
+        assert pf.is_protected("/repo/.Claude/CLAUDE.md") == ".claude/CLAUDE.md"
+
+    def test_uppercased_file_basename_matches_when_fs_is_case_insensitive(self, monkeypatch):
+        from guard.hooks import protected_files as pf
+
+        monkeypatch.setattr(pf, "_CASE_INSENSITIVE_FS", True)
+        # ``Claude.MD`` mixed case — same on-disk file as ``CLAUDE.md`` on
+        # darwin APFS.
+        assert pf.is_protected("/repo/Claude.Md") == "CLAUDE.md"
+
+    def test_uppercased_dotgit_hooks_matches_when_fs_is_case_insensitive(self, monkeypatch):
+        from guard.hooks import protected_files as pf
+
+        monkeypatch.setattr(pf, "_CASE_INSENSITIVE_FS", True)
+        assert pf.is_protected("/repo/.GIT/hooks/post-commit") == ".git/hooks"
+
+    def test_returns_original_case_pattern_in_match(self, monkeypatch):
+        """The matched pattern returned to the caller MUST stay original-case
+        so the deny message reads correctly to humans (``CLAUDE.md`` not
+        ``claude.md``).
+        """
+        from guard.hooks import protected_files as pf
+
+        monkeypatch.setattr(pf, "_CASE_INSENSITIVE_FS", True)
+        assert pf.is_protected("/repo/.CLAUDE/claude.md") == ".claude/CLAUDE.md"
+
+    def test_case_sensitive_fs_does_not_match_uppercased_variants(self, monkeypatch):
+        """On Linux, ``.GIT`` and ``.git`` ARE different paths and must not
+        collide. Verifies the per-platform branch still works. (We use
+        ``.GIT/hooks/post-commit`` because ``.Claude/CLAUDE.md`` would still
+        match on the basename ``CLAUDE.md``, which IS a protected pattern.)
+        """
+        from guard.hooks import protected_files as pf
+
+        monkeypatch.setattr(pf, "_CASE_INSENSITIVE_FS", False)
+        assert pf.is_protected("/repo/.GIT/hooks/post-commit") is None
 
 
 class TestHook:

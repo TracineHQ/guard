@@ -220,6 +220,58 @@ COMMANDS: list[CommandRule] = [
     CommandRule("git add .", Safety.DENY, "Adds all files indiscriminately", "git-deny"),
     CommandRule("git add -a", Safety.DENY, "Adds all files indiscriminately", "git-deny"),
     CommandRule("git branch -D", Safety.DENY, "Force-deletes branch", "git-deny"),
+    # --- Git history destruction (DENY) ---
+    # ``filter-branch`` / ``filter-repo`` rewrite every commit and force-push
+    # the result. ``reflog expire --expire=now --all`` + ``gc --prune=now``
+    # destroys the safety net for recovery. None of these have a non-recovery
+    # use case in agent context.
+    CommandRule("git filter-branch", Safety.DENY, "Rewrites history irreversibly", "git-deny"),
+    CommandRule("git filter-repo", Safety.DENY, "Rewrites history irreversibly", "git-deny"),
+    CommandRule(
+        "git reflog expire",
+        Safety.DENY,
+        "Destroys reflog (recovery safety net)",
+        "git-deny",
+    ),
+    CommandRule(
+        "git reflog delete",
+        Safety.DENY,
+        "Destroys reflog entries",
+        "git-deny",
+    ),
+    CommandRule(
+        "git gc --prune=now", Safety.DENY, "Permanently removes unreachable objects", "git-deny"
+    ),
+    CommandRule(
+        "git gc --aggressive --prune=now",
+        Safety.DENY,
+        "Permanently removes unreachable objects",
+        "git-deny",
+    ),
+    # --- Force-push variants (DENY) ---
+    # ``--force`` and ``-f`` are already blocked. These are the click-fatigue
+    # variants that get past the ASK that bare ``git push`` triggers:
+    # ``--force-with-lease`` is "safer" force-push but still rewrites remote
+    # history; ``--mirror`` overwrites every remote ref; ``+HEAD:main`` is the
+    # refspec form of force-push.
+    CommandRule(
+        "git push --force-with-lease",
+        Safety.DENY,
+        "Force-rewrites remote history (lease-checked, but still destructive)",
+        "git-deny",
+    ),
+    CommandRule(
+        "git push --force-if-includes",
+        Safety.DENY,
+        "Force-rewrites remote history",
+        "git-deny",
+    ),
+    CommandRule(
+        "git push --mirror",
+        Safety.DENY,
+        "Mirrors local refs to remote, deleting any remote-only refs",
+        "git-deny",
+    ),
     # --- File Read (ALLOW) ---
     CommandRule("cat", Safety.ALLOW, "Read file", "file-read", pipe_safe=True),
     CommandRule("head", Safety.ALLOW, "Read file head", "file-read", pipe_safe=True),
@@ -772,6 +824,97 @@ COMMANDS: list[CommandRule] = [
         "package-mgmt",
         autonomous_feedback="Package install requires confirmation. Queue for session end.",
     ),
+    # --- Orchestration Destruction (DENY) ---
+    # Each shape below has no legitimate dev-time variant. The literal-prefix
+    # matcher catches subcommand args (`gh repo delete owner/repo --yes`,
+    # `kubectl delete --all -n production`, etc.) — extra flags after the
+    # prefix do not change the verdict.
+    CommandRule(
+        "kubectl delete --all",
+        Safety.DENY,
+        "Cluster-wide resource deletion is never a single-step dev op.",
+        "k8s-deny",
+    ),
+    CommandRule(
+        "kubectl delete pods --all",
+        Safety.DENY,
+        "Cluster-wide pod deletion is never a single-step dev op.",
+        "k8s-deny",
+    ),
+    CommandRule(
+        "kubectl delete namespace",
+        Safety.DENY,
+        "Namespace deletion cascades to every resource in it.",
+        "k8s-deny",
+    ),
+    CommandRule(
+        "aws s3 rb",
+        Safety.DENY,
+        "Bucket removal — irreversible, often paired with --force to wipe contents.",
+        "aws-deny",
+    ),
+    CommandRule(
+        "gh repo delete",
+        Safety.DENY,
+        "Repo deletion is irreversible and never a single-step dev op.",
+        "gh-deny",
+    ),
+    CommandRule(
+        "gh release delete",
+        Safety.DENY,
+        "Release deletion removes published artifacts; never a single-step dev op.",
+        "gh-deny",
+    ),
+    CommandRule(
+        "gpg --delete-secret-key",
+        Safety.DENY,
+        "Secret-key deletion is irreversible and unrecoverable.",
+        "gpg-deny",
+    ),
+    CommandRule(
+        "gpg --delete-secret-and-public-keys",
+        Safety.DENY,
+        "Secret-key deletion is irreversible and unrecoverable.",
+        "gpg-deny",
+    ),
+    CommandRule(
+        "chmod -R 777 /",
+        Safety.DENY,
+        "World-writable recursion against / is catastrophic.",
+        "chmod-deny",
+    ),
+    CommandRule(
+        "chmod -R 777 /*",
+        Safety.DENY,
+        "World-writable recursion against /* is catastrophic.",
+        "chmod-deny",
+    ),
+    # --- Orchestration Destruction (ASK) ---
+    # Documented for permission generation; have legitimate variants but
+    # warrant explicit user confirmation. (Runtime ASK behavior in interactive
+    # mode falls through to passthrough; these entries primarily document
+    # intent for the marketplace permission manifest.)
+    CommandRule(
+        "docker container prune",
+        Safety.ASK,
+        "Prunes stopped containers",
+        "docker-mgmt",
+        autonomous_feedback="Docker prune is destructive. Flag for human review.",
+    ),
+    CommandRule(
+        "docker volume prune",
+        Safety.ASK,
+        "Prunes unused volumes (data loss risk)",
+        "docker-mgmt",
+        autonomous_feedback="Docker volume prune deletes data. Flag for human review.",
+    ),
+    CommandRule(
+        "aws s3 rm",
+        Safety.ASK,
+        "S3 object removal",
+        "aws-mgmt",
+        autonomous_feedback="S3 deletion requires confirmation. Queue for session end.",
+    ),
 ]
 
 
@@ -815,9 +958,74 @@ INTERPRETER_EVAL_FLAGS: frozenset[str] = frozenset({"-c", "-e", "--eval", "eval"
 INTERPRETER_RUNNER_WRAPPERS: frozenset[str] = frozenset({"uvx", "pipx"})
 
 # Catastrophic operands for recursive ``rm``. Any of these as an operand to
-# a recursive ``rm`` form is denied regardless of flag ordering.
+# a recursive ``rm`` form is denied regardless of flag ordering. Top-level
+# system subtrees (``/etc``, ``/usr``, ``/home``, ``/Users``, ``/var``, ...)
+# are explicitly enumerated here so ``rm -rf /home/*`` and ``rm -rf /Users/*``
+# trip the matcher even though they aren't bare ``/`` / ``/*``.
 DANGEROUS_RM_OPERANDS: frozenset[str] = frozenset(
-    {"/", "/*", "~", "~/*", "$HOME", "$HOME/*", "/.", "/..", ".", "./", "*"}
+    {
+        "/",
+        "/*",
+        "~",
+        "~/*",
+        "~/.ssh",
+        "~/.aws",
+        "~/.config",
+        "~/.gnupg",
+        "$HOME",
+        "$HOME/*",
+        "$HOME/.ssh",
+        "$HOME/.aws",
+        "$HOME/.config",
+        "$HOME/.gnupg",
+        "/.",
+        "/..",
+        ".",
+        "./",
+        "*",
+        "/etc",
+        "/etc/",
+        "/etc/*",
+        "/usr",
+        "/usr/",
+        "/usr/*",
+        "/var",
+        "/var/",
+        "/var/*",
+        "/bin",
+        "/bin/",
+        "/bin/*",
+        "/sbin",
+        "/sbin/",
+        "/sbin/*",
+        "/lib",
+        "/lib/",
+        "/lib/*",
+        "/lib64",
+        "/lib64/",
+        "/lib64/*",
+        "/boot",
+        "/boot/",
+        "/boot/*",
+        "/home",
+        "/home/",
+        "/home/*",
+        "/Users",
+        "/Users/",
+        "/Users/*",
+        "/opt",
+        "/opt/",
+        "/opt/*",
+        "/root",
+        "/root/",
+        "/root/*",
+        "/System",
+        "/System/",
+        "/System/*",
+        "/Library",
+        "/Library/",
+        "/Library/*",
+    }
 )
 
 # Shell-wrapper basenames. ``<shell> -c "..."`` is the canonical RCE wrapper.
@@ -895,6 +1103,10 @@ GIT_CONFIG_EXEC_SINKS: frozenset[str] = frozenset(
         "core.sshcommand",
         "core.fsmonitor",
         "core.hookspath",
+        # ``core.attributesFile=/tmp/evil`` points the next subcommand at an
+        # attacker-controlled .gitattributes that can register filter.* exec
+        # sinks for the very same command.
+        "core.attributesfile",
         "help.format",
         "sequence.editor",
         "gpg.program",
@@ -904,6 +1116,17 @@ GIT_CONFIG_EXEC_SINKS: frozenset[str] = frozenset(
         "merge.tool",
         "http.proxy",
         "ssh.variant",
+        # Pager / color.pager — same risk surface as core.pager: git pipes
+        # output through these binaries, so an attacker-controlled path is RCE.
+        "color.pager",
+        # Server-side hook git invokes during ``git fetch`` / ``git push``;
+        # an override forces the local git to execute attacker bytes.
+        "uploadpack.packobjectshook",
+        # ``protocol.allow=always`` re-enables disabled-by-default transports
+        # like ext:: which run a shell command per fetch — RCE on ``git fetch``.
+        "protocol.allow",
+        # Receive-side execution sinks: ``receive.shallowupdatehook`` etc.
+        "receive.procreceiverefs",
     }
 )
 
@@ -921,6 +1144,12 @@ GIT_CONFIG_EXEC_SINK_GLOBS: tuple[tuple[str, str], ...] = (
     # segment is opaque (``gitdir:/path``, ``onbranch:foo``); we only check
     # the prefix/suffix bookends.
     ("includeif.", ".path"),
+    # Per-command pager overrides: ``pager.log=/tmp/evil`` etc. git looks up
+    # ``pager.<cmd>`` for each subcommand; any value is an exec sink.
+    ("pager.", ""),
+    # Per-protocol allowlists: ``protocol.ext.allow=always`` re-enables ext::
+    # transport (RCE on fetch). Match ``protocol.<scheme>.allow``.
+    ("protocol.", ".allow"),
 )
 
 
