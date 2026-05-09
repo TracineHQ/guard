@@ -114,9 +114,13 @@ _SENSITIVE_READ_PREFIXES: tuple[str, ...] = (
     "/sys/",
     "/var/log/",
     "/var/db/",
+    "/var/run/secrets/",  # k8s service-account tokens, secrets-store CSI mounts
+    "/var/lib/kubelet/",  # node-level kubelet state, pod tokens
     "/private/etc/",
     "/private/var/log/",
     "/private/var/db/",
+    "/private/var/run/secrets/",
+    "/private/var/lib/kubelet/",
     "/root/",
     "/boot/",
     "/dev/",
@@ -126,10 +130,15 @@ _SENSITIVE_HOME_TAILS: tuple[str, ...] = (
     ".aws/",
     ".gnupg/",
     ".config/gh/",
+    ".config/sops/",  # SOPS age/PGP key material
     ".kube/",
     ".docker/config.json",
     ".netrc",
     ".pgpass",
+    ".npmrc",  # npm auth tokens (_authToken, _password)
+    ".pypirc",  # PyPI / TestPyPI upload tokens
+    ".bash_history",  # may contain inline secrets / kubeconfig dumps
+    ".zsh_history",
 )
 
 

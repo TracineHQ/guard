@@ -250,3 +250,39 @@ def test_php_without_dash_r_does_not_extract() -> None:
     targets = bash_write_targets(cmd)
     # ``/tmp/script.php`` is the script SOURCE, not a protected pattern.
     assert "CLAUDE.md" not in targets
+
+
+# === Eval-body overflow → forced-ASK sentinel ===
+
+
+def test_eval_body_under_cap_scans_normally() -> None:
+    """A 64 KiB body containing a protected literal still surfaces it."""
+    pad = "x" * (64 * 1024)
+    cmd = f"python -c \"{pad};open('/repo/.git/config','w')\""
+    targets = bash_write_targets(cmd)
+    assert ".git/config" in targets
+
+
+def test_eval_body_over_cap_emits_overflow_sentinel() -> None:
+    """An eval body padded past the 1 MiB cap MUST NOT silently drop a
+    literal sitting in the tail. The sentinel target ``CLAUDE.md`` forces
+    ``protected_files`` through ASK regardless of body content.
+    """
+    # 1 MiB + 1 KiB padding — the protected literal at the end is NEVER
+    # reached by the substring scan because the body is >= cap.
+    pad = "x" * (1024 * 1024 + 1024)
+    cmd = f"python -c \"{pad};open('/repo/.git/config','w')\""
+    targets = bash_write_targets(cmd)
+    # Sentinel triggers the CLAUDE.md protected-pattern match.
+    assert "CLAUDE.md" in targets
+
+
+def test_eval_body_over_cap_protected_match_is_forced() -> None:
+    """End-to-end: oversize body → ``_bash_first_protected_match`` returns
+    a non-None pattern even though the only literal pattern in the body
+    sits past the cap.
+    """
+    pad = "x" * (1024 * 1024 + 1024)
+    cmd = f"python -c \"{pad};open('/repo/.git/config','w')\""
+    matched = _bash_first_protected_match(cmd)
+    assert matched is not None

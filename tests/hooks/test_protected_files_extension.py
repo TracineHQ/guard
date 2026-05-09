@@ -181,3 +181,54 @@ def test_extras_can_add_custom_filename_pattern(
     assert is_protected("/Users/me/proj/SECURITY.md") == "SECURITY.md"
     # Should NOT match where the suffix isn't preceded by "/".
     assert is_protected("/Users/me/projSECURITY.md") is None
+
+
+# === Safe-read protections on the file extension ===
+
+
+def test_file_oversize_yields_no_extras(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A guard-protected.txt larger than the 64 KiB cap yields ``[]``.
+
+    Defends against a poisoned file that floods ``is_protected`` with
+    millions of patterns and turns each call into a multi-second walk.
+    """
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / ".claude" / "guard-protected.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # 65 KiB of "pat<n>\n" lines blows past the 64 KiB cap.
+    body = "\n".join(f"pat{i}" for i in range(20_000)) + "\n"
+    target.write_text(body, encoding="utf-8")
+    assert _extra_patterns() == []
+
+
+def test_file_caps_pattern_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Even if a small file declares thousands of patterns, only the first
+    256 are kept — bounds ``is_protected``'s per-call iteration cost.
+    """
+    monkeypatch.chdir(tmp_path)
+    # 300 short patterns; well under 64 KiB so the size cap doesn't fire.
+    body = "\n".join(f"p{i}" for i in range(300)) + "\n"
+    _write_file(tmp_path, body)
+    out = _extra_patterns()
+    assert len(out) == 256
+    assert out[0] == "p0"
+    assert out[-1] == "p255"
+
+
+def test_file_outside_cwd_is_not_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A symlinked .claude/guard-protected.txt pointing outside cwd is refused.
+
+    ``safe_read_text_capped`` enforces cwd/temp scope; a symlink target in
+    /etc must not bleed into the pattern list.
+    """
+    monkeypatch.chdir(tmp_path)
+    # Create a symlink that escapes cwd into a sensitive prefix; either
+    # rejection (out-of-scope OR sensitive) makes the test pass.
+    target = tmp_path / ".claude" / "guard-protected.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        target.symlink_to("/etc/hosts")
+    except OSError:
+        # Can't create the symlink (e.g., filesystem disallows) → skip.
+        return
+    assert _extra_patterns() == []

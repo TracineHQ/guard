@@ -145,6 +145,12 @@ PROTECTED_PATTERNS: list[str] = [
 
 _GUARD_PROTECTED_ENV = "GUARD_PROTECTED_EXTRA"
 _GUARD_PROTECTED_FILE_RELPATH = Path(".claude") / "guard-protected.txt"
+# Caps on the project-extension file: anything bigger is either a mistake
+# or an attempt to soft-DoS ``is_protected``'s per-call iteration. Enforced
+# at parse time; a poisoned file simply yields ``[]`` rather than blowing
+# up the hook.
+_GUARD_PROTECTED_FILE_MAX_BYTES = 64 * 1024  # 64 KiB
+_GUARD_PROTECTED_FILE_MAX_PATTERNS = 256
 
 
 def _read_extra_patterns_from_env() -> list[str]:
@@ -161,10 +167,18 @@ def _read_extra_patterns_from_env() -> list[str]:
 
 def _read_extra_patterns_from_file(cwd: Path | None = None) -> list[str]:
     base = cwd if cwd is not None else Path.cwd()
-    path = base / _GUARD_PROTECTED_FILE_RELPATH
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    text = safe_read_text_capped(
+        base / _GUARD_PROTECTED_FILE_RELPATH,
+        cwd=str(base),
+        max_bytes=_GUARD_PROTECTED_FILE_MAX_BYTES,
+    )
+    if text is None:
+        return []
+    # Reject corrupt files: ``safe_read_text_capped`` decodes with
+    # ``errors='replace'`` for resilience, but a guard-protected file with
+    # any non-UTF-8 bytes is corrupt — yield no extras rather than silently
+    # treating the replacement character as part of a pattern.
+    if "�" in text:
         return []
     out: list[str] = []
     for raw_line in text.splitlines():
@@ -172,6 +186,8 @@ def _read_extra_patterns_from_file(cwd: Path | None = None) -> list[str]:
         line = raw_line.split("#", 1)[0].strip()
         if line:
             out.append(line)
+            if len(out) >= _GUARD_PROTECTED_FILE_MAX_PATTERNS:
+                break
     return out
 
 
@@ -649,7 +665,17 @@ _INTERPRETER_EVAL_FLAG_MAP: tuple[tuple[frozenset[str], frozenset[str]], ...] = 
 )
 
 
-_EVAL_BODY_SCAN_MAX_BYTES = 32 * 1024  # cap eval-body substring scan
+# Hard cap on the eval-body substring scan. Bodies up to this size are
+# scanned end-to-end; beyond it we refuse to scan and instead emit a
+# sentinel target so ``protected_files`` falls through to ASK rather
+# than silently truncating and missing a literal pattern past the cap.
+# 1 MiB covers any realistic inline script; an attacker padding past it
+# pays the price of a forced ASK.
+_EVAL_BODY_SCAN_MAX_BYTES = 1024 * 1024
+# Sentinel target emitted on overflow. Has to literally end with a
+# protected pattern so ``is_protected`` fires; ``CLAUDE.md`` is the
+# shortest universally-protected suffix.
+_EVAL_BODY_OVERFLOW_SENTINEL = "CLAUDE.md"
 
 
 def _interpreter_eval_targets(tokens: list[str]) -> list[str]:
@@ -662,9 +688,10 @@ def _interpreter_eval_targets(tokens: list[str]) -> list[str]:
     runtime variable yields nothing (the static matcher cannot solve
     that — the existing Edit/Write tool gate is the right defense).
 
-    The body scan is bounded to ``_EVAL_BODY_SCAN_MAX_BYTES`` so a
-    pathological multi-MB inline script can't degenerate into an
-    O(patterns * len) walk that stalls the hook.
+    Bodies up to ``_EVAL_BODY_SCAN_MAX_BYTES`` (1 MiB) are scanned
+    end-to-end; over that we emit ``_EVAL_BODY_OVERFLOW_SENTINEL`` so
+    ``protected_files`` ASKs instead of silently dropping content past
+    the cap.
     """
     out: list[str] = []
     patterns = _effective_patterns()
@@ -680,8 +707,11 @@ def _interpreter_eval_targets(tokens: list[str]) -> list[str]:
             rest = tokens[i + 1 :]
             for j, flag in enumerate(rest):
                 if flag in flagset and j + 1 < len(rest):
-                    body = rest[j + 1][:_EVAL_BODY_SCAN_MAX_BYTES]
-                    out.extend(pat for pat in patterns if pat in body)
+                    body = rest[j + 1]
+                    if len(body) > _EVAL_BODY_SCAN_MAX_BYTES:
+                        out.append(_EVAL_BODY_OVERFLOW_SENTINEL)
+                    else:
+                        out.extend(pat for pat in patterns if pat in body)
                     break
             break
     return out

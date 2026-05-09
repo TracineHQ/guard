@@ -20,6 +20,24 @@ adheres to [Semantic Versioning](https://semver.org/).
   files control whether guard runs at all and whether allowlist
   overrides apply, so they always go through ASK.
 
+### Hardened — extractor coverage + safe-IO
+
+- `protected_files`: `find -fprint`/`-fprintf`/`-fls`/`-fprint0` write
+  targets now extracted; `nvim --headless` recognised as batch mode
+  (was bypass); macOS APFS / Windows NTFS case-insensitive matching so
+  `.Claude/CLAUDE.md` no longer evades `is_protected`.
+- `protected_files`: trust-root patterns
+  (`.claude/guard/allowlist.json`, `.claude/settings*.json`) are NOT
+  allowlist-bypassable.
+- `protected_files`: `.claude/guard-protected.txt` now read via shared
+  safe-IO (cwd-scope, O_NOFOLLOW, 64 KiB cap, 256-pattern cap, corrupt
+  UTF-8 → no extras).
+- `protected_files`: interpreter eval-body scan raised to 1 MiB and
+  emits a forced-ASK sentinel on overflow — no silent truncation.
+- `_safe_io`: sensitive-read denylist gains `/var/run/secrets/`,
+  `/var/lib/kubelet/`, `~/.bash_history`, `~/.zsh_history`, `~/.npmrc`,
+  `~/.pypirc`, `~/.config/sops/`.
+
 ### Changed — shared safe-IO primitives
 
 - New `guard._safe_io` module consolidates the cwd/temp scope check,
