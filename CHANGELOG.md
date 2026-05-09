@@ -20,6 +20,15 @@ adheres to [Semantic Versioning](https://semver.org/).
   files control whether guard runs at all and whether allowlist
   overrides apply, so they always go through ASK.
 
+### Hardened — bash canonicalization
+
+- `bash_command_validator`: ANSI-C `$'\NNN'` octal escapes now decoded
+  before per-form matchers (`$'\162\155' -rf /` no longer slips past
+  the `rm` deny). `{x..x}` single-element brace-range expansion is
+  identity-expanded so `{r..r}m -rf /` and `{g..g}it push
+  --force-with-lease` are detected (multi-element ranges still
+  refused — they're a DoS surface, not a real bypass class).
+
 ### Hardened — extractor coverage + safe-IO
 
 - `protected_files`: `find -fprint`/`-fprintf`/`-fls`/`-fprint0` write

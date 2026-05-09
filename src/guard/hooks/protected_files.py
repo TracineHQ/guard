@@ -504,11 +504,7 @@ def _ex_vim_targets(tokens: list[str]) -> list[str]:
       no batch script committing)
     """
     out: list[str] = []
-    skip_next = False
     for i, tok in enumerate(tokens):
-        if skip_next:
-            skip_next = False
-            continue
         head = tok.rsplit("/", 1)[-1]
         rest = tokens[i + 1 :]
         if head == "ex":
@@ -527,7 +523,6 @@ def _ex_vim_targets(tokens: list[str]) -> list[str]:
             if not (has_batch_short or has_batch_split):
                 continue
             out.extend(_ex_positionals(rest))
-    del skip_next
     return out
 
 
@@ -697,10 +692,12 @@ def _interpreter_eval_targets(tokens: list[str]) -> list[str]:
     patterns = _effective_patterns()
     for i, tok in enumerate(tokens):
         head = tok.rsplit("/", 1)[-1]
-        # Strip a trailing version suffix: ``python3.11`` → ``python3``.
+        # Strip a trailing version suffix to the base interpreter name:
+        # ``python3.11`` → ``python``, ``node20`` → ``node``. The base
+        # name is what ``_INTERPRETER_EVAL_FLAG_MAP`` keys are matched
+        # against, so ``python3.11 -c ...`` is recognised even though
+        # ``python3.11`` itself isn't in any binset.
         head_versionless = re.sub(r"^(python|node|deno|bun)[\d.]+$", r"\1", head)
-        if head_versionless == "python3":
-            head_versionless = "python3"
         for binset, flagset in _INTERPRETER_EVAL_FLAG_MAP:
             if head not in binset and head_versionless not in binset:
                 continue

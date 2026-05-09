@@ -639,6 +639,22 @@ _UNICODE_WS_RE = re.compile("[\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\
 _ANSI_C_QUOTED_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
 
 
+# Bash ``$'...'`` octal escapes are 1-3 octal digits (``\0`` .. ``\777``).
+# Python's ``unicode_escape`` codec recognises ``\xHH`` (hex) but treats
+# ``\NNN`` octals inconsistently across versions, so we expand them first.
+_BASH_OCTAL_ESCAPE_RE = re.compile(r"\\([0-7]{1,3})")
+
+
+def _decode_bash_octal_escapes(body: str) -> str:
+    r"""Replace bash ``\NNN`` octal escapes with the corresponding character.
+
+    Without this, ``$'\162\155'`` (octal for ``rm``) survives the
+    ``unicode_escape`` decode as a literal ``\162\155`` token and
+    bypasses head-token matchers like the ``rm`` deny.
+    """
+    return _BASH_OCTAL_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 8)), body)
+
+
 def _decode_ansi_c_quoted(command: str) -> str:
     r"""Decode bash ``$'...'`` literals to their byte values.
 
@@ -654,6 +670,9 @@ def _decode_ansi_c_quoted(command: str) -> str:
     def _sub(m: re.Match[str]) -> str:
         body = m.group(1)
         try:
+            # Octal first — ``unicode_escape`` doesn't reliably handle bash's
+            # 1-3 digit octal form. Then standard ``\xHH`` / ``\n`` / etc.
+            body = _decode_bash_octal_escapes(body)
             return body.encode("latin-1", errors="replace").decode(
                 "unicode_escape", errors="replace"
             )
@@ -670,21 +689,36 @@ def _decode_ansi_c_quoted(command: str) -> str:
 _BRACE_EXPAND_RE = re.compile(r"([^\s{}]*)\{([^{}]+)\}([^\s]*)")
 
 
+# Single-element range form ``{x..x}`` — bash expands to just ``x``. Used
+# only for obfuscation (``{r..r}m`` → ``rm``); we identity-expand it without
+# enabling expensive multi-element range expansion.
+_SINGLE_RANGE_RE = re.compile(r"^([^.]+)\.\.\1$")
+
+
 def _expand_braces_once(token: str) -> list[str] | None:
     """Expand a single brace group ``prefix{a,b,c}suffix`` to a list.
 
-    Bounded: refuses to expand ranges (``{1..100}``) and groups with > 32
-    alternatives, since expansion blow-up is itself a DoS surface. Returns
-    ``None`` if no comma-form brace group is present in the token.
+    Bounded: refuses to expand multi-element ranges (``{1..100}``) and
+    comma groups with > 32 alternatives, since expansion blow-up is
+    itself a DoS surface. Single-element ranges (``{x..x}``) ARE
+    expanded — they're identity transformations used only to evade
+    head-token matchers (``{r..r}m`` → ``rm``) and have zero blow-up
+    cost. Returns ``None`` if no expandable brace group is present.
     """
     m = _BRACE_EXPAND_RE.search(token)
-    if not m or "," not in m.group(2):
+    if not m:
         return None
-    parts = m.group(2).split(",")
-    if len(parts) > 32:
-        return None
+    inner = m.group(2)
     prefix, suffix = m.group(1), m.group(3)
-    return [f"{prefix}{p}{suffix}" for p in parts]
+    if "," in inner:
+        parts = inner.split(",")
+        if len(parts) > 32:
+            return None
+        return [f"{prefix}{p}{suffix}" for p in parts]
+    single = _SINGLE_RANGE_RE.match(inner)
+    if single is not None:
+        return [f"{prefix}{single.group(1)}{suffix}"]
+    return None
 
 
 def _expand_braces_in_line(line: str) -> str:
