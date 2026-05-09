@@ -26,6 +26,18 @@ _HOOK_ID = "guard.protected_files"
 
 _CP_MV_INSTALL_MIN_OPERANDS = 2  # need both <src> and <dst>
 
+# macOS APFS (default) and Windows NTFS are case-insensitive: ``.Claude``
+# and ``.claude`` resolve to the same on-disk file. Pattern matching must
+# normalise case there or an attacker can edit ``.Claude/CLAUDE.md`` and
+# evade ``is_protected``. Linux ext4/xfs are case-sensitive and we keep
+# strict matching there to avoid spurious matches on legitimate
+# distinct-case directories.
+_CASE_INSENSITIVE_FS = sys.platform in ("darwin", "win32")
+
+
+def _normcase(s: str) -> str:
+    return s.lower() if _CASE_INSENSITIVE_FS else s
+
 # Trust-root patterns whose protection MUST NOT be allowlist-bypassable.
 # An attacker (or a confused agent) who lands one ASK-approved write to the
 # allowlist file, then sets ``disable_rules: ["guard.protected_files"]``,
@@ -211,19 +223,20 @@ def is_protected(file_path: str) -> str | None:
     except (ValueError, OSError):
         return None
 
-    resolved_str = str(resolved)
+    resolved_lc = _normcase(str(resolved))
     for pattern in _effective_patterns():
+        pat_lc = _normcase(pattern)
         # Exact-suffix match (file pattern).
         if (
-            resolved_str.endswith(pattern)
-            and len(resolved_str) > len(pattern)
-            and resolved_str[-(len(pattern) + 1)] == "/"
+            resolved_lc.endswith(pat_lc)
+            and len(resolved_lc) > len(pat_lc)
+            and resolved_lc[-(len(pat_lc) + 1)] == "/"
         ):
-            return pattern
+            return pattern  # original-case pattern goes to the deny message
         # Directory-pattern match: only for patterns whose last segment has
         # no ``.`` (i.e. is a directory name, not a file name).
         last_segment = pattern.rsplit("/", 1)[-1]
-        if "." not in last_segment and "/" + pattern + "/" in resolved_str:
+        if "." not in last_segment and "/" + pat_lc + "/" in resolved_lc:
             return pattern
     return None
 
@@ -243,7 +256,7 @@ def is_protected_parent_dir(dir_path: str) -> str | None:
     except (ValueError, OSError):
         return None
 
-    resolved_str = str(resolved).rstrip("/")
+    resolved_lc = _normcase(str(resolved).rstrip("/"))
     for pattern in _effective_patterns():
         # ``pattern`` is the suffix path of a protected file. An extraction
         # into ``resolved_str`` could write to ``<resolved_str>/<tail>`` for
@@ -255,8 +268,8 @@ def is_protected_parent_dir(dir_path: str) -> str | None:
         # ``guard/hooks/...``).
         parts = pattern.split("/")
         for j in range(1, len(parts)):
-            prefix = "/".join(parts[:j])
-            if resolved_str.endswith("/" + prefix):
+            prefix = _normcase("/".join(parts[:j]))
+            if resolved_lc.endswith("/" + prefix):
                 return pattern
     return None
 
@@ -488,10 +501,12 @@ def _ex_vim_targets(tokens: list[str]) -> list[str]:
             continue
         if head in {"vim", "nvim"}:
             # Only treat as write when a batch-mode flag is present:
-            # ``-es`` / ``-Es`` / ``-eS`` / ``--script``, or the
-            # ``-e -s`` two-token spelling. Bare ``vim <file>`` is
-            # interactive and is skipped.
-            has_batch_short = any(t in {"-es", "-Es", "-eS", "--script"} for t in rest)
+            # ``-es`` / ``-Es`` / ``-eS`` / ``--script`` / ``--headless``
+            # (nvim), or the ``-e -s`` two-token spelling. Bare
+            # ``vim <file>`` is interactive and is skipped.
+            has_batch_short = any(
+                t in {"-es", "-Es", "-eS", "--script", "--headless"} for t in rest
+            )
             has_batch_split = "-e" in rest and "-s" in rest
             if not (has_batch_short or has_batch_split):
                 continue
@@ -579,28 +594,47 @@ def _patch_diff_targets(tokens: list[str], command: str) -> list[str]:
     return out
 
 
-def _find_exec_targets(tokens: list[str]) -> list[str]:
-    r"""Return ``[<root>]`` for ``find <root> ... -exec ... \;`` invocations.
+_FIND_WRITE_FLAGS: frozenset[str] = frozenset(
+    {"-fprint", "-fprint0", "-fprintf", "-fls"}
+)
 
-    The doctrine path appears at runtime via ``{}`` substitution, not
-    literal text in argv. Conservative-but-safe rule: emit the search
-    root so that ``is_protected(<root>)`` decides. ``find <root>``
-    without ``-exec`` is read-only and not flagged.
+
+def _find_exec_targets(tokens: list[str]) -> list[str]:
+    r"""Return write targets for ``find <root> -exec ... \;`` and ``-fprint <file>``.
+
+    Two write surfaces:
+
+    - ``-exec`` / ``-execdir``: the doctrine path appears at runtime via
+      ``{}`` substitution, not literal text in argv. Conservative rule:
+      emit the search root so ``is_protected(<root>)`` decides. ``find
+      <root>`` without ``-exec`` is read-only.
+    - ``-fprint <file>`` / ``-fprintf <file> <fmt>`` / ``-fls <file>`` /
+      ``-fprint0 <file>``: ``find`` writes its own output to ``<file>``,
+      truncating it. Emit ``<file>`` directly — the write target is in
+      argv and there is no need to fall back to the root.
     """
     for i, tok in enumerate(tokens):
         head = tok.rsplit("/", 1)[-1]
         if head != "find":
             continue
         rest = tokens[i + 1 :]
-        if not any(t in {"-exec", "-execdir"} for t in rest):
-            continue
-        # Search root: the first non-flag, non-expression token after ``find``.
-        # ``find . -name ...`` → ``.``. ``find /etc -exec ...`` → ``/etc``.
-        for t in rest:
-            if not t.startswith("-") and not t.startswith("("):
-                return [t]
-        # No explicit root — ``find -exec ...`` defaults to ``.``.
-        return ["."]
+        out: list[str] = []
+        # -fprint/-fls/-fprintf <file>: token immediately after the flag is
+        # the write target. -fprintf takes <file> THEN <format>, so the
+        # file is still the next token (the format is two tokens later).
+        for j, flag in enumerate(rest):
+            if flag in _FIND_WRITE_FLAGS and j + 1 < len(rest):
+                out.append(rest[j + 1])
+        if any(t in {"-exec", "-execdir"} for t in rest):
+            # Search root: the first non-flag, non-expression token after
+            # ``find``. ``find . -name ...`` → ``.``;
+            # ``find /etc -exec ...`` → ``/etc``.
+            root = next(
+                (t for t in rest if not t.startswith("-") and not t.startswith("(")),
+                ".",  # ``find -exec ...`` (no explicit root) defaults to cwd
+            )
+            out.append(root)
+        return out
     return []
 
 

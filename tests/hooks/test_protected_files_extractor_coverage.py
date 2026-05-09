@@ -148,6 +148,53 @@ def test_find_exec_on_dot_git_hooks_root_flagged() -> None:
     assert matched == ".git/hooks"
 
 
+# === find -fprint / -fprintf / -fls write flags ===
+
+
+def test_find_fprint_emits_file_target() -> None:
+    targets = bash_write_targets("find . -name foo -fprint /repo/.git/config")
+    assert "/repo/.git/config" in targets
+
+
+def test_find_fprintf_emits_file_target() -> None:
+    targets = bash_write_targets("find . -name foo -fprintf /repo/CLAUDE.md '%p\\n'")
+    assert "/repo/CLAUDE.md" in targets
+
+
+def test_find_fls_emits_file_target() -> None:
+    targets = bash_write_targets("find . -fls /repo/.cursorrules")
+    assert "/repo/.cursorrules" in targets
+
+
+def test_find_fprint0_emits_file_target() -> None:
+    targets = bash_write_targets("find . -fprint0 /repo/.claude/settings.json")
+    assert "/repo/.claude/settings.json" in targets
+
+
+def test_find_fprint_on_protected_path_flagged() -> None:
+    """Real bypass: ``find . -fprint .git/config`` overwrites the protected file."""
+    matched = _bash_first_protected_match("find . -fprint /repo/.git/config")
+    assert matched == ".git/config"
+
+
+# === nvim --headless batch mode ===
+
+
+def test_nvim_headless_extracts_target() -> None:
+    targets = bash_write_targets("nvim --headless -c 'wq' /tmp/conf.yaml")
+    assert "/tmp/conf.yaml" in targets
+
+
+def test_nvim_headless_plus_command_extracts_target() -> None:
+    targets = bash_write_targets("nvim --headless +wq /tmp/conf.yaml")
+    assert "/tmp/conf.yaml" in targets
+
+
+def test_nvim_headless_on_protected_path_flagged() -> None:
+    matched = _bash_first_protected_match("nvim --headless -c 'wq' /repo/CLAUDE.md")
+    assert matched == "CLAUDE.md"
+
+
 # === Per-interpreter eval-flag map ===
 
 

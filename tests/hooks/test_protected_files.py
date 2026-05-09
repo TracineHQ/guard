@@ -108,6 +108,59 @@ class TestIsProtected:
         )
 
 
+class TestCaseInsensitiveFs:
+    """On macOS APFS / Windows NTFS, ``.Claude`` and ``.claude`` resolve to
+    the same on-disk file. Pattern matching must normalise case there or an
+    attacker can edit ``.Claude/CLAUDE.md`` and evade ``is_protected``.
+
+    These tests force ``_CASE_INSENSITIVE_FS = True`` regardless of the host
+    platform so the behaviour is verified in CI on Linux.
+    """
+
+    def test_uppercased_dir_segment_matches_when_fs_is_case_insensitive(self, monkeypatch):
+        from guard.hooks import protected_files as pf
+
+        monkeypatch.setattr(pf, "_CASE_INSENSITIVE_FS", True)
+        # ``.Claude`` capitalised — would NOT match on a case-sensitive FS,
+        # MUST match on darwin/win32.
+        assert pf.is_protected("/repo/.Claude/CLAUDE.md") == ".claude/CLAUDE.md"
+
+    def test_uppercased_file_basename_matches_when_fs_is_case_insensitive(self, monkeypatch):
+        from guard.hooks import protected_files as pf
+
+        monkeypatch.setattr(pf, "_CASE_INSENSITIVE_FS", True)
+        # ``Claude.MD`` mixed case — same on-disk file as ``CLAUDE.md`` on
+        # darwin APFS.
+        assert pf.is_protected("/repo/Claude.Md") == "CLAUDE.md"
+
+    def test_uppercased_dotgit_hooks_matches_when_fs_is_case_insensitive(self, monkeypatch):
+        from guard.hooks import protected_files as pf
+
+        monkeypatch.setattr(pf, "_CASE_INSENSITIVE_FS", True)
+        assert pf.is_protected("/repo/.GIT/hooks/post-commit") == ".git/hooks"
+
+    def test_returns_original_case_pattern_in_match(self, monkeypatch):
+        """The matched pattern returned to the caller MUST stay original-case
+        so the deny message reads correctly to humans (``CLAUDE.md`` not
+        ``claude.md``).
+        """
+        from guard.hooks import protected_files as pf
+
+        monkeypatch.setattr(pf, "_CASE_INSENSITIVE_FS", True)
+        assert pf.is_protected("/repo/.CLAUDE/claude.md") == ".claude/CLAUDE.md"
+
+    def test_case_sensitive_fs_does_not_match_uppercased_variants(self, monkeypatch):
+        """On Linux, ``.GIT`` and ``.git`` ARE different paths and must not
+        collide. Verifies the per-platform branch still works. (We use
+        ``.GIT/hooks/post-commit`` because ``.Claude/CLAUDE.md`` would still
+        match on the basename ``CLAUDE.md``, which IS a protected pattern.)
+        """
+        from guard.hooks import protected_files as pf
+
+        monkeypatch.setattr(pf, "_CASE_INSENSITIVE_FS", False)
+        assert pf.is_protected("/repo/.GIT/hooks/post-commit") is None
+
+
 class TestHook:
     def test_protected_files_imports(self):
         # Top-level import is the contract.
