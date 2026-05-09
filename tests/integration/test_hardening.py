@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._helpers import decision_from_stdout as _decision
+
 REPO = Path(__file__).resolve().parents[2]
 HOOK = REPO / "src" / "guard" / "hooks" / "bash_command_validator.py"
 PROTECTED = REPO / "src" / "guard" / "hooks" / "protected_files.py"
@@ -45,15 +47,6 @@ def _run_bash(command: str, *, autonomous: bool = False) -> tuple[int, str, str]
         check=False,
     )
     return proc.returncode, proc.stdout, proc.stderr
-
-
-def _decision(stdout: str) -> str | None:
-    if not stdout.strip():
-        return None
-    try:
-        return json.loads(stdout).get("hookSpecificOutput", {}).get("permissionDecision")
-    except json.JSONDecodeError:
-        return None
 
 
 @pytest.mark.parametrize(

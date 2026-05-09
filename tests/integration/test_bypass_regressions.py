@@ -12,14 +12,7 @@ from __future__ import annotations
 import pytest
 
 from guard.hooks.bash_command_validator import decide
-
-
-def _is_deny(result):
-    return (
-        result is not None
-        and isinstance(result, dict)
-        and result.get("permissionDecision") == "deny"
-    )
+from tests._helpers import is_deny as _is_deny
 
 
 def test_quoted_whitespace_smuggling_denied() -> None:

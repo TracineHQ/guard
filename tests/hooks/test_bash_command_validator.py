@@ -447,8 +447,7 @@ class TestAutonomousMode:
 # prefix could not match.
 
 
-def _is_deny(result):
-    return result is not None and result.get("permissionDecision") == "deny"
+from tests._helpers import is_deny as _is_deny
 
 
 @pytest.mark.parametrize(
