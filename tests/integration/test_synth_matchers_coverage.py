@@ -505,6 +505,16 @@ DISK_DENY = [
     "diskutil eraseDisk JHFS+ Untitled /dev/disk0",
     "diskutil eraseVolume JHFS+ Untitled /dev/disk0s2",
     "wipefs /dev/sda",
+    # `tee` consumes the block-device path as an operand, slipping past
+    # the sensitive-destination rule that catches `> /dev/...` redirects.
+    # Bare `tee /dev/sda` and stdin-fed `tee /dev/sda < /dev/urandom` both
+    # write whatever stdin emits to the raw device.
+    "tee /dev/sda",
+    "tee /dev/nvme0n1",
+    "tee /dev/disk0",
+    "tee -a /dev/sda",
+    "tee /tmp/disk.img",
+    "tee /backups/snapshot.qcow2",
 ]
 
 DISK_LEGIT = [
@@ -605,6 +615,18 @@ GCLOUD_DESTRUCTION_DENY = [
     "gcloud storage buckets delete gs://prod-bucket",
     "gcloud functions delete prod-func",
     "gcloud run services delete prod-svc",
+    # `gcloud alpha` / `gcloud beta` release-track prefix — Google's docs
+    # frequently recommend these forms for KMS, AI Platform, compute
+    # features. The matcher must strip the track token before path-tuple
+    # matching or every destructive path has an open bypass.
+    "gcloud alpha compute instances delete prod-vm",
+    "gcloud beta compute instances delete prod-vm --zone=us-central1-a --quiet",
+    "gcloud alpha kms keys versions destroy 1 --location=global --keyring=k --key=signing",
+    "gcloud beta sql instances delete prod",
+    "gcloud alpha projects delete my-project",
+    # Combined: global flags before the track prefix.
+    "gcloud --quiet alpha compute instances delete prod-vm",
+    "gcloud --project=p beta secrets delete prod-secret",
 ]
 
 AZ_DESTRUCTION_DENY = [
@@ -1446,3 +1468,117 @@ def test_deny_reason_includes_rule_id_and_override_path(command: str, expected_r
     assert f"Rule: {expected_rule}" in reason, f"missing rule_id in reason: {reason!r}"
     assert f"guard allowlist allow-command {expected_rule}" in reason
     assert f"guard allowlist disable-rule {expected_rule}" in reason
+
+
+# ============================================================================
+# kubectl broad-deletion verbs beyond `delete`
+# ============================================================================
+
+KUBECTL_BROAD_DENY = [
+    # `delete` cluster-wide — already covered, sanity-check still denies.
+    "kubectl delete --all --all-namespaces",
+    "kubectl delete deployment --all -n prod",
+    "kubectl delete namespace prod",
+    # `scale --replicas=0` with cluster-wide flag — zero every workload.
+    "kubectl scale deployment --all --replicas=0 --all-namespaces",
+    "kubectl scale --all --replicas 0",
+    "kubectl scale deployment --all-namespaces --replicas=0",
+    # `drain` with --force or --grace-period=0 — evicts all pods, ignores PDBs.
+    "kubectl drain prod-node-1 --force",
+    "kubectl drain prod-node-1 --grace-period=0",
+    "kubectl drain prod-node-1 --grace-period 0",
+    # `replace --force -f` — delete-then-create, drops live state.
+    "kubectl replace --force -f manifest.yaml",
+    "kubectl replace --filename manifest.yaml --force",
+    "kubectl replace --force --filename=manifest.yaml",
+    # `rollout restart` cluster-wide — rolling-restart everything.
+    "kubectl rollout restart deployment --all-namespaces",
+    "kubectl rollout restart deployment --all",
+    "kubectl rollout restart deploy -A",
+]
+
+KUBECTL_BROAD_LEGIT = [
+    # Single-target ops not flagged.
+    "kubectl scale deployment foo --replicas=3",
+    "kubectl scale deployment foo --replicas=0",  # single target, not --all
+    "kubectl drain prod-node-1",
+    "kubectl drain prod-node-1 --ignore-daemonsets",
+    "kubectl replace -f manifest.yaml",  # no --force
+    "kubectl rollout restart deployment/foo",
+    "kubectl rollout status deploy/foo",
+    "kubectl get deployments --all-namespaces",
+]
+
+
+@pytest.mark.parametrize("command", KUBECTL_BROAD_DENY)
+def test_kubectl_broad_deletion_denied(command: str) -> None:
+    assert _is_deny(decide(command)), f"kubectl broad-deletion bypass: {command!r}"
+
+
+@pytest.mark.parametrize("command", KUBECTL_BROAD_LEGIT)
+def test_kubectl_broad_legit_not_denied(command: str) -> None:
+    res = decide(command)
+    assert not _is_deny(res), f"kubectl false positive: {command!r} -> {res}"
+
+
+# ============================================================================
+# Length cap: adversarial-length input denies before scan
+# ============================================================================
+
+LENGTH_CAP_DENY = [
+    # 200 KB single-token argv — without the cap, 9.7 s shlex stall.
+    "echo " + ("a" * 200_000),
+    # 100 KB with a leading legit-looking head.
+    "ls " + ("/tmp/" * 20_000),
+    # Just over the 8 KiB threshold.
+    "echo " + ("x" * 8200),
+]
+
+LENGTH_CAP_LEGIT = [
+    # Just under the 8 KiB cap.
+    "echo " + ("y" * 8000),
+    # Real-world long-but-legit invocation.
+    "git log --oneline --all --decorate --graph --max-count=200",
+]
+
+
+@pytest.mark.parametrize("command", LENGTH_CAP_DENY)
+def test_oversize_command_denied(command: str) -> None:
+    res = decide(command)
+    assert _is_deny(res), f"length cap bypass: {len(command)}B -> {res}"
+    assert "command_too_long" in res.get("permissionDecisionReason", "")
+
+
+@pytest.mark.parametrize("command", LENGTH_CAP_LEGIT)
+def test_normal_command_not_length_capped(command: str) -> None:
+    res = decide(command)
+    if res is not None:
+        # Some legit commands legitimately hit other matchers; we only care
+        # the length cap itself didn't fire.
+        assert "command_too_long" not in res.get("permissionDecisionReason", "")
+
+
+# ============================================================================
+# Brace-expansion ReDoS safety: unclosed-brace input must not stall
+# ============================================================================
+
+
+def test_unclosed_brace_does_not_stall() -> None:
+    """Adversarial input ``aaaa...{bbbb...`` (no closing brace) used to
+    force ~92 s of O(n²) backtracking through ``_BRACE_EXPAND_RE``. The
+    early-exit gate in ``_expand_braces_once`` short-circuits to ``None``
+    when the token is missing either brace; this test ensures the gate is
+    in place by demanding a sub-second decide() on a pathological 100 KB
+    payload (under the cap so the brace path is actually entered).
+    """
+    import time
+
+    # Stay under the 8 KiB length cap so the brace path is actually
+    # exercised — we want to validate the regex gate, not the cap.
+    # 4000 a's + { + 4000 b's = 8001 bytes (just over cap by 9; trim).
+    payload = "echo " + ("a" * 3500) + "{" + ("b" * 3500)
+    assert len(payload) < 8192
+    start = time.perf_counter()
+    decide(payload)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 1.0, f"unclosed-brace input stalled validator: {elapsed:.2f}s"
