@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.0.0] - 2026-05-09
 
 ### Added — allowlist (per-rule disable + per-command override)
 
@@ -241,14 +241,12 @@ Pass-4 surfaced verified bypasses across three classes; all closed below.
   short-circuit was positional-blind; now requires `--help` to stand alone).
 - `_is_pipe_to_interpreter` wired into the dispatcher (was orphan).
 
-## [1.0.0] - 2026-04-30
+### Foundational hooks (initial 1.0 surface)
 
-First stable release. Guard ships seven stdlib-only `PreToolUse` hooks that
-sit between Claude Code and the tool surface, denying high-risk actions
-before they reach the host. The hook contract, decision-log schema, and
-autonomous-mode behavior are now considered stable for the 1.x line.
-
-### Added
+Guard ships seven stdlib-only `PreToolUse` hooks that sit between Claude
+Code and the tool surface, denying high-risk actions before they reach
+the host. The hook contract, decision-log schema, and autonomous-mode
+behavior are stable for the 1.x line.
 
 - `bash_command_validator` — denies dangerous shell shapes (rm -rf,
   fork bombs, curl|sh, interpreter `-c` eval, runner-prefix bypasses).
@@ -280,5 +278,4 @@ autonomous-mode behavior are now considered stable for the 1.x line.
   CVE-2025-59356 by validating the literal command shape rather than
   trusting model-emitted intent.
 
-[Unreleased]: https://github.com/TracineHQ/guard/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/TracineHQ/guard/releases/tag/v1.0.0
