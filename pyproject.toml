@@ -57,6 +57,7 @@ addopts = [
   "auto",
   "--dist",
   "loadfile",
+  "--strict-markers",
 ]
 
 [project.scripts]
