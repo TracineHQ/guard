@@ -38,6 +38,7 @@ _CASE_INSENSITIVE_FS = sys.platform in ("darwin", "win32")
 def _normcase(s: str) -> str:
     return s.lower() if _CASE_INSENSITIVE_FS else s
 
+
 # Trust-root patterns whose protection MUST NOT be allowlist-bypassable.
 # An attacker (or a confused agent) who lands one ASK-approved write to the
 # allowlist file, then sets ``disable_rules: ["guard.protected_files"]``,
@@ -605,9 +606,7 @@ def _patch_diff_targets(tokens: list[str], command: str) -> list[str]:
     return out
 
 
-_FIND_WRITE_FLAGS: frozenset[str] = frozenset(
-    {"-fprint", "-fprint0", "-fprintf", "-fls"}
-)
+_FIND_WRITE_FLAGS: frozenset[str] = frozenset({"-fprint", "-fprint0", "-fprintf", "-fls"})
 
 
 def _find_exec_targets(tokens: list[str]) -> list[str]:
