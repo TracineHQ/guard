@@ -143,6 +143,15 @@ jobs:
           guard --version
           guard --help | grep -q "guard read-side CLI"
           guard --json status | python -c "import json,sys; d=json.load(sys.stdin); print(d)"
+          # `guard test` invokes hook decide() in-process. Confirms argparse
+          # wiring + each hook's import path survives wheel installation.
+          guard --json test "rm -rf /" | python -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          decisions = {r['hook_id']: r['decision'] for r in d['results']}
+          assert decisions.get('guard.bash_command_validator') == 'deny', d
+          print('guard test deny OK:', decisions)
+          "
       - name: Verify import surface
         shell: bash
         run: |
