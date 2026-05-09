@@ -1,13 +1,39 @@
 ---
 name: guard
-description: Configure guard's safety hooks (env vars, log path, individual disable).
-when_to_use: When the user asks to enable/disable a guard hook, change the decision log path, set advisory mode, or troubleshoot guard's output.
+description: Configure guard's safety hooks and explain what each hook catches — bash command validation (rm -rf, force-push, interpreter eval, shell wrappers, pipe-to-shell), git safety (-c config injection, core.hooksPath/attributesFile, destructive flags), credential scanning, commit-message rules, protected files, agent output, subagent scope.
+when_to_use: When the user asks to enable/disable a guard hook, change the decision log path, set advisory mode, troubleshoot guard's output, or asks "why did guard block X" / "what does <hook> catch".
 ---
 
 # Guard configuration
 
 Guard is a safety-hook plugin for Claude Code. It runs before tool calls and writes
 decisions to `~/.claude/guard-decisions.jsonl`.
+
+## What hooks catch
+
+`docs/dangerous-commands.md` and `docs/hooks-reference.md` are the
+authoritative references. Quick map:
+
+- `bash_command_validator` — `rm -rf` against `/`, `/*`, `~`, `$HOME`;
+  force-push (`--force`, `-f`, `--force-with-lease`, `+refspec`); interpreter
+  eval (`python -c`, `node -e`, `pypy`, `bun`, `deno`, plus runner wrappers
+  `uvx`/`pipx`); shell wrappers (`bash -c`, `sh -lc`); `eval`/`source`/`.`;
+  dangerous env-var sinks (`GIT_SSH_COMMAND`, `LD_PRELOAD`, etc.); pipe-to-shell
+  (`curl ... | sh`); credential leaks (`gh auth token`, `aws sts get-session-token`).
+- `git_c_validator` — `git -c core.hooksPath=...` and `core.attributesFile=...`
+  denied regardless of value; `git -c alias.x='!cmd'` and other config-exec
+  sinks; `git commit -C <ref>` and `--reuse-message` (silent message reuse);
+  destructive flags under `git -C` (`branch -d/-D/-m`, `tag -d`, `remote
+  remove/rename/set-url`).
+- `commit_message_validator` — secrets in commit messages; AI-attribution
+  trailers (`Co-Authored-By: Claude`, `Generated with Claude Code`).
+- `credential_check` — secret patterns in Edit/Write/Bash payloads.
+- `protected_files` — Edit/Write to `.git/hooks`, `.claude/settings.json`,
+  `.claude/guard/allowlist.json`, `CLAUDE.md`, etc. (extensible via
+  `GUARD_PROTECTED_EXTRA` and `.claude/guard-protected.txt`).
+- `agent_output_guard` — sensitive content in tool output before it reaches
+  the model.
+- `subagent_scope` — Task tool dispatch with out-of-scope working directories.
 
 ## Environment variables
 

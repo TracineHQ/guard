@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from guard.registry import AUTONOMOUS_FEEDBACK
+from tests._helpers import decision_from_stdout as _decision
 
 REPO = Path(__file__).resolve().parents[2]
 HOOK = REPO / "src" / "guard" / "hooks" / "bash_command_validator.py"
@@ -52,12 +53,6 @@ def _run(
         check=False,
     )
     return proc.returncode, proc.stdout, proc.stderr
-
-
-def _decision(stdout: str) -> str | None:
-    if not stdout.strip():
-        return None
-    return json.loads(stdout).get("hookSpecificOutput", {}).get("permissionDecision")
 
 
 def test_autonomous_default_denies_unknown_command(tmp_path: Path) -> None:

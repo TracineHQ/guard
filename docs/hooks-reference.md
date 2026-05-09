@@ -55,8 +55,19 @@ permission rules struggle to classify (because `*` does not cross `/`).
 Read-only subcommands (`status`, `log`, `diff`, etc.) auto-allow.
 Destructive ones (`reset`, `clean`) are denied; `stash pop`, `stash drop`,
 and `stash clear` are denied as well.
-The hook also catches `git commit -C <ref>` — silent message reuse — and
-denies it.
+
+Additional denials beyond the simple subcommand list:
+
+- **`git -c core.hooksPath=<value>` and `git -c core.attributesFile=<value>`**
+  are denied regardless of the value, in any of the four argv shapes (bare
+  `-c`, `-c key=val`, `-c key= val`, `-C path -c ...`). These config keys
+  let an attacker point git at attacker-controlled hook scripts or
+  smudge/clean filters.
+- **`git commit -C <ref>` and `git commit --reuse-message=<ref>`** are
+  denied (silent message reuse — the commit-message validator can't see
+  the reused body).
+- **Destructive flag forms under `git -C`** are denied, not merely ASK'd:
+  `branch -d/-D/-m/-M`, `tag -d/--delete`, `remote remove/rm/rename/set-url`.
 
 If the command contains shell operators (`&&`, `||`, `;`, `|`) the hook
 declines to auto-allow and falls through to the rest of the chain.

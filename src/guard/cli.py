@@ -895,6 +895,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_migrate = sub.add_parser(
         "migrate-log",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         help=(
             "One-shot rewrite of the JSONL log to schema v1. "
             "Idempotent — re-running on an already-v1 log is a no-op."

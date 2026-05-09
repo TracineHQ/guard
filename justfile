@@ -9,6 +9,9 @@ lint:
     uv run ruff check .
     uv run ruff format --check .
 
+format-check:
+    uv run ruff format --check .
+
 fmt:
     uv run ruff check --fix .
     uv run ruff format .
@@ -18,6 +21,9 @@ typecheck:
 
 test:
     uv run pytest
+
+test-fast:
+    uv run pytest -x --ff -q
 
 test-e2e:
     uv run pytest tests/integration/test_plugin_e2e.py -v

@@ -12,14 +12,7 @@ from __future__ import annotations
 import pytest
 
 from guard.hooks.bash_command_validator import decide
-
-
-def _is_deny(result):
-    return (
-        result is not None
-        and isinstance(result, dict)
-        and result.get("permissionDecision") == "deny"
-    )
+from tests._helpers import is_deny as _is_deny
 
 
 def test_quoted_whitespace_smuggling_denied() -> None:
@@ -327,3 +320,39 @@ def test_inplace_editors_against_protected_files():
     assert _bash_first_protected_match(f"sed -i s/x/y/ {proto}") is not None
     assert _bash_first_protected_match(f"perl -pi -e s/x/y/g {proto}") is not None
     assert _bash_first_protected_match(f"awk -i inplace 1 {proto}") is not None
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "git -c core.hooksPath=/tmp/evil status",
+        "git -c core.hooksPath=../escape diff",
+        "git -c core.attributesFile=/etc/x diff",
+        "git -c core.attributesFile=../x log",
+        "git -C /repo -c core.hooksPath=/tmp/evil status",
+        "git -C /repo -c core.attributesFile=/tmp/x diff",
+    ],
+)
+def test_git_c_core_paths_override_denied(cmd: str) -> None:
+    from guard.hooks.git_c_validator import decide as git_c_decide
+
+    res = git_c_decide(cmd)
+    assert res is not None, f"git_c declined to decide: {cmd!r}"
+    assert _is_deny(res), f"core.* override not denied: {cmd!r}"
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "git commit -C HEAD~1",
+        "git commit --reuse-message=HEAD~1",
+        "git -C /repo commit -C HEAD",
+        "git -C /repo commit --reuse-message=HEAD",
+    ],
+)
+def test_git_commit_message_reuse_denied(cmd: str) -> None:
+    from guard.hooks.git_c_validator import decide as git_c_decide
+
+    res = git_c_decide(cmd)
+    assert res is not None, f"git_c declined to decide: {cmd!r}"
+    assert _is_deny(res), f"silent message reuse not denied: {cmd!r}"
