@@ -20,6 +20,18 @@ adheres to [Semantic Versioning](https://semver.org/).
   files control whether guard runs at all and whether allowlist
   overrides apply, so they always go through ASK.
 
+### Changed — deny-string template (rule_id + override path)
+
+- `bash_command_validator`: every allowlist-routed deny (always-deny,
+  synthetic-deny, credential-leak) now ends with `Rule: <rule_id>.
+  Override: \`guard allowlist allow-command <rule_id> '<command>'
+  --reason '...'\` or \`guard allowlist disable-rule <rule_id>\`.` —
+  users hit by a false positive can act without grepping the source.
+  Helper `_format_deny_reason` keeps the footer identical across
+  matchers so the shape is learnable. Pre-deny shapes (pipe-to-shell,
+  dangerous-construct, conditional-safe denied flag) keep their
+  existing reasons — they are not allowlist-routed.
+
 ### Hardened — bash canonicalization
 
 - `bash_command_validator`: ANSI-C `$'\NNN'` octal escapes now decoded

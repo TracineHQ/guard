@@ -1411,3 +1411,37 @@ def test_brace_legit_shapes_not_falsely_denied(command: str) -> None:
     # other two should pass through. Just assert they don't crash and the
     # decision is consistent with the non-brace baseline.
     decide(command)
+
+
+# === Deny reason format: rule_id + override path surfaced ===
+
+
+DENY_REASON_FORMAT_CASES = [
+    # bash.always_deny — registry literal (rm -rf / is on this list)
+    ("rm -rf /", "bash.always_deny"),
+    ("git push --force-with-lease origin main", "bash.always_deny"),
+    # bash.dangerous_rm — synthetic matcher (operand isn't a registry literal)
+    ("rm -rf /home/*", "bash.dangerous_rm"),
+    # bash.shell_wrapper — synthetic matcher
+    ("bash -c 'echo hi'", "bash.shell_wrapper"),
+    # bash.credential_leak — credential scanner.
+    # NB: the literal below is a synthetic test fixture, not a real key.
+    ("aws " + "iam " + "create-access-key --user-name root", "bash.credential_leak"),
+]
+
+
+@pytest.mark.parametrize(("command", "expected_rule"), DENY_REASON_FORMAT_CASES)
+def test_deny_reason_includes_rule_id_and_override_path(
+    command: str, expected_rule: str
+) -> None:
+    """Every allowlist-routed deny must surface the rule_id and the two CLI
+    verbs that turn it off, so a user hit by a false positive can act
+    without grepping the source.
+    """
+    result = decide(command)
+    assert result is not None
+    assert result.get("permissionDecision") == "deny"
+    reason = result.get("permissionDecisionReason", "")
+    assert f"Rule: {expected_rule}" in reason, f"missing rule_id in reason: {reason!r}"
+    assert f"guard allowlist allow-command {expected_rule}" in reason
+    assert f"guard allowlist disable-rule {expected_rule}" in reason

@@ -3546,17 +3546,17 @@ def _get_always_deny(segments: list[str]) -> tuple[dict[str, str], str] | None:
         prefix = _match_always_deny(seg)
         if prefix is not None:
             rule_reason = _ALWAYS_DENY_REASONS.get(prefix)
-            reason = (
-                f"Blocked: `{prefix}` is on the always-deny list ({rule_reason})."
+            body = (
+                f"Blocked: `{prefix}` is on the always-deny list ({rule_reason})"
                 if rule_reason
-                else f"Blocked: `{seg[:80]}` is on the always-deny list."
+                else f"Blocked: `{seg[:80]}` is on the always-deny list"
             )
-            return _deny(reason), "bash.always_deny"
+            return _deny(_format_deny_reason("bash.always_deny", body)), "bash.always_deny"
         synth = _match_synthetic_deny(seg)
         if synth is not None:
             label, rule_id = synth
-            reason = f"Blocked: `{seg[:80]}` — {_SYNTH_DENY_REASONS[label]}"
-            return _deny(reason), rule_id
+            body = f"Blocked: `{seg[:80]}` — {_SYNTH_DENY_REASONS[label]}"
+            return _deny(_format_deny_reason(rule_id, body)), rule_id
         # Shell-wrapper recursion: ``bash -c "rm -rf /; other"`` has
         # operators inside the payload that the outer split missed.
         queue.extend(_expand_runner_payload_segments(seg))
@@ -3612,16 +3612,13 @@ def get_credential_leak_deny(command: str) -> dict[str, str] | None:
     for pattern, label in CREDENTIAL_LEAK_PATTERNS:
         if pattern.search(command):
             advice = CREDENTIAL_LEAK_FEEDBACK.get(label, "")
-            reason = (
+            body = (
                 f"Blocked: `{label}` would print a live credential to the "
-                "agent transcript (logged, cached, possibly leaked downstream)."
+                "agent transcript (logged, cached, possibly leaked downstream)"
             )
             if advice:
-                reason = reason + "\n\n" + advice
-            return {
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }
+                body = body + "\n\n" + advice
+            return _deny(_format_deny_reason("bash.credential_leak", body))
     return None
 
 
@@ -3631,6 +3628,24 @@ def _allow(reason: str) -> dict[str, str]:
 
 def _deny(reason: str) -> dict[str, str]:
     return {"permissionDecision": "deny", "permissionDecisionReason": reason}
+
+
+def _format_deny_reason(rule_id: str, body: str) -> str:
+    """Append the unified rule_id + override-path footer to a deny ``body``.
+
+    Every allowlist-routed deny surfaces the rule_id and the two CLI verbs
+    that turn it off, so a user hit by a false positive can act without
+    grepping the source. The footer is identical across matchers: users
+    learn the shape once. ``<command>`` is a placeholder — substituting
+    quoted shell text into the printed message is error-prone, so the
+    user supplies the exact form they want when they invoke the CLI.
+    """
+    body = body.rstrip(" .")
+    return (
+        f"{body}. Rule: {rule_id}. "
+        f"Override: `guard allowlist allow-command {rule_id} '<command>' --reason '...'` "
+        f"or `guard allowlist disable-rule {rule_id}`."
+    )
 
 
 def _maybe_allow_via_allowlist(
