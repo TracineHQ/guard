@@ -249,11 +249,23 @@ COMMANDS: list[CommandRule] = [
         "git-deny",
     ),
     # --- Force-push variants (DENY) ---
-    # ``--force`` and ``-f`` are already blocked. These are the click-fatigue
-    # variants that get past the ASK that bare ``git push`` triggers:
-    # ``--force-with-lease`` is "safer" force-push but still rewrites remote
-    # history; ``--mirror`` overwrites every remote ref; ``+HEAD:main`` is the
-    # refspec form of force-push.
+    # All force-push shapes rewrite remote history and are denied. ``--force``
+    # / ``-f`` are the bare forms; ``--force-with-lease`` is the "safer"
+    # lease-checked variant that still rewrites; ``--mirror`` overwrites every
+    # remote ref; ``+HEAD:main`` is the refspec form (matched by a separate
+    # synthetic-deny matcher in bash_command_validator).
+    CommandRule(
+        "git push --force",
+        Safety.DENY,
+        "Force-rewrites remote history",
+        "git-deny",
+    ),
+    CommandRule(
+        "git push -f",
+        Safety.DENY,
+        "Force-rewrites remote history (-f short form of --force)",
+        "git-deny",
+    ),
     CommandRule(
         "git push --force-with-lease",
         Safety.DENY,
