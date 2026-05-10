@@ -705,6 +705,12 @@ def _expand_braces_once(token: str) -> list[str] | None:
     head-token matchers (``{r..r}m`` → ``rm``) and have zero blow-up
     cost. Returns ``None`` if no expandable brace group is present.
     """
+    # Both braces must be present for the regex to match. Without this gate,
+    # an unclosed-brace input like ``aaaa...{bbbb...`` triggers O(n²)
+    # backtracking on the greedy ``[^\s{}]*`` prefix in ``_BRACE_EXPAND_RE``
+    # — a 50 KB token freezes the validator for ~90 s.
+    if "{" not in token or "}" not in token:
+        return None
     m = _BRACE_EXPAND_RE.search(token)
     if not m:
         return None
@@ -1674,10 +1680,13 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         "from PyPI only, or vet the source manually."
     ),
     _SYNTH_KUBECTL_DESTRUCTION_DENY: (
-        "kubectl delete with --all / -A / --all-namespaces, or against a "
-        "namespace resource, deletes resources cluster-wide. Never a "
-        "single-step dev op; scope the deletion to a specific resource "
-        "name or run it manually with full intent."
+        "Broad-scope kubectl operation. Catches: delete with "
+        "--all / -A / --all-namespaces or against a namespace; "
+        "scale --replicas=0 with --all or label-selector; "
+        "drain with --force or --grace-period=0; "
+        "replace --force -f; rollout restart/undo with --all. "
+        "Scope the operation to a single named resource, or run it "
+        "manually with full intent."
     ),
     _SYNTH_GH_API_DELETE_DENY: (
         "gh api -X DELETE bypasses the gh repo/release deny rules by "
@@ -2043,7 +2052,7 @@ _KUBECTL_FLAGS_TAKING_VALUE = {
 
 
 def _is_kubectl_destructive(normalized: str) -> bool:
-    """Return True for ``kubectl delete`` shapes that wipe broad scope.
+    """Return True for ``kubectl`` shapes that wipe broad scope.
 
     Catches the bypasses literal ``kubectl delete --all`` rules cannot:
     flag-reordering (``kubectl delete -n prod --all``), short alias
@@ -2051,31 +2060,87 @@ def _is_kubectl_destructive(normalized: str) -> bool:
     ``--all`` (``kubectl delete deployment --all``). Also catches namespace
     deletion (``kubectl delete namespace foo``) regardless of position.
 
+    Beyond ``delete``, also fires on functionally-equivalent destruction
+    via other verbs:
+    - ``scale ... --replicas=0`` with ``--all``/``--all-namespaces`` (zero
+      every deployment cluster-wide)
+    - ``drain <node> --force`` or ``--grace-period=0`` (evict all pods,
+      ignore PodDisruptionBudgets)
+    - ``replace --force -f <manifest>`` (delete-then-create — drops live
+      state)
+    - ``rollout restart ...`` with cluster-wide flag (rolling-restart
+      everything)
+
     Single-resource deletions (``kubectl delete pod my-pod``) are NOT
-    affected — the matcher requires either a cluster-wide flag or the
-    namespace resource type as the first positional.
+    affected.
     """
     tokens = normalized.split()
-    if len(tokens) < 3 or _basename(tokens[0]) != "kubectl" or tokens[1] != "delete":
+    if len(tokens) < 3 or _basename(tokens[0]) != "kubectl":
         return False
+    verb = tokens[1]
     rest = tokens[2:]
-    # Cluster-wide flag anywhere (separate or fused) → catastrophic.
-    for tok in rest:
-        if tok in _KUBECTL_CLUSTER_FLAGS or tok.startswith("--all="):
-            return True
-    # First positional after `delete` (skipping flags + their values) is
-    # the resource type. ``namespace`` / ``ns`` here means the user is
-    # deleting a namespace (cascades to every resource in it).
-    i = 0
-    while i < len(rest):
-        tok = rest[i]
-        if tok in _KUBECTL_FLAGS_TAKING_VALUE:
-            i += 2
-            continue
-        if tok.startswith("-"):
-            i += 1
-            continue
-        return tok in _KUBECTL_NAMESPACE_RESOURCES
+    if verb == "delete":
+        # Cluster-wide flag anywhere (separate or fused) → catastrophic.
+        for tok in rest:
+            if tok in _KUBECTL_CLUSTER_FLAGS or tok.startswith("--all="):
+                return True
+        # First positional after `delete` (skipping flags + their values)
+        # is the resource type. ``namespace`` / ``ns`` here means the user
+        # is deleting a namespace (cascades to every resource in it).
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            if tok in _KUBECTL_FLAGS_TAKING_VALUE:
+                i += 2
+                continue
+            if tok.startswith("-"):
+                i += 1
+                continue
+            return tok in _KUBECTL_NAMESPACE_RESOURCES
+        return False
+    if verb == "scale":
+        # ``--replicas=0`` (fused) or ``--replicas 0`` (separate).
+        has_zero_replicas = any(
+            tok in {"--replicas=0", "-r=0"}
+            or (tok in {"--replicas", "-r"} and i + 1 < len(rest) and rest[i + 1] == "0")
+            for i, tok in enumerate(rest)
+        )
+        # Cluster-wide flag OR a label-selector. ``-l app=prod`` /
+        # ``--selector role=worker`` matches multiple resources just as
+        # broadly as ``--all`` for mass-action purposes.
+        has_broad_scope = any(
+            tok in _KUBECTL_CLUSTER_FLAGS
+            or tok.startswith(("--all=", "--selector=", "-l="))
+            or tok in {"-l", "--selector"}
+            for tok in rest
+        )
+        return has_zero_replicas and has_broad_scope
+    if verb == "drain":
+        # ``drain <node> --force`` or ``--grace-period=0`` evicts all pods
+        # and ignores PDBs — functionally equivalent to mass-deleting them.
+        return any(
+            tok == "--force"
+            or tok == "--grace-period=0"
+            or (tok == "--grace-period" and i + 1 < len(rest) and rest[i + 1] == "0")
+            for i, tok in enumerate(rest)
+        )
+    if verb == "replace":
+        # ``replace --force -f <manifest>`` is delete-then-create; drops
+        # any state not present in the manifest.
+        has_force = "--force" in rest
+        has_filename = any(
+            tok in {"-f", "--filename"} or tok.startswith("--filename=") for tok in rest
+        )
+        return has_force and has_filename
+    if verb == "rollout":
+        # ``rollout restart`` with cluster-wide flag rolling-restarts every
+        # workload in scope. ``rollout undo`` rolls every targeted
+        # workload back to a prior revision — equally destructive in prod.
+        # Single-target forms (``rollout restart deploy/foo``) are not
+        # flagged because they take a positional argument, not --all.
+        if not rest or rest[0] not in {"restart", "undo"}:
+            return False
+        return any(tok in _KUBECTL_CLUSTER_FLAGS for tok in rest[1:])
     return False
 
 
@@ -2718,6 +2783,26 @@ def _is_image_or_device_operand(tok: str) -> bool:
     return any(tok.endswith(suffix) for suffix in _IMAGE_FILE_SUFFIXES)
 
 
+# Block-device shapes only — excludes character devices like ``/dev/null``,
+# ``/dev/stdout``, ``/dev/stderr``, ``/dev/tty``, ``/dev/zero``, ``/dev/random``,
+# ``/dev/urandom``. Used by the ``tee`` matcher because the legitimate idiom
+# ``echo x | tee /dev/null`` (force pipeline materialization, mirror to stderr,
+# etc.) operates on character devices and must NOT be denied. The other
+# disk-destruction matchers (dd / mkfs / shred) keep ``_is_image_or_device_operand``
+# because their head-token already implies destruction.
+_BLOCK_DEVICE_RE = re.compile(
+    r"^/dev/(sd[a-z]\d*|nvme\d+n\d+(p\d+)?|disk\d+(s\d+)?|hd[a-z]\d*|"
+    r"mmcblk\d+(p\d+)?|loop\d+|md\d+|mapper/.+|vd[a-z]\d*|xvd[a-z]\d*)$"
+)
+
+
+def _is_block_device_or_image_operand(tok: str) -> bool:
+    """Return True for a block device path or filesystem image — NOT character devices."""
+    if _BLOCK_DEVICE_RE.match(tok):
+        return True
+    return any(tok.endswith(suffix) for suffix in _IMAGE_FILE_SUFFIXES)
+
+
 def _is_disk_destruction(normalized: str) -> bool:
     """Return True for disk/partition/filesystem destruction shapes.
 
@@ -2745,6 +2830,18 @@ def _is_disk_destruction(normalized: str) -> bool:
         return any(t in {"eraseDisk", "eraseVolume", "secureErase"} for t in tokens[1:])
     if head == "wipefs":
         return any(_is_image_or_device_operand(t) for t in tokens[1:])
+    # ``tee /dev/sda`` (and ``tee /dev/sda < /dev/urandom``) writes whatever
+    # arrives on stdin to a raw block device. The ``> /dev/...`` redirect
+    # form is already caught by ``_is_sensitive_destination_write``, but
+    # ``tee`` consumes the device path as an operand and slips past that
+    # rule because tee isn't in the write-verb list (its primary use is
+    # legitimate stdout splitting). Use the block-device-only predicate so
+    # the common ``... | tee /dev/null`` and ``... | tee /dev/stderr``
+    # idioms still pass through.
+    if head == "tee":
+        return any(
+            _is_block_device_or_image_operand(t) for t in tokens[1:] if not t.startswith("-")
+        )
     return False
 
 
@@ -2926,17 +3023,36 @@ _GCLOUD_DESTRUCTIVE_PATHS = (
 )
 
 
+_GCLOUD_RELEASE_TRACKS = frozenset({"alpha", "beta"})
+
+
 def _is_gcloud_destructive(normalized: str) -> bool:
     """Return True for known-destructive gcloud paths.
 
     Walks past leading global flags (``gcloud --quiet --format json …``)
     before indexing into the path tuple. Any non-recognized flag is treated
     as bare (skip the token alone) so we don't over-consume.
+
+    Strips an optional ``alpha`` / ``beta`` release-track prefix so
+    ``gcloud alpha compute instances delete prod-vm`` denies the same as
+    ``gcloud compute instances delete prod-vm``. Google's docs frequently
+    recommend the alpha/beta form for KMS, AI Platform, and compute features
+    — without this, every destructive path tuple has an open bypass.
     """
     raw = normalized.split()
     if len(raw) < 3 or _basename(raw[0]) != "gcloud":
         return False
     tokens = _strip_cloud_global_flags(raw, _GCLOUD_GLOBAL_VALUE_FLAGS, _GCLOUD_GLOBAL_BARE_FLAGS)
+    # Strip the alpha/beta release-track prefix, then re-strip global flags
+    # because users frequently put globals AFTER the track (``gcloud alpha
+    # --project foo compute instances delete vm``). Without the second
+    # strip, the orphan value (``foo``) leaks into ``rest`` as a positional
+    # and shifts the path tuple off ``(compute, instances, delete)``.
+    if len(tokens) >= 2 and tokens[1] in _GCLOUD_RELEASE_TRACKS:
+        tokens = [tokens[0], *tokens[2:]]
+        tokens = _strip_cloud_global_flags(
+            tokens, _GCLOUD_GLOBAL_VALUE_FLAGS, _GCLOUD_GLOBAL_BARE_FLAGS
+        )
     rest = [t for t in tokens[1:] if not t.startswith("-")]
     return any(
         len(rest) >= len(path) and tuple(rest[: len(path)]) == path
@@ -3705,6 +3821,9 @@ def _evaluate_segments(
     return _allow(reason)
 
 
+_COMMAND_LENGTH_CAP = 8192
+
+
 def decide(command: str, original_command: str | None = None) -> dict[str, str] | None:
     """Decide whether to allow a bash command. ``None`` means passthrough.
 
@@ -3713,10 +3832,42 @@ def decide(command: str, original_command: str | None = None) -> dict[str, str] 
     """
     if original_command is None:
         original_command = command
+    # Adversarial-length inputs (200 KB single-token ``echo aaaa...``) drive
+    # the candidate-forms / fixpoint pipeline into ~10 s of redundant
+    # ``shlex.split`` work. Real bash command lines sit far below 8 KiB; deny
+    # outright before any scan so the validator can't be DoS'd by an agent
+    # emitting (or being tricked into emitting) a giant payload.
+    if len(command) > _COMMAND_LENGTH_CAP:
+        return _deny(
+            _format_deny_reason(
+                "bash.command_too_long",
+                (
+                    f"command exceeds {_COMMAND_LENGTH_CAP // 1024} KiB validator "
+                    "scan budget (DoS guard, not a shell limit). Split the "
+                    "command, or write the payload to a file and reference it"
+                ),
+            )
+        )
     # Fold POSIX line continuations and unicode whitespace before any other
     # processing so downstream pipeline split / normalization sees a canonical
     # ASCII form.
     command = _canonicalize(command)
+    # Brace expansion can blow up: chained groups (``{a,b}{c,d}{e,f}{g,h}``)
+    # with up to 32 alternatives each multiply through 4 fixpoint passes.
+    # An input under the input cap can canonicalize to >100 MB, OOMing the
+    # process before any matcher runs. Re-apply the cap post-canonicalize
+    # so the budget covers expansion blowup as well as raw input length.
+    if len(command) > _COMMAND_LENGTH_CAP:
+        return _deny(
+            _format_deny_reason(
+                "bash.command_too_long",
+                (
+                    f"command expands past {_COMMAND_LENGTH_CAP // 1024} KiB after "
+                    "brace expansion (validator DoS guard). Reduce the brace "
+                    "alternative count or split the command"
+                ),
+            )
+        )
     allowlist = load_allowlist()
 
     leak = get_credential_leak_deny(command)

@@ -13,6 +13,33 @@ permissions:
   contents: read
 
 jobs:
+  detect-prerelease:
+    # Single source of truth for "is this tag a prerelease". Without this gate,
+    # `pypi-publish` would run unconditionally — pushing every rc / alpha /
+    # beta tag straight to production PyPI and burning the filename slot
+    # (PyPI allows yanking but not re-uploading identical filenames).
+    name: Detect prerelease tag
+    runs-on: ubuntu-latest
+    outputs:
+      is_prerelease: ${{ steps.check.outputs.is_prerelease }}
+    steps:
+      - id: check
+        shell: bash
+        run: |
+          set -eu
+          # PEP 440 prerelease shapes:
+          #   - v1.0.0rc1 / v1.0.0a2 / v1.0.0b3      (compact)
+          #   - v1.0.0-rc1 / v1.0.0-alpha1            (hyphenated)
+          #   - v1.0.0.dev1                           (dev release — also prerelease)
+          # PEP 440 .post1 is a STABLE post-release and must NOT be flagged.
+          # The earlier ``*-*`` fallback was dropped because it over-matched
+          # cosmetic hyphens (``v1.0-stable``) as prereleases.
+          if [[ "$GITHUB_REF_NAME" =~ (-?(rc|a|b|alpha|beta|dev)|\.dev)[0-9]+$ ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: Build wheel and sdist
     runs-on: ubuntu-latest
@@ -204,7 +231,8 @@ jobs:
 
   pypi-publish:
     name: Publish to PyPI (production)
-    needs: testpypi-smoke
+    needs: [testpypi-smoke, detect-prerelease]
+    if: needs.detect-prerelease.outputs.is_prerelease == 'false'
     runs-on: ubuntu-latest
     environment:
       name: PyPi
@@ -224,7 +252,16 @@ jobs:
 
   gh-release:
     name: Create GitHub release
-    needs: pypi-publish
+    needs: [pypi-publish, testpypi-smoke, detect-prerelease]
+    # Run for both stable and prerelease tags. For prerelease tags
+    # `pypi-publish` is skipped (gated by detect-prerelease), so accept
+    # `success` OR `skipped` on that dependency. testpypi-smoke must
+    # always have succeeded — that's the gate that proves the artifacts
+    # are sane.
+    if: |
+      always() &&
+      needs.testpypi-smoke.result == 'success' &&
+      (needs.pypi-publish.result == 'success' || needs.pypi-publish.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: write  # required to create the release
@@ -240,13 +277,11 @@ jobs:
       - name: Create release with built artifacts attached
         env:
           GH_TOKEN: ${{ github.token }}
+          IS_PRERELEASE: ${{ needs.detect-prerelease.outputs.is_prerelease }}
         run: |
           set -eu
-          # Mark pre-release tags: PEP 440 shapes (v1.0.0rc1, v1.0.0a2, v1.0.0b3)
-          # and hyphen-separated shapes (v1.0.0-rc1). Matches the same intent as
-          # `contains(github.ref_name, '-')` used in convo but also covers PEP 440.
           prerelease_flag=""
-          if [[ "$GITHUB_REF_NAME" =~ (rc|a|b)[0-9]+$ ]] || [[ "$GITHUB_REF_NAME" == *-* ]]; then
+          if [ "$IS_PRERELEASE" = "true" ]; then
             prerelease_flag="--prerelease"
           fi
           gh release create "$GITHUB_REF_NAME" \
