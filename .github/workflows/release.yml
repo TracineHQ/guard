@@ -27,10 +27,14 @@ jobs:
         shell: bash
         run: |
           set -eu
-          # PEP 440 prerelease shapes (v1.0.0rc1, v1.0.0a2, v1.0.0b3) and
-          # hyphen-separated shapes (v1.0.0-rc1). Mirrors the regex used by
-          # the gh-release step so the two stay in sync.
-          if [[ "$GITHUB_REF_NAME" =~ (rc|a|b)[0-9]+$ ]] || [[ "$GITHUB_REF_NAME" == *-* ]]; then
+          # PEP 440 prerelease shapes:
+          #   - v1.0.0rc1 / v1.0.0a2 / v1.0.0b3      (compact)
+          #   - v1.0.0-rc1 / v1.0.0-alpha1            (hyphenated)
+          #   - v1.0.0.dev1                           (dev release — also prerelease)
+          # PEP 440 .post1 is a STABLE post-release and must NOT be flagged.
+          # The earlier ``*-*`` fallback was dropped because it over-matched
+          # cosmetic hyphens (``v1.0-stable``) as prereleases.
+          if [[ "$GITHUB_REF_NAME" =~ (-?(rc|a|b|alpha|beta|dev)|\.dev)[0-9]+$ ]]; then
             echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
           else
             echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
