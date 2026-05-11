@@ -381,6 +381,45 @@ def test_test_payload_structure() -> None:
     assert "guard.commit_message_validator" in hook_ids
 
 
+def test_test_fans_out_to_every_bash_surface_hook() -> None:
+    """``guard test`` must invoke every bash-surface hook in the registry.
+
+    Before the hook registry landed, ``cmd_test`` hand-maintained a tuple
+    of three hooks and silently skipped ``credential_check``,
+    ``agent_output_guard``, and ``protected_files`` (all of which act on
+    Bash). This test guards against the same drift returning.
+    """
+    from guard.cli import cmd_test
+    from guard.hooks._registry import bash_surface_hooks
+
+    payload, _ = cmd_test("ls")
+    actual_hook_ids = {r["hook_id"] for r in payload["results"]}
+    expected_hook_ids = {h.id for h in bash_surface_hooks()}
+    assert actual_hook_ids == expected_hook_ids, (
+        f"cmd_test fan-out drift: missing={expected_hook_ids - actual_hook_ids}, "
+        f"unexpected={actual_hook_ids - expected_hook_ids}"
+    )
+
+
+def test_test_routes_credential_check_for_tar_create() -> None:
+    """Regression: ``tar --create`` against a credential path must hit ``credential_check``.
+
+    The original gap surfaced from a coverage-audit cron run: ``guard test``
+    only wired bash_command_validator / git_c_validator / commit_message_validator
+    and silently passed through credential_check. After registry rewiring this
+    must return an ``ask`` (the hook's correct verdict) instead of passthrough.
+    """
+    from guard.cli import cmd_test
+
+    payload, _ = cmd_test("tar --create -f /tmp/x.tar ~/.aws/credentials")
+    decisions = {r["hook_id"]: r["decision"] for r in payload["results"]}
+    assert decisions.get("guard.credential_check") == "ask", (
+        f"credential_check should ask on tar --create against an AWS "
+        f"credential path; got {decisions.get('guard.credential_check')!r}. "
+        f"Full results: {payload['results']}"
+    )
+
+
 # === guard diff ===
 
 

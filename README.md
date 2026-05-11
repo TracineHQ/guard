@@ -28,12 +28,23 @@ Guardrails not walls: guard catches the obvious foot-guns at the Claude Code hoo
 
 ## Install
 
+Inside Claude Code:
+
 ```
-/plugin marketplace add TracineHQ/guard
-/plugin install guard@TracineHQ
+/plugin marketplace add TracineHQ/plugins
+/plugin install guard@tracine
 ```
 
-`TracineHQ/guard` is the GitHub `owner/repo` shorthand for the marketplace source. `guard@TracineHQ` is the `<plugin>@<marketplace>` reference Claude Code uses to install. To pin a specific tag:
+This installs guard from the unified [TracineHQ plugin catalog](https://github.com/TracineHQ/plugins). The same marketplace also hosts [convo](https://github.com/TracineHQ/convo); once the marketplace is registered you can install either with one command.
+
+Standalone alternative (skip the catalog and install guard directly from this repo):
+
+```
+/plugin marketplace add TracineHQ/guard
+/plugin install guard@tracinehq
+```
+
+`TracineHQ/guard` is the GitHub `owner/repo` shorthand for the marketplace source. `guard@tracinehq` is the `<plugin>@<marketplace>` reference Claude Code uses to install. To pin a specific tag:
 
 ```
 /plugin marketplace add TracineHQ/guard#v1.0.0

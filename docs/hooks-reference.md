@@ -1,6 +1,6 @@
 # Hooks reference
 
-Guard ships eight PreToolUse hooks. Each runs as a short Python subprocess
+Guard ships seven PreToolUse hooks. Each runs as a short Python subprocess
 that reads a JSON payload on stdin and emits a permission decision plus a
 JSONL audit record. This page documents what each hook checks, when it
 fires, how to disable it, and what a typical block looks like.

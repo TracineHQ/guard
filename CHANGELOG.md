@@ -47,11 +47,34 @@ adheres to [Semantic Versioning](https://semver.org/).
 - `agent_output_guard`: the `.output` matcher no longer fires on
   paths ending in `.output.bak` (or any `.output.<suffix>`). The
   trailing negative-lookahead class was missing the `.` character.
-- `commit_message_validator._extract_all_messages` caps the scan
-  window at 8 KiB. `re.DOTALL` + backreference patterns could
-  backtrack quadratically on adversarial input (500 unclosed quotes,
-  ~250k backtracks on a 4 KB command); real commit-message argv
-  stays well under 8 KiB.
+- `commit_message_validator` no longer reverse-engineers shell quoting
+  with regex. Replaced with a single `shlex.split` pass plus a forward
+  walk over the post-`git commit` token slice. The shell parser
+  resolves quoting semantics, so escaped quotes inside `-m` bodies,
+  no-space `-m"msg"`, combined `-am`, and unbalanced quotes are all
+  handled uniformly. Tokenises linearly, so no scan-window cap is
+  needed against adversarial input.
+- `guard test` now fans out to all six bash-surface hooks instead of
+  the three that were hardcoded in `cmd_test`. Concrete bypass this
+  catches: `guard test "tar --create -f /tmp/x.tar ~/.aws/credentials"`
+  now returns `ask` from `guard.credential_check` (was `passthrough`
+  because `credential_check`, `agent_output_guard`, and
+  `protected_files` were silently skipped by the CLI even though they
+  act on `Bash` input).
+
+### Changed — internals
+
+- New `src/guard/hooks/_registry.py` is the single source of truth for
+  the hook list. `HookSpec` entries with surfaces + a normalised
+  `decide` adapter; adapters lazy-import their hook module so the
+  registry stays import-time pure. `cmd_test`, `cmd_diff`,
+  `allowlist.KNOWN_RULE_IDS`, and `_settings_reference_guard` derive
+  from it. `tests/test_hook_registry.py` walks `src/guard/hooks/*.py`
+  and asserts every `_HOOK_ID` literal is registered, so the next hook
+  addition can't silently miss the wiring.
+- `protected_files` exposes a pure `decide()` so the registry adapter
+  and the production `hook()` share one code path instead of two that
+  drift.
 
 ### Polish — deny-message copy
 
@@ -72,7 +95,6 @@ adheres to [Semantic Versioning](https://semver.org/).
   `open_safe`'s `O_NOFOLLOW` symlink refusal (security-sensitive TOCTOU
   guard); `_read_message_file`'s `ValueError`/`OSError` fallback;
   `credential_check._expand`'s `OSError` fallback;
-  `_extract_all_messages`'s 8 KiB scan-window cap;
   `git_c_validator._decide_stash`'s unknown-action fallthrough;
   `agent_output_guard.hook`'s non-dict `tool_input` passthrough;
   `allowlist._validate_allow_commands`'s non-list warning branch.
