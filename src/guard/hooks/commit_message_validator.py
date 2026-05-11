@@ -231,11 +231,23 @@ def _extract_all_messages(command: str) -> list[str]:
     """
     if len(command) > _MESSAGE_SCAN_MAX_BYTES:
         command = command[:_MESSAGE_SCAN_MAX_BYTES]
+    # Body pattern (?:\\.|[^\\])*? matches either an escaped pair (\\. = backslash
+    # plus any char) or a non-backslash character. A bare (.*?)\1 terminates at
+    # the FIRST occurrence of the captured quote char, including escaped \" inside
+    # the message body -- a real-world bypass shape where AI-attribution trailers
+    # land after a \"...\" segment (e.g. quoted JSON keys in the commit body) and
+    # the validator never sees them.
     messages: list[str] = [
-        m.group(2) for m in re.finditer(r"""--message[= ]\s*(['"])(.*?)\1""", command, re.DOTALL)
+        m.group(2)
+        for m in re.finditer(
+            r"""--message[= ]\s*(['"])((?:\\.|[^\\])*?)\1""", command, re.DOTALL
+        )
     ]
     messages.extend(
-        m.group(2) for m in re.finditer(r"""(?<!-)-[a-z]*m\s+(['"])(.*?)\1""", command, re.DOTALL)
+        m.group(2)
+        for m in re.finditer(
+            r"""(?<!-)-[a-z]*m\s+(['"])((?:\\.|[^\\])*?)\1""", command, re.DOTALL
+        )
     )
     return messages
 

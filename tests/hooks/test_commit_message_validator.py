@@ -118,6 +118,41 @@ class TestMessageExtraction:
         assert msg is not None
         assert "Co-Authored-By" in msg
 
+    def test_escaped_double_quotes_in_body_dont_terminate_capture(self):
+        # Bypass shape: an escaped \" inside the message body would terminate
+        # a naive (.*?)\1 non-greedy match at the first internal quote, hiding
+        # any AI-attribution trailer that comes after. The body pattern must
+        # skip escaped pairs so the full message is captured.
+        cmd = (
+            'git commit -m "fix: redeclare plugin.json\\\'s \\"hooks\\" field\n\n'
+            'Co-Authored-By: Claude <noreply@anthropic.com>"'
+        )
+        msg = extract_commit_message(cmd)
+        assert msg is not None
+        assert "Co-Authored-By" in msg, (
+            "escaped-quote bypass: trailer after \\\" was dropped by extractor"
+        )
+
+    def test_escaped_single_quotes_in_body_dont_terminate_capture(self):
+        # Same defense for single-quoted message bodies.
+        cmd = (
+            "git commit -m 'fix: redeclare plugin.json\\'s \\'hooks\\' field\n\n"
+            "Co-Authored-By: Claude <noreply@anthropic.com>'"
+        )
+        msg = extract_commit_message(cmd)
+        assert msg is not None
+        assert "Co-Authored-By" in msg
+
+    def test_long_flag_with_escaped_quotes_in_body(self):
+        # --message form must also survive escaped quotes in the body.
+        cmd = (
+            'git commit --message="fix: \\"hooks\\" field cleanup\n\n'
+            'Co-Authored-By: Claude <noreply@anthropic.com>"'
+        )
+        msg = extract_commit_message(cmd)
+        assert msg is not None
+        assert "Co-Authored-By" in msg
+
     def test_not_a_commit_command(self):
         assert extract_commit_message("git status") is None
 
@@ -150,6 +185,23 @@ class TestDecideIntegration:
         result = decide('git commit -m "fix\n\nGenerated with Claude Code"')
         assert result is not None
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_ai_trailer_after_escaped_quotes_in_body_denied(self):
+        # Regression: a real failing command had escaped \"hooks\" tokens in
+        # the message body BEFORE the Co-Authored-By trailer. The body pattern
+        # used to terminate at the first internal \" -- dropping the trailer
+        # from the extracted message -- and the hook silently allowed the
+        # commit. The fix lets escaped pairs pass through; the trailer must
+        # now be visible to check_ai_emails and the decision must be deny.
+        cmd = (
+            'git commit -m "Fix plugin load failure\n\n'
+            'Listing plugin.json\\\'s \\"hooks\\" field triggers a duplicate-load error.\n\n'
+            'Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"'
+        )
+        result = decide(cmd)
+        assert result is not None, "escaped-quote bypass slipped past decide()"
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "noreply@anthropic.com" in result["hookSpecificOutput"]["permissionDecisionReason"]
 
     def test_non_commit_command_passes(self):
         assert decide("git status") is None
