@@ -425,6 +425,91 @@ def test_process_attach_denied(command: str) -> None:
 
 
 # ============================================================================
+# Process-tree destruction (kill -9 -1, pkill -u, killall -u, killall5)
+# ============================================================================
+
+PROCESS_TREE_KILL_DENY = [
+    "kill -9 -1",
+    "kill -1",
+    "kill -SIGKILL -1",
+    "killall5",
+    "killall5 -9",
+    "pkill -KILL -u root",
+    "pkill -9 -u dev",
+    "pkill -u nobody",
+    "killall -u dev",
+    "killall -U 501",
+]
+
+PROCESS_TREE_KILL_LEGIT = [
+    "kill 1234",
+    "kill -9 1234",
+    "kill -TERM 1234",
+    "pkill nginx",
+    "pkill -f myapp",
+    "killall nginx",
+]
+
+
+@pytest.mark.parametrize("command", PROCESS_TREE_KILL_DENY)
+def test_process_tree_kill_denied(command: str) -> None:
+    assert _is_deny(decide(command)), f"process-tree kill bypass: {command!r}"
+
+
+@pytest.mark.parametrize("command", PROCESS_TREE_KILL_LEGIT)
+def test_targeted_kill_not_denied(command: str) -> None:
+    res = decide(command)
+    assert not _is_deny(res), f"kill false positive: {command!r} -> {res}"
+
+
+# ============================================================================
+# osascript -e (macOS shell-exec primitive)
+# ============================================================================
+
+OSASCRIPT_EVAL_DENY = [
+    "osascript -e 'do shell script \"rm -rf /Users/dev\"'",
+    'osascript -e "do shell script \\"id\\""',
+    "osascript -l JavaScript -e 'foo'",
+    "osascript /tmp/evil.scpt",
+    "osascript ~/Library/x.scpt",
+]
+
+
+@pytest.mark.parametrize("command", OSASCRIPT_EVAL_DENY)
+def test_osascript_eval_denied(command: str) -> None:
+    assert _is_deny(decide(command)), f"osascript bypass: {command!r}"
+
+
+# ============================================================================
+# macOS LoginHook persistence via `defaults write`
+# ============================================================================
+
+MACOS_LOGINHOOK_DENY = [
+    "defaults write com.apple.loginwindow LoginHook /tmp/x.sh",
+    "defaults write com.apple.loginwindow LogoutHook /tmp/x.sh",
+    "defaults write /Library/Preferences/com.apple.loginwindow LoginHook /tmp/x.sh",
+    "defaults write com.apple.loginitems Foo Bar",
+]
+
+MACOS_LOGINHOOK_LEGIT = [
+    "defaults read com.apple.loginwindow",
+    "defaults read NSGlobalDomain",
+    "defaults write com.example.app SomeKey value",
+]
+
+
+@pytest.mark.parametrize("command", MACOS_LOGINHOOK_DENY)
+def test_macos_loginhook_denied(command: str) -> None:
+    assert _is_deny(decide(command)), f"loginhook bypass: {command!r}"
+
+
+@pytest.mark.parametrize("command", MACOS_LOGINHOOK_LEGIT)
+def test_macos_defaults_write_legit_not_denied(command: str) -> None:
+    res = decide(command)
+    assert not _is_deny(res), f"defaults write false positive: {command!r} -> {res}"
+
+
+# ============================================================================
 # DB CLI destruction (psql / mysql / mongo / redis-cli / dropdb)
 # ============================================================================
 
@@ -590,6 +675,14 @@ AWS_DESTRUCTION_DENY = [
     "aws iam delete-role --role-name foo",
     "aws iam delete-access-key --access-key-id ABCDEF --user-name foo",
     "aws iam delete-login-profile --user-name foo",
+    # Policy-mutation verbs (v1.1) — account lockout without a deletion to undo.
+    "aws iam put-role-policy --role-name Admin --policy-name deny-all --policy-document {}",
+    "aws iam put-user-policy --user-name foo --policy-name deny-all --policy-document {}",
+    "aws iam put-group-policy --group-name g --policy-name p --policy-document {}",
+    "aws iam detach-role-policy --role-name Admin --policy-arn arn:aws:iam::aws:policy/X",
+    "aws iam detach-user-policy --user-name foo --policy-arn arn:aws:iam::aws:policy/X",
+    "aws iam detach-group-policy --group-name g --policy-arn arn:aws:iam::aws:policy/X",
+    "aws iam update-assume-role-policy --role-name Admin --policy-document {}",
     "aws ec2 terminate-instances --instance-ids i-abc",
     "aws ec2 delete-vpc --vpc-id vpc-abc",
     "aws ec2 delete-volume --volume-id vol-abc",
@@ -987,6 +1080,39 @@ GIT_HISTORY_DENY = [
     "git worktree add -B branch /usr/local/wt HEAD",
     "git worktree add --reason hold /var/lib/wt HEAD",
 ]
+
+GIT_REMOTE_MUTATION_DENY = [
+    "git remote add origin https://attacker.example/evil.git",
+    "git remote set-url origin https://attacker.example/evil.git",
+    "git remote set-url --push origin https://attacker.example/evil.git",
+    "git remote rename origin upstream",
+    "git remote remove origin",
+    "git remote rm origin",
+    "git remote prune origin",
+    "git remote update",
+    "git remote set-head origin main",
+    "git remote set-branches origin main",
+]
+
+GIT_REMOTE_READ_LEGIT = [
+    "git remote",
+    "git remote -v",
+    "git remote show",
+    "git remote show origin",
+    "git remote get-url origin",
+]
+
+
+@pytest.mark.parametrize("command", GIT_REMOTE_MUTATION_DENY)
+def test_git_remote_mutation_denied(command: str) -> None:
+    assert _is_deny(decide(command)), f"git remote mutation bypass: {command!r}"
+
+
+@pytest.mark.parametrize("command", GIT_REMOTE_READ_LEGIT)
+def test_git_remote_read_not_denied(command: str) -> None:
+    res = decide(command)
+    assert not _is_deny(res), f"git remote false positive: {command!r} -> {res}"
+
 
 GIT_HISTORY_LEGIT = [
     "git push origin main",

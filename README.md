@@ -21,10 +21,10 @@ Guardrails not walls: guard catches the obvious foot-guns at the Claude Code hoo
 | bash_command_validator | dangerous shell commands (rm -rf, eval/source, env-var hijack, shell-wrapper bypass) |
 | git_c_validator | `git -C path` traversal, `git -c key=value` config injection, `git commit -C` silent message reuse |
 | credential_check | hardcoded credentials in tool inputs |
-| commit_message_validator | malformed/missing commit messages |
-| agent_output_guard | oversized raw-data reads in subagent output |
+| commit_message_validator | AI-attribution trailers (`Co-Authored-By: Claude…`) and missing/file-backed commit messages |
+| agent_output_guard | reads of subagent transcript files (`/tmp/claude-<pid>/.../tasks/*.output`) |
 | protected_files | edits to user-marked protected files |
-| subagent_scope | subagent edits outside declared scope |
+| subagent_scope | file edits outside the declared `.claude/subagent-scope.json` allowlist |
 
 ## Install
 
@@ -53,7 +53,7 @@ The marketplace install above wires up the safety hooks. To query the decision l
 pipx install tracine-guard
 ```
 
-Then `guard status` shows the log location and last record, `guard noisy --since 24h` ranks rules by hit count, `guard trace <session_id>` dumps a chronological view, and `guard silent` lists rules that fired historically but not recently. The CLI never writes — it only reads `~/.claude/guard-decisions.jsonl`. The two install paths complement each other; they aren't alternatives.
+Then `guard status` shows the log location and last record, `guard noisy --since 24h` ranks rules by hit count, `guard trace <session_id>` dumps a chronological view, and `guard silent` lists rules that fired historically but not recently. Query subcommands are read-only against `~/.claude/guard-decisions.jsonl`; `guard allowlist *` writes to your allowlist file (project or `--global`). The two install paths complement each other; they aren't alternatives.
 
 ## Configuration
 
@@ -66,6 +66,7 @@ Guard reads a small set of environment variables. See [SKILL.md](SKILL.md) for t
 | `GUARD_AUTONOMOUS_QUEUE_PATH` | Override the autonomous-deny queue path |
 | `GUARD_DEBUG` | Emit per-hook debug to stderr |
 | `GUARD_DATA_DIR` | Override guard's data directory |
+| `GUARD_PROTECTED_EXTRA` | Newline / colon-separated extra protected glob patterns (fallback when `~/.claude/guard-protected.txt` is absent) |
 
 To disable an individual hook, remove its entry from `~/.claude/settings.json` PreToolUse, or comment the line in `hooks/hooks.json` if you forked the plugin.
 

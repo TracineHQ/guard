@@ -286,6 +286,30 @@ def test_noisy_limit_caps_results(populated_log: Path) -> None:
     assert len(payload["top"]) <= 2
 
 
+def test_noisy_filters_by_decision(populated_log: Path) -> None:
+    from guard.cli import cmd_noisy
+
+    payload, _ = cmd_noisy(timedelta(days=365), limit=10, decision="deny")
+    # Every returned row matches the requested decision.
+    assert payload["top"]
+    assert all(t["decision"] == "deny" for t in payload["top"])
+
+
+def test_noisy_filters_by_hook(populated_log: Path) -> None:
+    from guard.cli import cmd_noisy
+
+    payload, _ = cmd_noisy(timedelta(days=365), limit=10, hook_id="guard.bash_command_validator")
+    assert payload["top"]
+    assert all(t["hook_id"] == "guard.bash_command_validator" for t in payload["top"])
+
+
+def test_noisy_filter_returns_empty_when_no_match(populated_log: Path) -> None:
+    from guard.cli import cmd_noisy
+
+    payload, _ = cmd_noisy(timedelta(days=365), limit=10, hook_id="guard.nonexistent")
+    assert payload["top"] == []
+
+
 # === guard silent ===
 
 

@@ -212,6 +212,9 @@ def _extract_file_flag_path(command: str) -> str | None:
     return None
 
 
+_MESSAGE_SCAN_MAX_BYTES = 8 * 1024
+
+
 def _extract_all_messages(command: str) -> list[str]:
     """Return every ``-m`` / ``--message`` payload in ``command``.
 
@@ -219,7 +222,15 @@ def _extract_all_messages(command: str) -> list[str]:
     where a naive ``re.search`` returns only the first hit and the second
     message escapes the AI-attribution detector. We run ``re.findall`` over
     both the long and short flag forms and return them in order.
+
+    The ``re.DOTALL`` + backreference patterns can backtrack quadratically
+    on adversarial input (e.g. 500 unclosed quotes inside a long command
+    string). Cap the scan window at ``_MESSAGE_SCAN_MAX_BYTES`` — real
+    commit-message argv stays well under 8 KiB; anything larger is either
+    a heredoc (handled separately upstream) or a probe.
     """
+    if len(command) > _MESSAGE_SCAN_MAX_BYTES:
+        command = command[:_MESSAGE_SCAN_MAX_BYTES]
     messages: list[str] = [
         m.group(2) for m in re.finditer(r"""--message[= ]\s*(['"])(.*?)\1""", command, re.DOTALL)
     ]

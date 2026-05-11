@@ -246,6 +246,26 @@ class TestGlobstarRecursion:
         assert not is_allowed(str(target), str(tmp_path), ["**/*.md"])
 
 
+class TestRelativePathPayloadCwd:
+    """Relative ``file_path`` must resolve against payload cwd, not process cwd."""
+
+    def test_relative_path_resolves_against_payload_cwd(self, tmp_path, monkeypatch):
+        # Process cwd is somewhere unrelated to the payload cwd. Before the
+        # fix, ``Path('src/allowed.py').resolve()`` joined against the process
+        # cwd and produced a path outside the payload session, so the entry
+        # ``src/allowed.py`` in the scope file would silently miss.
+        payload_cwd = tmp_path / "session"
+        payload_cwd.mkdir()
+        (payload_cwd / "src").mkdir()
+        (payload_cwd / "src" / "allowed.py").write_text("x")
+
+        other = tmp_path / "elsewhere"
+        other.mkdir()
+        monkeypatch.chdir(other)
+
+        assert is_allowed("src/allowed.py", str(payload_cwd), ["src/allowed.py"])
+
+
 class TestSubagentScopeF7:
     def test_plain_pattern_does_not_match_outside_cwd(self, tmp_path):
         # cwd = tmp_path/projA ; allowed = src/safe.py.

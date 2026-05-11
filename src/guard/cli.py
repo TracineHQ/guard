@@ -291,14 +291,23 @@ def cmd_status() -> tuple[dict[str, Any], str]:
     return payload, "\n".join(lines) + "\n"
 
 
-def cmd_noisy(since: timedelta | None, limit: int) -> tuple[dict[str, Any], str]:
+def cmd_noisy(
+    since: timedelta | None,
+    limit: int,
+    *,
+    decision: str | None = None,
+    hook_id: str | None = None,
+    tool_name: str | None = None,
+) -> tuple[dict[str, Any], str]:
     """Top N rules by hit count, grouped by ``(hook_id, decision)``."""
     cutoff = datetime.now(UTC) - since if since is not None else None
     reader = JsonlReader(effective_log_path())
     counts: Counter[tuple[str, str]] = Counter()
     samples: dict[tuple[str, str], str] = {}
     total = 0
-    for rec in reader.iter_records(since=cutoff):
+    for rec in reader.iter_records(
+        since=cutoff, decision=decision, hook_id=hook_id, tool_name=tool_name
+    ):
         key = (str(rec.get("hook_id", "?")), str(rec.get("decision", "?")))
         counts[key] += 1
         total += 1
@@ -333,7 +342,13 @@ def cmd_noisy(since: timedelta | None, limit: int) -> tuple[dict[str, Any], str]
     return payload, "\n".join(lines) + "\n"
 
 
-def cmd_silent(since: timedelta) -> tuple[dict[str, Any], str]:
+def cmd_silent(
+    since: timedelta,
+    *,
+    decision: str | None = None,
+    hook_id: str | None = None,
+    tool_name: str | None = None,
+) -> tuple[dict[str, Any], str]:
     """List ``(hook_id, decision)`` pairs that haven't appeared in N days.
 
     Heuristic: build the FULL set of pairs ever seen in the log; build the
@@ -346,7 +361,7 @@ def cmd_silent(since: timedelta) -> tuple[dict[str, Any], str]:
     all_pairs: set[tuple[str, str]] = set()
     recent_pairs: set[tuple[str, str]] = set()
     last_seen: dict[tuple[str, str], str] = {}
-    for rec in reader.iter_records():
+    for rec in reader.iter_records(decision=decision, hook_id=hook_id, tool_name=tool_name):
         key = (str(rec.get("hook_id", "?")), str(rec.get("decision", "?")))
         all_pairs.add(key)
         ts = rec.get("timestamp")
@@ -379,10 +394,20 @@ def cmd_silent(since: timedelta) -> tuple[dict[str, Any], str]:
     return payload, "\n".join(lines) + "\n"
 
 
-def cmd_trace(session_id: str) -> tuple[dict[str, Any], str]:
+def cmd_trace(
+    session_id: str,
+    *,
+    decision: str | None = None,
+    hook_id: str | None = None,
+    tool_name: str | None = None,
+) -> tuple[dict[str, Any], str]:
     """Print every record matching ``session_id``, chronological."""
     reader = JsonlReader(effective_log_path())
-    records = list(reader.iter_records(session_id=session_id))
+    records = list(
+        reader.iter_records(
+            session_id=session_id, decision=decision, hook_id=hook_id, tool_name=tool_name
+        )
+    )
     records.sort(key=lambda r: str(r.get("timestamp", "")))
     payload: dict[str, Any] = {
         "session_id": session_id,
@@ -745,6 +770,24 @@ class _RawVersionAction(argparse.Action):
         parser.exit(0)
 
 
+def _add_log_filter_args(parser: argparse.ArgumentParser) -> None:
+    """Add ``--decision`` / ``--hook`` / ``--tool`` filters shared by log-query subcommands."""
+    parser.add_argument(
+        "--decision",
+        help="Filter to records with this decision (e.g. deny, ask, allow, advisory).",
+    )
+    parser.add_argument(
+        "--hook",
+        dest="hook_id",
+        help="Filter to records emitted by this hook_id (e.g. guard.bash_command_validator).",
+    )
+    parser.add_argument(
+        "--tool",
+        dest="tool_name",
+        help="Filter to records produced for this Claude Code tool (e.g. Bash, Edit, Write).",
+    )
+
+
 def _add_scope_args(parser: argparse.ArgumentParser) -> None:
     """Add a mutually-exclusive ``--global`` / ``--project`` flag pair (default: project)."""
     g = parser.add_mutually_exclusive_group()
@@ -806,6 +849,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_noisy.add_argument("--since", default="7d", help="Time window: Nd/Nh/Nm (default: 7d).")
     p_noisy.add_argument("--limit", type=int, default=10, help="Max entries (default: 10).")
+    _add_log_filter_args(p_noisy)
 
     p_silent = sub.add_parser(
         "silent",
@@ -818,6 +862,7 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_silent.add_argument("--since", default="30d", help="Time window: Nd/Nh/Nm (default: 30d).")
+    _add_log_filter_args(p_silent)
 
     p_trace = sub.add_parser(
         "trace",
@@ -826,6 +871,7 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_trace.add_argument("session_id", help="Session id from the log.")
+    _add_log_filter_args(p_trace)
 
     p_test = sub.add_parser(
         "test",
@@ -956,12 +1002,28 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 -- linear command-
             payload, pretty = cmd_status()
         elif cmd == "noisy":
             since = parse_since(args.since)
-            payload, pretty = cmd_noisy(since, max(1, int(args.limit)))
+            payload, pretty = cmd_noisy(
+                since,
+                max(1, int(args.limit)),
+                decision=args.decision,
+                hook_id=args.hook_id,
+                tool_name=args.tool_name,
+            )
         elif cmd == "silent":
             since = parse_since(args.since)
-            payload, pretty = cmd_silent(since)
+            payload, pretty = cmd_silent(
+                since,
+                decision=args.decision,
+                hook_id=args.hook_id,
+                tool_name=args.tool_name,
+            )
         elif cmd == "trace":
-            payload, pretty = cmd_trace(args.session_id)
+            payload, pretty = cmd_trace(
+                args.session_id,
+                decision=args.decision,
+                hook_id=args.hook_id,
+                tool_name=args.tool_name,
+            )
         elif cmd == "test":
             payload, pretty = cmd_test(args.command)
         elif cmd == "diff":

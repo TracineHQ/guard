@@ -1611,6 +1611,7 @@ _SYNTH_CHMOD_SENSITIVE_TARGET_DENY = "<chmod against sensitive path>"
 _SYNTH_SUDO_ESCALATION_DENY = "<sudo interactive escalation>"
 _SYNTH_KERNEL_MOD_DENY = "<kernel module load>"
 _SYNTH_PROCESS_ATTACH_DENY = "<debugger attach to PID>"
+_SYNTH_PROCESS_TREE_KILL_DENY = "<process-tree kill>"
 _SYNTH_DB_DESTRUCTION_DENY = "<db CLI destructive SQL>"
 _SYNTH_DISK_DESTRUCTION_DENY = "<disk/partition destruction>"
 _SYNTH_NETWORK_WIPE_DENY = "<network policy wipe>"
@@ -1742,6 +1743,12 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
     _SYNTH_PROCESS_ATTACH_DENY: (
         "Debugger/tracer attach to a running PID (gdb -p, lldb -p, strace -p, "
         "dtrace -p). Process hijack/inspection; refuse."
+    ),
+    _SYNTH_PROCESS_TREE_KILL_DENY: (
+        "Process-tree destruction (kill -9 -1, killall5, pkill -u <user>, "
+        "killall -u <user>). Kills every process the user can reach; the "
+        "session itself usually dies, leaving the host in an unrecoverable "
+        "state. Target the specific PID instead."
     ),
     _SYNTH_DB_DESTRUCTION_DENY: (
         "DB CLI invocation with destructive SQL (DROP / TRUNCATE / DELETE FROM "
@@ -2512,6 +2519,19 @@ def _is_persistence_command(normalized: str) -> bool:
         return False
     if head == "visudo":
         return True
+    if head == "defaults":
+        # macOS LoginHook / LogoutHook persistence: ``defaults write
+        # com.apple.loginwindow LoginHook /tmp/x.sh`` installs a script that
+        # runs as root on every login. Same shape via LogoutHook. We deny any
+        # write against the loginwindow domain (any *Hook key) or against a
+        # LaunchAgents-style domain pattern.
+        rest = [t for t in tokens[1:] if not t.startswith("-")]
+        if len(rest) >= 2 and rest[0] == "write":
+            domain = rest[1]
+            if "loginwindow" in domain or "loginitems" in domain:
+                return True
+            if len(rest) >= 3 and rest[2].endswith("Hook"):
+                return True
     return False
 
 
@@ -2649,6 +2669,37 @@ def _is_process_attach(normalized: str) -> bool:
     if not tokens or _basename(tokens[0]) not in _DEBUG_ATTACH_HEADS:
         return False
     return any(t == "-p" or t.startswith("-p") for t in tokens[1:])
+
+
+# --- Process-tree destruction ---
+def _is_process_tree_kill(normalized: str) -> bool:
+    """Return True for kill-all-reachable / mass-signal shapes.
+
+    ``kill -9 -1`` sends SIGKILL to PID -1, which means every process the
+    current UID can reach. ``killall5`` does the same on Linux. ``pkill
+    -KILL -u <user>`` and ``pkill -9 -u <user>`` kill every process owned
+    by that user; the same applies to ``killall -KILL <pattern>`` against
+    a broad pattern.
+    """
+    tokens = normalized.split()
+    if not tokens:
+        return False
+    head = _basename(tokens[0])
+    if head == "killall5":
+        return True
+    if head == "kill":
+        # ``kill -9 -1`` / ``kill -SIGKILL -1`` / ``kill -1`` (the bare PID
+        # form). Any -1 operand is the catastrophic shape — there is no
+        # legitimate agent use of "signal every process I can touch".
+        return any(t == "-1" for t in tokens[1:])
+    if head in {"pkill", "killall"}:
+        # ``pkill -u <user>`` and ``killall -u <user>`` (Linux) hit every
+        # process owned by that user. The default signal is SIGTERM but
+        # ``-KILL`` / ``-9`` makes recovery harder. Deny any -u/-U form
+        # against a broad target (root / current user / wildcards).
+        if any(t in {"-u", "-U", "--euid", "--uid"} for t in tokens[1:]):
+            return True
+    return False
 
 
 # --- DB CLI destructive SQL ---
@@ -2960,7 +3011,23 @@ def _strip_cloud_global_flags(
 
 
 _AWS_DESTRUCTIVE_SUBCOMMANDS = {
-    "iam": {"delete-user", "delete-role", "delete-access-key", "delete-login-profile"},
+    "iam": {
+        "delete-user",
+        "delete-role",
+        "delete-access-key",
+        "delete-login-profile",
+        # Policy-mutation verbs achieve account lockout without a deletion to
+        # reverse. Inline ``put-role-policy`` with a deny-all document is
+        # equivalent to deleting the role — recovery requires another
+        # principal with IAM rights, which the deny may have just blocked.
+        "put-role-policy",
+        "put-user-policy",
+        "put-group-policy",
+        "detach-role-policy",
+        "detach-user-policy",
+        "detach-group-policy",
+        "update-assume-role-policy",
+    },
     "ec2": {
         "terminate-instances",
         "delete-vpc",
@@ -3559,6 +3626,7 @@ _PER_FORM_MATCHERS: tuple[tuple[Callable[[str], bool], str, str], ...] = (
     (_is_sudo_escalation, _SYNTH_SUDO_ESCALATION_DENY, "bash.sudo_escalation"),
     (_is_kernel_module_load, _SYNTH_KERNEL_MOD_DENY, "bash.kernel_module_load"),
     (_is_process_attach, _SYNTH_PROCESS_ATTACH_DENY, "bash.process_attach"),
+    (_is_process_tree_kill, _SYNTH_PROCESS_TREE_KILL_DENY, "bash.process_tree_kill"),
     (_is_db_cli_destructive, _SYNTH_DB_DESTRUCTION_DENY, "bash.db_cli_destructive"),
     (_is_dropdb_or_mysqladmin_drop, _SYNTH_DB_DESTRUCTION_DENY, "bash.dropdb_or_mysqladmin"),
     (_is_mongo_destructive, _SYNTH_DB_DESTRUCTION_DENY, "bash.mongo_destructive"),
