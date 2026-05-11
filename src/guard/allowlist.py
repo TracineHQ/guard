@@ -48,12 +48,12 @@ from guard._utils import GUARD_HOME
 
 PROJECT_ALLOWLIST_RELPATH = Path(".claude") / "guard" / "allowlist.json"
 
-# All known rule_ids users can put on disable_rules / allow_commands.rule.
-# Synthesised at module load from the bash matchers' rule_ids plus the
-# whole-hook rule_ids of the other four hooks. Sorted for deterministic
-# CLI output. Keep this list in sync with the matchers it documents — it
-# is the single source of truth for ``guard allowlist rules``.
-KNOWN_RULE_IDS: tuple[str, ...] = (
+# Bash matcher rule_ids — fine-grained, one per matcher function. Keep in
+# sync with the matchers in ``bash_command_validator.py``. The whole-hook
+# rule_ids of the other hooks are appended below from
+# ``hook_registry.disable_hook_ids()`` so there's exactly one place that
+# enumerates hook ids — the registry.
+_BASH_MATCHER_RULE_IDS: tuple[str, ...] = (
     # Bash: ALWAYS_DENY layer (coarse).
     "bash.always_deny",
     # Bash: synthetic matchers (fine-grained, one per matcher func).
@@ -105,12 +105,25 @@ KNOWN_RULE_IDS: tuple[str, ...] = (
     "bash.trap_exploit",
     "bash.var_expanded_head",
     "bash.wrapper_stacking",
-    # Other hooks: whole-hook disable only in v1.0; the rule_id IS the hook_id.
-    "guard.commit_message_validator",
-    "guard.credential_check",
-    "guard.git_c_validator",
-    "guard.protected_files",
 )
+
+
+def _build_known_rule_ids() -> tuple[str, ...]:
+    """Bash matcher ids + whole-hook disable ids, in stable display order."""
+    # Local import to avoid a load-order cycle: hooks import this module for
+    # ``hook_bypass_reason`` / ``load_allowlist``; the registry doesn't,
+    # but importing it at module load would still surface as
+    # ``allowlist -> hook_registry -> guard.hooks.<x>`` if anyone ever
+    # extended the registry to do eager imports.
+    from guard.hooks._registry import disable_hook_ids  # noqa: PLC0415
+
+    return _BASH_MATCHER_RULE_IDS + disable_hook_ids()
+
+
+# All known rule_ids users can put on ``disable_rules`` / ``allow_commands.rule``.
+# Sourced from the bash matcher list above plus the registry's whole-hook
+# disable ids. Sorted for deterministic CLI output.
+KNOWN_RULE_IDS: tuple[str, ...] = _build_known_rule_ids()
 
 
 class AllowlistError(ValueError):

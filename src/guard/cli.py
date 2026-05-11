@@ -188,13 +188,25 @@ def _has_plugin_cache(home: Path) -> bool:
 
 
 def _settings_reference_guard(home: Path) -> bool:
-    """True if a user-scope settings file mentions a guard hook script."""
+    """True if a user-scope settings file mentions a guard hook script.
+
+    Detects two installation shapes: settings.json that references the
+    hook source path (``guard/hooks/...``) and settings.json that
+    references a hook by its id (``guard.bash_command_validator``). Hook
+    ids come from the registry so a user who enables only a subset of
+    hooks (e.g. just ``guard.protected_files``) still registers as wired.
+    """
+    from guard.hooks._registry import all_hook_ids  # noqa: PLC0415
+
+    hook_ids = all_hook_ids()
     for name in ("settings.json", "settings.local.json"):
         try:
             text = (home / ".claude" / name).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        if "guard/hooks/" in text or "guard.bash_command_validator" in text:
+        if "guard/hooks/" in text:
+            return True
+        if any(hid in text for hid in hook_ids):
             return True
     return False
 
@@ -444,33 +456,34 @@ def cmd_test(command: str) -> tuple[dict[str, Any], str]:
 
 
 def _test_specs(command: str) -> Iterable[dict[str, Any]]:
-    """Yield ``{hook_id, decision, reason}`` dicts from each Bash-relevant decide()."""
-    # Lazy imports — keep the CLI's import cost low and isolate hook bugs from
-    # subcommands that don't need them.
-    from guard.hooks import (  # noqa: PLC0415 -- deferred to keep CLI cold-start fast
-        bash_command_validator,
-        commit_message_validator,
-        git_c_validator,
-    )
+    """Yield ``{hook_id, decision, reason}`` dicts from each Bash-surface hook.
 
-    for hook_id, fn in (
-        ("guard.bash_command_validator", bash_command_validator.decide),
-        ("guard.git_c_validator", git_c_validator.decide),
-        ("guard.commit_message_validator", commit_message_validator.decide),
-    ):
+    Iterates the hook registry rather than a hand-maintained tuple so a new
+    hook becomes testable just by registering it. The registry's per-hook
+    adapter handles the signature differences (some hooks take a bare
+    ``command``; others take the full ``(tool_name, tool_input)`` payload).
+    """
+    # Lazy import — keep the CLI's import cost low and isolate hook bugs from
+    # subcommands that don't need them.
+    from guard.hooks._registry import bash_surface_hooks  # noqa: PLC0415
+
+    tool_input = {"command": command}
+    for spec in bash_surface_hooks():
         try:
-            envelope = fn(command)
-        except Exception as exc:  # noqa: BLE001 -- hook isolation
+            envelope = spec.decide("Bash", tool_input)
+        except Exception as exc:  # noqa: BLE001 -- hook isolation: one hook crashing must not mask others
             yield {
-                "hook_id": hook_id,
+                "hook_id": spec.id,
                 "decision": "error",
                 "reason": f"{type(exc).__name__}: {exc}",
             }
             continue
         if envelope is None:
-            yield {"hook_id": hook_id, "decision": "passthrough", "reason": ""}
+            yield {"hook_id": spec.id, "decision": "passthrough", "reason": ""}
             continue
-        # Both decide-shapes — modern (envelope) and legacy (flat dict).
+        # Tolerate both decide-shapes: modern (nested ``hookSpecificOutput``)
+        # and legacy (flat ``permissionDecision``). Hooks predate the
+        # envelope standard; some still return the legacy shape.
         hso = envelope.get("hookSpecificOutput") if isinstance(envelope, dict) else None
         if isinstance(hso, dict):
             decision = hso.get("permissionDecision", "?")
@@ -481,7 +494,7 @@ def _test_specs(command: str) -> Iterable[dict[str, Any]]:
         else:
             decision = "?"
             reason = ""
-        yield {"hook_id": hook_id, "decision": decision, "reason": reason}
+        yield {"hook_id": spec.id, "decision": decision, "reason": reason}
 
 
 def cmd_diff() -> tuple[dict[str, Any], str]:
@@ -489,7 +502,14 @@ def cmd_diff() -> tuple[dict[str, Any], str]:
 
     Stub for v1.1: just the built-in defaults. User / project config layers
     land in a future task; this command will then expand to a 3-way merge view.
+
+    The hook list comes from the registry — previously this site hardcoded
+    its own list of seven ids that drifted from ``cmd_test``'s hardcoded
+    list of three.
     """
+    from guard.hooks._registry import all_hook_ids  # noqa: PLC0415
+
+    hook_ids = list(all_hook_ids())
     payload: dict[str, Any] = {
         "layers": [
             {
@@ -498,15 +518,7 @@ def cmd_diff() -> tuple[dict[str, Any], str]:
                     "mode": "enforce",
                     "decisions_path": effective_log_path(),
                     "schema_version": 1,
-                    "hooks": [
-                        "guard.bash_command_validator",
-                        "guard.git_c_validator",
-                        "guard.commit_message_validator",
-                        "guard.credential_check",
-                        "guard.protected_files",
-                        "guard.agent_output_guard",
-                        "guard.subagent_scope",
-                    ],
+                    "hooks": hook_ids,
                 },
             },
         ],
@@ -518,7 +530,7 @@ def cmd_diff() -> tuple[dict[str, Any], str]:
         f"  decisions_path: {effective_log_path()}",
         "  schema_version: 1",
         "  hooks:",
-        *[f"    - {h}" for h in payload["layers"][0]["config"]["hooks"]],
+        *[f"    - {h}" for h in hook_ids],
     ]
     return payload, "\n".join(lines) + "\n"
 

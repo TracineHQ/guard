@@ -765,6 +765,55 @@ def _excerpt_for_fallthrough(tool_input: dict[str, Any]) -> str:
     return ""
 
 
+def _match_for_tool(tool_name: str, tool_input: dict[str, Any]) -> tuple[str | None, str]:
+    """Return ``(matched_pattern, excerpt)`` for the given Claude Code tool payload.
+
+    Pure: no I/O, no allowlist consultation. ``matched_pattern`` is ``None``
+    when nothing protected is touched; ``excerpt`` is the human-readable
+    string used in audit-log records.
+
+    Three cases:
+
+    * ``Write`` / ``Edit`` / ``MultiEdit`` / ``NotebookEdit`` — pull the
+      ``file_path`` (or ``notebook_path``) and run ``is_protected``.
+    * ``Bash`` — extract write targets from the command and run the bash
+      first-match scanner.
+    * Anything else — defence-in-depth scan via
+      ``_fallthrough_first_protected_match`` over every path-like token in
+      the payload.
+    """
+    if tool_name in _FILE_PATH_TOOLS:
+        # NotebookEdit uses ``notebook_path``; the others use ``file_path``.
+        file_path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+        if not isinstance(file_path, str) or not file_path:
+            return None, ""
+        return is_protected(file_path), file_path
+    if tool_name == "Bash":
+        command = tool_input.get("command", "")
+        if not isinstance(command, str) or not command:
+            return None, ""
+        return _bash_first_protected_match(command), command
+    # Defence-in-depth: any other tool shape gets the universal path scanner.
+    matched = _fallthrough_first_protected_match(tool_input)
+    if matched is None:
+        return None, ""
+    return matched, _excerpt_for_fallthrough(tool_input)
+
+
+def decide(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any] | None:
+    """Return an ``ask`` envelope when a protected path is being touched.
+
+    Pure decision logic — no logging, no allowlist consultation. Both
+    ``hook()`` (production entry, orchestrates logging + allowlist) and the
+    registry adapter (``guard test``, no side effects) call this. Splitting
+    the match logic out of ``hook()`` is what stops the two from drifting.
+    """
+    matched, _ = _match_for_tool(tool_name, tool_input)
+    if matched is None:
+        return None
+    return emit_pretooluse_decision("ask", f"Protected file: {matched} — confirm edit")
+
+
 def hook(payload: dict[str, Any]) -> None:
     """Top-level hook entry point."""
     tool_name = payload.get("tool_name", "")
@@ -772,32 +821,7 @@ def hook(payload: dict[str, Any]) -> None:
     if not isinstance(tool_input, dict):
         return
 
-    matched: str | None = None
-    excerpt = ""
-
-    if tool_name in _FILE_PATH_TOOLS:
-        # NotebookEdit uses ``notebook_path``; the others use ``file_path``.
-        file_path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
-        if not isinstance(file_path, str) or not file_path:
-            return
-        matched = is_protected(file_path)
-        excerpt = file_path
-    elif tool_name == "Bash":
-        command = tool_input.get("command", "")
-        if not isinstance(command, str) or not command:
-            return
-        matched = _bash_first_protected_match(command)
-        excerpt = command
-    else:
-        # Defense-in-depth: any other tool shape gets the universal path
-        # scanner. Catches shapes we haven't enumerated explicitly (e.g.
-        # Glob/Grep with a write semantic, future tools) without us having
-        # to keep the matcher list in lockstep with the tool taxonomy.
-        matched = _fallthrough_first_protected_match(tool_input)
-        if matched is None:
-            return
-        excerpt = _excerpt_for_fallthrough(tool_input)
-
+    matched, excerpt = _match_for_tool(tool_name, tool_input)
     if matched is None:
         return
 
