@@ -20,9 +20,16 @@ REPO = Path(__file__).resolve().parents[2]
 
 
 def test_plugin_json_parses_and_pins_version() -> None:
+    # Cross-check against pyproject so a version bump only needs to touch the
+    # version manifests, not this test. The shape assertion ("looks like
+    # semver") is what we actually care about here; the cross-file consistency
+    # check lives in tests/test_version_consistency.py.
+    import tomllib
+
+    pyproject = tomllib.loads((REPO / "pyproject.toml").read_text())
     data = json.loads((REPO / ".claude-plugin" / "plugin.json").read_text())
     assert data["name"] == "guard"
-    assert data["version"] == "1.0.0", "version must be pinned"
+    assert data["version"] == pyproject["project"]["version"], "version must match pyproject.toml"
     assert data["license"] == "Apache-2.0"
     # plugin.json must NOT reference ./hooks/hooks.json. Claude Code's plugin
     # loader auto-loads that path; an explicit reference triggers a

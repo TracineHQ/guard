@@ -3,7 +3,11 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      # Require at least vMAJOR.MINOR.PATCH; trailing `*` still permits PEP 440
+      # prerelease suffixes (rc1, a2, b3, .dev1) via the `detect-prerelease`
+      # job below. Rejects malformed tags like `v1`, `vlatest`, `vfoo` at the
+      # trigger level before any runner is provisioned.
+      - 'v[0-9]*.[0-9]*.[0-9]*'
 
 concurrency:
   group: release-${{ github.ref }}
