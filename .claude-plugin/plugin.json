@@ -6,6 +6,5 @@
   "homepage": "https://github.com/TracineHQ/guard",
   "repository": "https://github.com/TracineHQ/guard",
   "license": "Apache-2.0",
-  "keywords": ["safety", "hooks", "guardrails", "bash", "git", "credentials", "claude-code-plugin"],
-  "hooks": "./hooks/hooks.json"
+  "keywords": ["safety", "hooks", "guardrails", "bash", "git", "credentials", "claude-code-plugin"]
 }
