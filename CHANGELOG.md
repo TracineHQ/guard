@@ -53,11 +53,35 @@ adheres to [Semantic Versioning](https://semver.org/).
   ~250k backtracks on a 4 KB command); real commit-message argv
   stays well under 8 KiB.
 
+### Polish — deny-message copy
+
+- Deny strings rewritten across `bash.gh_api_destructive`,
+  `bash.gpg_secret_delete`, `bash.process_attach`, `bash.kernel_module_load`,
+  `bash.network_policy_wipe`, `bash.sensitive_write`, `bash.persistence`,
+  `bash.sudo_escalation`, `bash.disk_destruction`, `bash.aws_destructive`,
+  and `bash.iac_destruction`. The "refuse." absolutism and matcher-internal
+  commentary ("refused regardless of flag ordering...") have been replaced
+  with a concrete next-step path (run in a controlled terminal, edit via
+  the Edit tool, review the plan output, etc.). The `_format_deny_reason`
+  footer still appends the override path, so the body is now consistently
+  threat-shape + alternative.
+
+### Test coverage
+
+- Direct regression tests added for previously-untested defensive paths:
+  `open_safe`'s `O_NOFOLLOW` symlink refusal (security-sensitive TOCTOU
+  guard); `_read_message_file`'s `ValueError`/`OSError` fallback;
+  `credential_check._expand`'s `OSError` fallback;
+  `_extract_all_messages`'s 8 KiB scan-window cap;
+  `git_c_validator._decide_stash`'s unknown-action fallthrough;
+  `agent_output_guard.hook`'s non-dict `tool_input` passthrough;
+  `allowlist._validate_allow_commands`'s non-list warning branch.
+
 ### Packaging
 
-- `pyproject.toml`: pin `mypy>=1.11.0,<2.0`. The previous floor
-  (`>=1.20.2`) referenced a version that does not exist (mypy went
-  1.9.0 → 2.0.0), silently resolving to the 2.0 major bump.
+- CI + release smoke matrices now include Python 3.12 alongside 3.11
+  and 3.13, matching the `Programming Language :: Python :: 3.12`
+  classifier in `pyproject.toml`.
 
 ### Docs
 

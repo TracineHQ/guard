@@ -232,3 +232,23 @@ class TestHookFunction:
             }
         )
         assert capsys.readouterr().out == ""
+
+
+class TestExpandFallback:
+    """_expand's OSError fallback returns the expanduser-only form."""
+
+    def test_expand_falls_back_when_resolve_raises(self, monkeypatch):
+        from guard.hooks.credential_check import _expand
+
+        msg = "simulated"
+
+        def _boom(self):
+            raise OSError(msg)
+
+        monkeypatch.setattr(Path, "resolve", _boom)
+        # No tilde to expand → fallback returns the input verbatim.
+        assert _expand("/some/path") == "/some/path"
+        # Tilde expands via expanduser before resolve attempts.
+        expanded = _expand("~/x")
+        assert expanded.endswith("/x")
+        assert "~" not in expanded

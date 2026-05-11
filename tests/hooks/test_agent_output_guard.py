@@ -351,6 +351,12 @@ class TestHookFunction:
         envelope = json.loads(out)
         assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
 
+    @pytest.mark.parametrize("malformed", [["not", "a", "dict"], "string", 42, None])
+    def test_non_dict_tool_input_passthrough(self, capsys, malformed):
+        """Malformed ``tool_input`` shapes silently passthrough rather than crash."""
+        hook({"tool_name": "Read", "tool_input": malformed})
+        assert capsys.readouterr().out == ""
+
 
 class TestSubprocess:
     def _run_hook(self, stdin_data):
