@@ -288,10 +288,14 @@ def test_plugin_manifest_shape(staged: Path) -> None:
     manifest = json.loads((staged / ".claude-plugin" / "plugin.json").read_text())
     assert manifest["name"] == "guard"
     assert manifest["version"] == PLUGIN_VERSION
-    assert manifest["hooks"] == "./hooks/hooks.json"
-    # hooks pointer must resolve under the staged root
-    hooks_target = staged / manifest["hooks"].lstrip("./")
-    assert hooks_target.is_file()
+    # plugin.json must NOT reference ./hooks/hooks.json -- Claude Code
+    # auto-loads that path and an explicit reference triggers a duplicate
+    # hooks-file error at install time (Status: failed to load).
+    assert "hooks" not in manifest, (
+        "plugin.json should not redeclare the auto-loaded hooks/hooks.json"
+    )
+    # hooks.json must still exist at the conventional path
+    assert (staged / "hooks" / "hooks.json").is_file()
 
 
 def test_marketplace_manifest_shape(staged: Path) -> None:

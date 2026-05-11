@@ -24,7 +24,15 @@ def test_plugin_json_parses_and_pins_version() -> None:
     assert data["name"] == "guard"
     assert data["version"] == "1.0.0", "version must be pinned"
     assert data["license"] == "Apache-2.0"
-    assert data["hooks"] == "./hooks/hooks.json"
+    # plugin.json must NOT reference ./hooks/hooks.json. Claude Code's plugin
+    # loader auto-loads that path; an explicit reference triggers a
+    # duplicate-load error and the plugin reports Status: failed to load.
+    # The standard location is the contract -- only add a "hooks" field here
+    # if you ship ADDITIONAL hook files outside hooks/hooks.json.
+    assert "hooks" not in data, (
+        'plugin.json must not redeclare hooks="./hooks/hooks.json"; '
+        "the standard path is auto-loaded by Claude Code."
+    )
 
 
 def test_marketplace_json_parses_and_has_one_plugin() -> None:
