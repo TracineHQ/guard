@@ -239,15 +239,11 @@ def _extract_all_messages(command: str) -> list[str]:
     # the validator never sees them.
     messages: list[str] = [
         m.group(2)
-        for m in re.finditer(
-            r"""--message[= ]\s*(['"])((?:\\.|[^\\])*?)\1""", command, re.DOTALL
-        )
+        for m in re.finditer(r"""--message[= ]\s*(['"])((?:\\.|[^\\])*?)\1""", command, re.DOTALL)
     ]
     messages.extend(
         m.group(2)
-        for m in re.finditer(
-            r"""(?<!-)-[a-z]*m\s+(['"])((?:\\.|[^\\])*?)\1""", command, re.DOTALL
-        )
+        for m in re.finditer(r"""(?<!-)-[a-z]*m\s+(['"])((?:\\.|[^\\])*?)\1""", command, re.DOTALL)
     )
     return messages
 

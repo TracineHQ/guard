@@ -130,7 +130,7 @@ class TestMessageExtraction:
         msg = extract_commit_message(cmd)
         assert msg is not None
         assert "Co-Authored-By" in msg, (
-            "escaped-quote bypass: trailer after \\\" was dropped by extractor"
+            'escaped-quote bypass: trailer after \\" was dropped by extractor'
         )
 
     def test_escaped_single_quotes_in_body_dont_terminate_capture(self):
