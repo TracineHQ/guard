@@ -183,78 +183,193 @@ def _read_message_file(path: str, cwd: str | None) -> str | None:
     return raw.decode("utf-8", errors="replace")
 
 
-def _extract_file_flag_path(command: str) -> str | None:
-    """Return the path argument to ``-F`` / ``--file=`` / ``-F=`` / ``-F-``.
+# Sentinel returned when ``shlex.split`` cannot parse the command (unbalanced
+# quotes, etc.). Callers deny rather than silently allow — unparsable commands
+# are a real bypass shape, e.g. ``git commit -m "Co-Authored-By: …`` with no
+# closing quote falls through any regex-based extractor as "no match" and the
+# AI-attribution check never runs.
+UNPARSABLE_COMMAND_SENTINEL = "\x00guard:unparsable-command\x00"
 
-    Tokenizes via ``shlex`` so quoted paths and embedded spaces are handled.
-    Falls back to ``None`` if the command can't be parsed (unbalanced quotes
-    etc.) — the caller treats that as "no file flag," and the eventual
-    ``git commit`` will fail on its own terms.
+
+def _safe_tokenize(command: str) -> list[str] | None:
+    """Split ``command`` with ``shlex`` (POSIX rules). Returns tokens or ``None``.
+
+    Caller distinguishes "couldn't tokenize" (return ``None`` → deny upstream)
+    from "tokenized fine but no relevant flags" (return ``[]`` or a list with
+    no message/file flags → allow). ``shlex`` raises ``ValueError`` for
+    unbalanced quotes; we catch it as a parse failure.
     """
     try:
-        tokens = shlex.split(command, posix=True)
+        return shlex.split(command, posix=True)
     except ValueError:
         return None
-    i = 0
-    while i < len(tokens):
-        tok = tokens[i]
-        if tok in ("-F", "--file"):
-            if i + 1 < len(tokens):
-                return tokens[i + 1]
-            return None
-        if tok == "-F-":
-            return "-"
-        if tok.startswith("--file="):
-            return tok[len("--file=") :]
-        if tok.startswith("-F="):
-            return tok[len("-F=") :]
-        i += 1
+
+
+def _find_git_commit_index(tokens: list[str]) -> int | None:
+    """Return the index of the ``commit`` token in ``git commit ...``.
+
+    Handles chained shells (``cd /tmp && git commit -m fix`` →
+    ``['cd','/tmp','&&','git','commit','-m','fix']``) by walking the full
+    token list and locating the first ``git`` immediately followed by
+    ``commit``. Returns the index of ``commit`` (one past ``git``) so
+    callers can slice ``tokens[idx:]`` to scope subsequent flag walks.
+    """
+    for i in range(len(tokens) - 1):
+        if tokens[i] == "git" and tokens[i + 1] == "commit":
+            return i + 1
     return None
 
 
-_MESSAGE_SCAN_MAX_BYTES = 8 * 1024
+# Minimum length of a short flag that could carry ``-m`` semantics: ``-m``
+# itself is two chars; a no-space body ``-mVALUE`` is strictly longer.
+_SHORT_FLAG_MIN_LEN = 2
+
+
+def _read_message_flag_value(tokens: list[str], i: int) -> tuple[str | None, int]:
+    """Read a ``-m`` / ``--message`` value at ``tokens[i]``. Returns (value, next_i).
+
+    Handles all five message-flag shapes:
+
+    - ``-m`` followed by next token (``['-m', 'msg']``)
+    - ``-mVALUE`` no-space (``['-mmsg']``) — shlex fuses the body to the flag
+    - ``-am`` / ``-cam`` etc. (combined short flags ending in ``m``) plus value token
+    - ``--message`` followed by next token
+    - ``--message=VALUE`` equals form
+
+    Returns ``(None, i + 1)`` if ``tokens[i]`` isn't a message flag, so the
+    caller advances past it without recording a message.
+    """
+    tok = tokens[i]
+    if tok.startswith("--message="):
+        return tok[len("--message=") :], i + 1
+    if tok == "--message":
+        return (tokens[i + 1] if i + 1 < len(tokens) else None), i + 2
+    # Combined short flag with ``m`` at the end (e.g. ``-am``, ``-cam``):
+    # value lives in the next token. We check this BEFORE the no-space form
+    # because ``-am`` could otherwise be misread as ``-a m`` (i.e. body "m").
+    if (
+        tok.startswith("-")
+        and not tok.startswith("--")
+        and tok.endswith("m")
+        and len(tok) >= _SHORT_FLAG_MIN_LEN
+    ):
+        return (tokens[i + 1] if i + 1 < len(tokens) else None), i + 2
+    # No-space short flag ``-mVALUE``: ``-m`` immediately followed by body.
+    if tok.startswith("-m") and not tok.startswith("--") and len(tok) > _SHORT_FLAG_MIN_LEN:
+        return tok[_SHORT_FLAG_MIN_LEN:], i + 1
+    return None, i + 1
+
+
+def _read_file_flag_value(tokens: list[str], i: int) -> tuple[str | None, int]:
+    """Read a ``-F`` / ``--file`` value at ``tokens[i]``. Returns (path, next_i).
+
+    Handles ``-F PATH``, ``-F-``, ``--file PATH``, ``--file=PATH``, ``-F=PATH``.
+    Returns ``(None, i + 1)`` if ``tokens[i]`` isn't a file flag.
+    """
+    tok = tokens[i]
+    if tok in ("-F", "--file"):
+        return (tokens[i + 1] if i + 1 < len(tokens) else None), i + 2
+    if tok == "-F-":
+        return "-", i + 1
+    if tok.startswith("--file="):
+        return tok[len("--file=") :], i + 1
+    if tok.startswith("-F="):
+        return tok[len("-F=") :], i + 1
+    return None, i + 1
+
+
+# Heredoc shape inside a single shlex token: ``$(cat <<'EOF'\n...body...\nEOF\n)``.
+# After ``shlex.split`` the entire substitution is preserved verbatim as one
+# token (shlex does not run command substitutions), so the body sits inside the
+# token text and the AI-marker checks can scan it as-is — no need to peel it
+# out separately. The opaque-token check uses this to exclude heredoc shapes
+# from the opaque-deny path.
+_HEREDOC_TOKEN_RE = re.compile(
+    r"""^\$\(cat\s+<<'?EOF'?\s*\n.*\nEOF\s*\)$""",
+    re.DOTALL,
+)
+
+
+def _is_heredoc_token(token: str) -> bool:
+    """Return True if ``token`` is a ``$(cat <<EOF ... EOF)`` heredoc shape."""
+    return bool(_HEREDOC_TOKEN_RE.match(token))
+
+
+# Tokens whose post-shlex form is still shell-opaque: ``$VAR`` / ``${VAR}`` /
+# ``$(...)`` command substitution that isn't our recognized heredoc. When a
+# message token matches this, the shell will expand it at git-run-time to
+# content we cannot see now — deny rather than allow with a false-clean
+# signal. Literal text (e.g. ``MSG`` with no leading ``$``) is not matched.
+_OPAQUE_TOKEN_RE = re.compile(r"""^\$(?:[\{(A-Za-z_]|$)""")
+
+
+def _is_opaque_token(token: str) -> bool:
+    """Return True if ``token`` is a shell-opaque message value (and not heredoc)."""
+    if _is_heredoc_token(token):
+        return False
+    return bool(_OPAQUE_TOKEN_RE.match(token))
+
+
+def _extract_file_flag_path(command: str) -> str | None:
+    """Return the path argument to ``-F`` / ``--file=`` / ``-F=`` / ``-F-``.
+
+    Goes through the shared tokenization pipeline so escaped paths, embedded
+    spaces, and chained-command shapes are handled identically to message
+    extraction. Returns ``None`` if the command can't be tokenized; the
+    unparsable case is handled separately in ``decide`` (deny with a
+    dedicated reason).
+    """
+    tokens = _safe_tokenize(command)
+    if tokens is None:
+        return None
+    commit_idx = _find_git_commit_index(tokens)
+    if commit_idx is None:
+        return None
+    i = commit_idx + 1
+    while i < len(tokens):
+        path, i = _read_file_flag_value(tokens, i)
+        if path is not None:
+            return path
+    return None
 
 
 def _extract_all_messages(command: str) -> list[str]:
     """Return every ``-m`` / ``--message`` payload in ``command``.
 
-    Multi-``-m`` is the bypass shape: ``git commit -m "fix" -m "Co-Authored-By: ..."``
-    where a naive ``re.search`` returns only the first hit and the second
-    message escapes the AI-attribution detector. We run ``re.findall`` over
-    both the long and short flag forms and return them in order.
-
-    The ``re.DOTALL`` + backreference patterns can backtrack quadratically
-    on adversarial input (e.g. 500 unclosed quotes inside a long command
-    string). Cap the scan window at ``_MESSAGE_SCAN_MAX_BYTES`` — real
-    commit-message argv stays well under 8 KiB; anything larger is either
-    a heredoc (handled separately upstream) or a probe.
+    Token-based: ``shlex.split`` resolves shell quoting once, then we walk the
+    token list collecting message values. Multi-``-m`` (``git commit -m "fix"
+    -m "Co-Authored-By: …"``), escaped quotes inside the message body, no-space
+    ``-m"msg"``, combined ``-am "msg"``, and ``--message=`` / ``--message ``
+    are all handled by the shell parser instead of regex backtracking. Returns
+    an empty list if the command can't be tokenized (``decide`` handles the
+    unparsable case separately as a deny).
     """
-    if len(command) > _MESSAGE_SCAN_MAX_BYTES:
-        command = command[:_MESSAGE_SCAN_MAX_BYTES]
-    # Body pattern (?:\\.|[^\\])*? matches either an escaped pair (\\. = backslash
-    # plus any char) or a non-backslash character. A bare (.*?)\1 terminates at
-    # the FIRST occurrence of the captured quote char, including escaped \" inside
-    # the message body -- a real-world bypass shape where AI-attribution trailers
-    # land after a \"...\" segment (e.g. quoted JSON keys in the commit body) and
-    # the validator never sees them.
-    messages: list[str] = [
-        m.group(2)
-        for m in re.finditer(r"""--message[= ]\s*(['"])((?:\\.|[^\\])*?)\1""", command, re.DOTALL)
-    ]
-    messages.extend(
-        m.group(2)
-        for m in re.finditer(r"""(?<!-)-[a-z]*m\s+(['"])((?:\\.|[^\\])*?)\1""", command, re.DOTALL)
-    )
+    tokens = _safe_tokenize(command)
+    if tokens is None:
+        return []
+    commit_idx = _find_git_commit_index(tokens)
+    if commit_idx is None:
+        return []
+    messages: list[str] = []
+    i = commit_idx + 1
+    while i < len(tokens):
+        msg, i = _read_message_flag_value(tokens, i)
+        if msg is not None:
+            messages.append(msg)
     return messages
 
 
 def extract_commit_message(command: str, cwd: str | None = None) -> str | None:
     """Extract the commit message from a ``git commit`` command string.
 
-    Handles ``-m "msg"``, ``-m 'msg'``, ``-am "msg"``, ``--message="msg"``,
-    ``--message "msg"``, multiple repeated ``-m`` / ``--message`` flags,
-    heredoc ``$(cat <<'EOF' ... EOF)``, and
-    ``-F <path>`` / ``--file=<path>`` / ``-F-`` (file-backed messages).
+    Uses ``shlex.split`` to tokenize the command once, then walks the post-
+    ``git commit`` token slice collecting message values. Handles every shape
+    real shells produce: ``-m "msg"``, ``-m 'msg'``, ``-m"msg"`` no-space,
+    ``-am "msg"`` combined flags, multiple repeated ``-m`` / ``--message``,
+    ``--message="msg"`` / ``--message "msg"``, heredoc-shaped command
+    substitution ``$(cat <<'EOF' ... EOF)``, and chained commands like
+    ``cd /tmp && git commit -m "fix"``. Also handles ``-F <path>`` /
+    ``--file=<path>`` / ``-F-`` for file-backed messages.
 
     Multiple ``-m`` payloads are concatenated with blank-line separators —
     the format git itself produces — so AI-attribution detectors run against
@@ -263,31 +378,52 @@ def extract_commit_message(command: str, cwd: str | None = None) -> str | None:
     For file-backed messages, the file is read from ``cwd`` (or absolute /
     home-relative paths) and capped at ``_FILE_MESSAGE_MAX_BYTES``. If the
     target is a stream / FIFO / character device, returns the
-    ``STREAM_FILE_SENTINEL`` so the caller can deny.
+    ``STREAM_FILE_SENTINEL`` so the caller can deny. If it resolves outside
+    cwd or under a sensitive system path, returns ``OUT_OF_SCOPE_SENTINEL``.
 
-    Returns the message text or ``None`` if the command isn't a recognized
-    message-bearing ``git commit`` form (or the file can't be read).
+    Returns:
+        - ``str`` — the extracted commit message text
+        - ``UNPARSABLE_COMMAND_SENTINEL`` — ``shlex`` couldn't tokenize
+          (unbalanced quotes etc.); caller should deny rather than allow
+        - ``STREAM_FILE_SENTINEL`` / ``OUT_OF_SCOPE_SENTINEL`` — file-backed
+          message resolves to a non-pre-readable or out-of-scope path
+        - ``None`` — command is not a recognized message-bearing ``git
+          commit`` form, or the message file can't be read (typo / permission)
     """
     if not command or "git commit" not in command:
         return None
 
-    # Heredoc pattern: -m "$(cat <<'EOF'\n...\nEOF\n)"
-    heredoc_match = re.search(
-        r"""-m\s+["']\$\(cat\s+<<'?EOF'?\s*\n(.*?)\nEOF\s*\)["']""",
-        command,
-        re.DOTALL,
-    )
-    if heredoc_match:
-        return heredoc_match.group(1)
+    tokens = _safe_tokenize(command)
+    if tokens is None:
+        return UNPARSABLE_COMMAND_SENTINEL
+    commit_idx = _find_git_commit_index(tokens)
+    if commit_idx is None:
+        return None
 
-    messages = _extract_all_messages(command)
+    # Walk message and file flags in a single pass over the post-commit
+    # token slice. Messages are concatenated with blank-line separators —
+    # the format ``git commit -m a -m b`` itself produces — so downstream
+    # AI-attribution detectors run against the joined text.
+    messages: list[str] = []
+    file_path: str | None = None
+    i = commit_idx + 1
+    while i < len(tokens):
+        msg, next_i = _read_message_flag_value(tokens, i)
+        if msg is not None:
+            messages.append(msg)
+            i = next_i
+            continue
+        path, next_i = _read_file_flag_value(tokens, i)
+        if path is not None:
+            file_path = path
+            i = next_i
+            continue
+        i = next_i
+
     if messages:
         return "\n\n".join(messages)
-
-    file_path = _extract_file_flag_path(command)
     if file_path is not None:
         return _read_message_file(file_path, cwd)
-
     return None
 
 
@@ -295,6 +431,14 @@ _BLOCK_REASON_PREFIX = (
     "Commit blocked — AI attribution detected.\n"
     "Commit as yourself. No co-author signatures, no AI tool emails, "
     "no 'Generated by' footers.\n"
+)
+
+
+_UNPARSABLE_DENY_REASON = (
+    "Commit command cannot be parsed (unbalanced quotes or other malformed "
+    "shell syntax). The validator cannot determine the message body, so the "
+    "AI-attribution checks cannot run reliably. Fix the quoting, or commit "
+    "via `git commit -F <path>` pointing at a regular file."
 )
 
 
@@ -322,33 +466,48 @@ _OPAQUE_SOURCE_DENY_REASON = (
     "``-m '...'`` or via ``git commit -F <path>`` pointing at a regular file."
 )
 
-# ``-m $'...'``, ``--message=$'...'`` ANSI-C quoting; ``$VAR`` / ``${VAR}``
-# variable expansion in the message slot; ``$(...)`` command substitution
-# in the message slot; ``-F <(...)`` process substitution. Command sub
-# (``-m "$(printf %s ...)"``, ``-m "$(cat /tmp/msg)"``) is opaque to the
-# hook just like ``<(...)`` — the shell evaluates it after we run.
-_OPAQUE_MESSAGE_RE = re.compile(
-    r"""(?:-m|--message[= ])\s*(?:\$'|"\s*\$[A-Za-z_{(]|'\s*\$[A-Za-z_{(])"""
-    r"""|(?:-m|--message[= ])\s*\$[\{(]?[A-Za-z_]"""
-    r"""|(?:-m|--message[= ])\s*["']?\$\("""
-    r"""|(?:-F|--file)[= ]\s*<\("""
-)
+# Process-substitution shape ``-F <(...)``. This survives ``shlex.split`` as
+# separate tokens (``['-F', '<(some', 'cmd)']`` or similar depending on shell)
+# and gives an unreliable extraction path. Keep a raw-command regex specific
+# to this shape — it's the only opaque source that token-level inspection
+# can't catch as cleanly (since the ``<(...)`` syntax is bash-specific and
+# shlex doesn't model it).
+_PROCESS_SUB_FILE_RE = re.compile(r"""(?:-F|--file)[= ]\s*<\(""")
 
 
-# Recognised heredoc shape ``-m "$(cat <<'EOF' ... EOF)"`` — the hook CAN
-# inspect this because the body is captured between the EOF markers, so it
-# must not be flagged as opaque even though it starts with ``-m "$(``.
-_HEREDOC_MESSAGE_RE = re.compile(
-    r"""-m\s+["']\$\(cat\s+<<'?EOF'?\s*\n(.*?)\nEOF\s*\)["']""",
-    re.DOTALL,
-)
+def _has_opaque_message_source(command: str, tokens: list[str] | None = None) -> bool:
+    """Return True for commit shapes whose message body the hook can't read.
 
+    Token-based inspection of message values: a ``-m`` / ``--message`` value
+    that's a bare ``$VAR``, ``${VAR}``, ``$(...)`` command substitution, or
+    ANSI-C ``$'...'`` quoting is opaque — the shell will expand it after the
+    hook runs and we cannot see the final body. The recognized heredoc shape
+    ``$(cat <<'EOF' … EOF)`` is NOT opaque because shlex preserves the body
+    verbatim inside the single token.
 
-def _has_opaque_message_source(command: str) -> bool:
-    """Return True for commit shapes whose message body the hook can't read."""
-    if _HEREDOC_MESSAGE_RE.search(command):
+    ``-F <(...)`` process substitution stays a raw-command check because
+    shlex tokenizes ``<(`` as separate tokens and the shape is bash-specific.
+
+    Pass ``tokens`` to reuse an existing tokenization; otherwise we tokenize
+    ourselves. Returns False (not opaque) if the command can't be tokenized;
+    the unparsable case is handled separately upstream in ``decide``.
+    """
+    if _PROCESS_SUB_FILE_RE.search(command):
+        return True
+    if tokens is None:
+        tokens = _safe_tokenize(command)
+        if tokens is None:
+            return False
+    commit_idx = _find_git_commit_index(tokens)
+    if commit_idx is None:
         return False
-    return bool(_OPAQUE_MESSAGE_RE.search(command))
+    i = commit_idx + 1
+    while i < len(tokens):
+        msg, next_i = _read_message_flag_value(tokens, i)
+        if msg is not None and _is_opaque_token(msg):
+            return True
+        i = next_i
+    return False
 
 
 _AI_EMAIL_CONFIG_ASK_REASON = (
@@ -389,7 +548,15 @@ def _ai_email_in_git_config(cwd: str | None) -> str | None:
 
 def decide(command: str, cwd: str | None = None) -> dict[str, Any] | None:
     """Return a deny envelope if AI attribution is found, else ``None``."""
-    if _has_opaque_message_source(command):
+    # Tokenize once and reuse across opaque / message / file flag checks. A
+    # ``None`` here means ``shlex`` couldn't parse the command (unbalanced
+    # quotes, etc.) — that's a real bypass shape (the regex extractor used to
+    # return None and silently allow), so deny with a dedicated reason.
+    tokens = _safe_tokenize(command)
+    if tokens is None:
+        return emit_pretooluse_decision("deny", _UNPARSABLE_DENY_REASON)
+
+    if _has_opaque_message_source(command, tokens=tokens):
         return emit_pretooluse_decision("deny", _OPAQUE_SOURCE_DENY_REASON)
 
     ai_email = _ai_email_in_git_config(cwd)
@@ -403,6 +570,11 @@ def decide(command: str, cwd: str | None = None) -> dict[str, Any] | None:
     if message is None:
         return None
 
+    # UNPARSABLE_COMMAND_SENTINEL is unreachable here in practice because the
+    # tokenize-once check above already denied, but keep the branch as defense
+    # in depth in case a future path adds an alternative tokenization route.
+    if message is UNPARSABLE_COMMAND_SENTINEL or message == UNPARSABLE_COMMAND_SENTINEL:
+        return emit_pretooluse_decision("deny", _UNPARSABLE_DENY_REASON)
     if message is STREAM_FILE_SENTINEL or message == STREAM_FILE_SENTINEL:
         return emit_pretooluse_decision("deny", _STREAM_DENY_REASON)
     if message is OUT_OF_SCOPE_SENTINEL or message == OUT_OF_SCOPE_SENTINEL:
