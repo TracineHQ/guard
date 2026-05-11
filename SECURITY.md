@@ -82,9 +82,11 @@ known and explicitly deferred:
 - **Glob obfuscation.** `cat ~/.a*/cre*` resolves to a credential file at
   shell-expansion time, but the literal token does not match the pattern
   set. Guard does not perform glob expansion before matching.
-- **Path encoding.** ANSI-C quoting (`$'\x72m'`), base64-encoded paths, and
-  command substitution (`$(printf ...)`) that reconstruct a sensitive path
-  are not decoded by `shlex` and slip through.
+- **Path encoding.** Base64-encoded paths and command substitution
+  (`$(printf ...)`) that reconstruct a sensitive path are not decoded by
+  `shlex` and slip through. (ANSI-C quoting — `$'\x72m'`, octal
+  `$'\147' = g` — is now decoded before head-token matching, so that
+  vector is closed; only the base64 / command-sub forms remain.)
 - **Hardlinks.** `realpath` follows directory entries, not inodes. After
   `ln ~/.aws/credentials /tmp/innocent`, a read of `/tmp/innocent` is not
   flagged.

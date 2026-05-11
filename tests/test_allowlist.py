@@ -241,6 +241,20 @@ def test_disable_rules_wrong_type_warns(
     assert "must be a list" in capsys.readouterr().err
 
 
+def test_allow_commands_wrong_type_warns(
+    isolated_homes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Parallel coverage to disable_rules: a non-list ``allow_commands``
+    must warn and skip rather than crash."""
+    from guard.allowlist import load_allowlist
+
+    _, cwd = isolated_homes
+    _write(cwd / ".claude" / "guard" / "allowlist.json", {"allow_commands": "not a list"})
+    al = load_allowlist(cwd=cwd)
+    assert al.allow_commands == ()
+    assert "'allow_commands' must be a list of objects" in capsys.readouterr().err
+
+
 def test_allow_commands_missing_field_skips_entry(
     isolated_homes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
 ) -> None:

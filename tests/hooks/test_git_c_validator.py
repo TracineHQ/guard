@@ -285,3 +285,34 @@ class TestDangerousPathsConfigKeys:
         # of the validator (which may allow/deny on its own).
         decision, _ = _run("git -c color.ui=../foo status")
         assert decision != "deny"
+
+
+class TestStashUnknownAction:
+    """``git -C <path> stash <unknown>`` exercises the ``_decide_stash``
+    fallthrough path.
+
+    DENIED_STASH_ACTIONS denies ``pop|drop|clear``; ``list|show`` are
+    allowed read-only. Anything else (``apply``, ``push``, ``save``,
+    ``branch``) returns None from ``_decide_stash`` and the outer
+    classifier resolves via the generic subcommand allowlist
+    (``stash`` is in ``ALLOWED_SUBCOMMANDS``) → ``allow``. The point of
+    this test is the fallthrough wiring, not the resulting decision —
+    a regression that made ``_decide_stash`` raise or always-deny would
+    show up here.
+    """
+
+    @pytest.mark.parametrize("action", ["apply", "push", "save", "branch"])
+    def test_unknown_stash_action_resolves(self, action):
+        decision, _ = _run(f"git -C /tmp/repo stash {action}")
+        assert decision in {"allow", "ask"}, f"stash {action} fallthrough broken: got {decision}"
+
+    def test_destructive_stash_actions_denied(self):
+        for action in ("pop", "drop", "clear"):
+            decision, code = _run(f"git -C /tmp/repo stash {action}")
+            assert decision == "deny", f"stash {action} should deny"
+            assert code == 2
+
+    def test_readonly_stash_actions_allowed(self):
+        for action in ("list", "show"):
+            decision, _ = _run(f"git -C /tmp/repo stash {action}")
+            assert decision == "allow", f"stash {action} should allow"

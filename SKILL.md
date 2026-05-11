@@ -33,7 +33,7 @@ authoritative references. Quick map:
   `GUARD_PROTECTED_EXTRA` and `.claude/guard-protected.txt`).
 - `agent_output_guard` — sensitive content in tool output before it reaches
   the model.
-- `subagent_scope` — Task tool dispatch with out-of-scope working directories.
+- `subagent_scope` — file edits outside the declared `.claude/subagent-scope.json` allowlist.
 
 ## Environment variables
 
@@ -62,7 +62,7 @@ authoritative references. Quick map:
    ```
    One pattern per line; `#` starts a comment to end of line; blank lines OK.
 
-When **both** are set, the file wins (more deliberate artifact). Pattern syntax matches the built-in list — segment match for directory names (last segment with no `.`), suffix match for files. No new grammar.
+If the file exists, it is the source of truth — the env var is ignored. If the file is absent, the env var is read. Pattern syntax matches the built-in list — segment match for directory names (last segment with no `.`), suffix match for files. No new grammar.
 
 The patterns resolve at hook-call time, so live edits take effect on the next tool call without restarting Claude Code.
 
@@ -100,13 +100,13 @@ Both files use the same JSON schema; the project file wins on per-rule conflicts
 ```
 guard allowlist list                                 # show effective merged config
 guard allowlist rules                                # all known rule ids
-guard allowlist disable-rule <rule-id> --reason "..."
+guard allowlist disable-rule <rule-id>
 guard allowlist enable-rule <rule-id>
-guard allowlist allow-command <rule-id> <command> --reason "..."
-guard allowlist remove-command <rule-id> <command>
+guard allowlist allow-command --rule <rule-id> --command "<cmd>" --reason "..."
+guard allowlist remove-command --rule <rule-id> --command "<cmd>"
 ```
 
-All mutation commands take `--scope project|global` (default: `project`).
+Mutation commands write to the project allowlist by default. Pass `--global` to write the per-user file at `~/.claude/guard/allowlist.json` instead (or `--project` to be explicit; the two flags are mutually exclusive).
 
 ### Trust-root: un-overridable protections
 

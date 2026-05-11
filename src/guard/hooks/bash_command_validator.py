@@ -1611,6 +1611,7 @@ _SYNTH_CHMOD_SENSITIVE_TARGET_DENY = "<chmod against sensitive path>"
 _SYNTH_SUDO_ESCALATION_DENY = "<sudo interactive escalation>"
 _SYNTH_KERNEL_MOD_DENY = "<kernel module load>"
 _SYNTH_PROCESS_ATTACH_DENY = "<debugger attach to PID>"
+_SYNTH_PROCESS_TREE_KILL_DENY = "<process-tree kill>"
 _SYNTH_DB_DESTRUCTION_DENY = "<db CLI destructive SQL>"
 _SYNTH_DISK_DESTRUCTION_DENY = "<disk/partition destruction>"
 _SYNTH_NETWORK_WIPE_DENY = "<network policy wipe>"
@@ -1689,15 +1690,16 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         "manually with full intent."
     ),
     _SYNTH_GH_API_DELETE_DENY: (
-        "gh api -X DELETE bypasses the gh repo/release deny rules by "
-        "going through the raw GitHub API. Refused regardless of the "
-        "resource path. Use the corresponding gh subcommand if you "
-        "really mean to, so a human sees the prompt."
+        "`gh api -X DELETE` bypasses the gh subcommand deny rules via the "
+        "raw GitHub API; blocked regardless of resource path. Run the "
+        "deletion directly in your terminal outside this session so it's "
+        "intentional and audited."
     ),
     _SYNTH_GPG_SECRET_DELETE_DENY: (
-        "gpg --delete-secret-key / --delete-secret-and-public-keys is "
-        "irreversible and deletes the private key bytes. Refused "
-        "regardless of flag ordering or --batch / --homedir prefixes."
+        "`gpg --delete-secret-key` / `--delete-secret-and-public-keys` "
+        "permanently destroys the private key bytes. Run the deletion "
+        "directly in your terminal (`gpg --delete-secret-key "
+        "<FINGERPRINT>`) so it's intentional and auditable."
     ),
     _SYNTH_AWS_S3_DESTRUCTION_DENY: (
         "Destructive S3 op: aws s3 sync --delete, aws s3 rm --recursive, "
@@ -1711,16 +1713,19 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         "system-bricking foot-gun. Scope the chmod to a project directory."
     ),
     _SYNTH_SENSITIVE_WRITE_DENY: (
-        "Write to a sensitive system / home destination (~/.ssh/authorized_keys, "
-        "~/.bashrc, /etc/sudoers, /etc/profile.d/, /usr/local/bin/, "
-        "~/Library/LaunchAgents/, etc.). These are persistence and "
-        "privilege-escalation surfaces; refuse regardless of producer "
-        "(tee, cp, mv, install, ln, dd, rsync, curl -o, wget -O)."
+        "Write to a sensitive system / home destination "
+        "(`~/.ssh/authorized_keys`, `~/.bashrc`, `/etc/sudoers`, "
+        "`/etc/profile.d/`, `/usr/local/bin/`, `~/Library/LaunchAgents/`, "
+        "etc.). These are persistence and privilege-escalation surfaces. "
+        "Edit the file directly via the Edit tool with explicit intent, or "
+        "run the write from a controlled terminal outside this session."
     ),
     _SYNTH_PERSISTENCE_DENY: (
-        "Persistence command (crontab/at/systemctl enable|start|mask/launchctl "
-        "load|bootstrap|submit/systemd-run/visudo). Each schedules or installs "
-        "code that runs without further agent action; refuse in agent context."
+        "Persistence command (`crontab`, `at`, `systemctl enable|start|mask`, "
+        "`launchctl load|bootstrap|submit`, `systemd-run`, `visudo`, "
+        "`defaults write …loginwindow…Hook`). Each schedules or installs "
+        "code that runs without further agent action. Install the unit "
+        "from a controlled terminal so the artifact is auditable."
     ),
     _SYNTH_CHMOD_SETUID_DENY: (
         "chmod setting setuid (4xxx, u+s, +s) or setgid (2xxx, g+s) bit. "
@@ -1732,16 +1737,28 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         "hardening modes (600, 400, go-rwx) are allowed."
     ),
     _SYNTH_SUDO_ESCALATION_DENY: (
-        "sudo invoking an interactive shell (-i, -s, su, bash, zsh, ...) or "
-        "transferring environment (--preserve-env). Refuse in agent context."
+        "`sudo` invoking an interactive shell (`-i`, `-s`, `su`, `bash`, "
+        "`zsh`, …) or transferring environment (`--preserve-env`) drops you "
+        "into a root shell whose subsequent commands aren't visible to the "
+        "hook. Run privileged operations as individual `sudo <cmd>` "
+        "invocations instead, or use a controlled local terminal."
     ),
     _SYNTH_KERNEL_MOD_DENY: (
-        "Kernel/extension module load (insmod, modprobe, kextload). Loads "
-        "code into the kernel; never an agent op."
+        "Kernel/extension module load (`insmod`, `modprobe`, `kextload`). "
+        "Loads code into kernel space, which agent context can't reason "
+        "about safely. Load modules from a controlled local terminal."
     ),
     _SYNTH_PROCESS_ATTACH_DENY: (
-        "Debugger/tracer attach to a running PID (gdb -p, lldb -p, strace -p, "
-        "dtrace -p). Process hijack/inspection; refuse."
+        "Attaching a debugger or tracer to a running process (`gdb -p`, "
+        "`lldb -p`, `strace -p`, `dtrace -p`) can read memory across "
+        "process boundaries. Run debugging sessions in a controlled local "
+        "dev environment rather than attaching to live processes."
+    ),
+    _SYNTH_PROCESS_TREE_KILL_DENY: (
+        "Process-tree destruction (kill -9 -1, killall5, pkill -u <user>, "
+        "killall -u <user>). Kills every process the user can reach; the "
+        "session itself usually dies, leaving the host in an unrecoverable "
+        "state. Target the specific PID instead."
     ),
     _SYNTH_DB_DESTRUCTION_DENY: (
         "DB CLI invocation with destructive SQL (DROP / TRUNCATE / DELETE FROM "
@@ -1750,24 +1767,30 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         "ad-hoc from the agent."
     ),
     _SYNTH_DISK_DESTRUCTION_DENY: (
-        "Disk / partition / filesystem destruction (mkfs.*, dd of=/dev/, "
-        "shred /dev/, parted /dev/, fdisk /dev/, diskutil eraseDisk, "
-        "wipefs /dev/). System-bricking; refuse."
+        "Disk / partition / filesystem destruction (`mkfs.*`, `dd of=/dev/`, "
+        "`shred /dev/`, `parted /dev/`, `fdisk /dev/`, `diskutil eraseDisk`, "
+        "`wipefs /dev/`). Any single one of these can brick the host. Run "
+        "from a recovery terminal where you can verify the target device."
     ),
     _SYNTH_NETWORK_WIPE_DENY: (
-        "Network policy wipe (iptables -F/-X, nft flush, ufw reset). Risk of "
-        "operator lockout; refuse."
+        "Network policy wipe (`iptables -F/-X`, `nft flush`, `ufw reset`). "
+        "Clearing the host firewall in one command can lock the operator "
+        "out of remote sessions. Make targeted rule changes instead, or "
+        "run the wipe from a controlled local console with recovery access."
     ),
     _SYNTH_CLOUD_DESTRUCTION_DENY: (
-        "Cloud resource destruction (aws iam/ec2/rds/lambda/dynamodb/eks/ecr/"
-        "secretsmanager/cloudtrail delete-*, gcloud projects/sql/compute/"
-        "container/iam delete, az group/aks/vm/sql/keyvault delete). Each is "
-        "irreversible at scale; refuse."
+        "Cloud resource destruction (`aws iam/ec2/rds/lambda/dynamodb/eks/"
+        "ecr/secretsmanager/cloudtrail delete-*`, AWS IAM policy mutations, "
+        "`gcloud projects/sql/compute/container/iam delete`, `az group/aks/"
+        "vm/sql/keyvault delete`). Each is irreversible at scale. Run from "
+        "a terminal where you can confirm the account, region, and target."
     ),
     _SYNTH_IAC_DESTRUCTION_DENY: (
-        "IaC destruction (terraform apply -destroy, pulumi destroy, cdk destroy, "
-        "helm uninstall, vault kv destroy, argocd app delete, rclone purge). "
-        "Bypasses literal-prefix denies for the canonical destroy command."
+        "IaC destruction (`terraform apply -destroy`, `pulumi destroy`, "
+        "`cdk destroy`, `helm uninstall`, `vault kv destroy`, `argocd app "
+        "delete`, `rclone purge`). These commands tear down everything in "
+        "the targeted stack — run them from a terminal where you can review "
+        "the plan / dry-run output before applying."
     ),
     _SYNTH_REMOTE_PACKAGE_DENY: (
         "Remote package install from URL/VCS/file source (npm/yarn/pnpm/bun "
@@ -2512,6 +2535,19 @@ def _is_persistence_command(normalized: str) -> bool:
         return False
     if head == "visudo":
         return True
+    if head == "defaults":
+        # macOS LoginHook / LogoutHook persistence: ``defaults write
+        # com.apple.loginwindow LoginHook /tmp/x.sh`` installs a script that
+        # runs as root on every login. Same shape via LogoutHook. We deny any
+        # write against the loginwindow domain (any *Hook key) or against a
+        # LaunchAgents-style domain pattern.
+        rest = [t for t in tokens[1:] if not t.startswith("-")]
+        if len(rest) >= 2 and rest[0] == "write":
+            domain = rest[1]
+            if "loginwindow" in domain or "loginitems" in domain:
+                return True
+            if len(rest) >= 3 and rest[2].endswith("Hook"):
+                return True
     return False
 
 
@@ -2649,6 +2685,37 @@ def _is_process_attach(normalized: str) -> bool:
     if not tokens or _basename(tokens[0]) not in _DEBUG_ATTACH_HEADS:
         return False
     return any(t == "-p" or t.startswith("-p") for t in tokens[1:])
+
+
+# --- Process-tree destruction ---
+def _is_process_tree_kill(normalized: str) -> bool:
+    """Return True for kill-all-reachable / mass-signal shapes.
+
+    ``kill -9 -1`` sends SIGKILL to PID -1, which means every process the
+    current UID can reach. ``killall5`` does the same on Linux. ``pkill
+    -KILL -u <user>`` and ``pkill -9 -u <user>`` kill every process owned
+    by that user; the same applies to ``killall -KILL <pattern>`` against
+    a broad pattern.
+    """
+    tokens = normalized.split()
+    if not tokens:
+        return False
+    head = _basename(tokens[0])
+    if head == "killall5":
+        return True
+    if head == "kill":
+        # ``kill -9 -1`` / ``kill -SIGKILL -1`` / ``kill -1`` (the bare PID
+        # form). Any -1 operand is the catastrophic shape — there is no
+        # legitimate agent use of "signal every process I can touch".
+        return any(t == "-1" for t in tokens[1:])
+    if head in {"pkill", "killall"}:
+        # ``pkill -u <user>`` and ``killall -u <user>`` (Linux) hit every
+        # process owned by that user. The default signal is SIGTERM but
+        # ``-KILL`` / ``-9`` makes recovery harder. Deny any -u/-U form
+        # against a broad target (root / current user / wildcards).
+        if any(t in {"-u", "-U", "--euid", "--uid"} for t in tokens[1:]):
+            return True
+    return False
 
 
 # --- DB CLI destructive SQL ---
@@ -2960,7 +3027,23 @@ def _strip_cloud_global_flags(
 
 
 _AWS_DESTRUCTIVE_SUBCOMMANDS = {
-    "iam": {"delete-user", "delete-role", "delete-access-key", "delete-login-profile"},
+    "iam": {
+        "delete-user",
+        "delete-role",
+        "delete-access-key",
+        "delete-login-profile",
+        # Policy-mutation verbs achieve account lockout without a deletion to
+        # reverse. Inline ``put-role-policy`` with a deny-all document is
+        # equivalent to deleting the role — recovery requires another
+        # principal with IAM rights, which the deny may have just blocked.
+        "put-role-policy",
+        "put-user-policy",
+        "put-group-policy",
+        "detach-role-policy",
+        "detach-user-policy",
+        "detach-group-policy",
+        "update-assume-role-policy",
+    },
     "ec2": {
         "terminate-instances",
         "delete-vpc",
@@ -3559,6 +3642,7 @@ _PER_FORM_MATCHERS: tuple[tuple[Callable[[str], bool], str, str], ...] = (
     (_is_sudo_escalation, _SYNTH_SUDO_ESCALATION_DENY, "bash.sudo_escalation"),
     (_is_kernel_module_load, _SYNTH_KERNEL_MOD_DENY, "bash.kernel_module_load"),
     (_is_process_attach, _SYNTH_PROCESS_ATTACH_DENY, "bash.process_attach"),
+    (_is_process_tree_kill, _SYNTH_PROCESS_TREE_KILL_DENY, "bash.process_tree_kill"),
     (_is_db_cli_destructive, _SYNTH_DB_DESTRUCTION_DENY, "bash.db_cli_destructive"),
     (_is_dropdb_or_mysqladmin_drop, _SYNTH_DB_DESTRUCTION_DENY, "bash.dropdb_or_mysqladmin"),
     (_is_mongo_destructive, _SYNTH_DB_DESTRUCTION_DENY, "bash.mongo_destructive"),

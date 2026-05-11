@@ -454,3 +454,74 @@ class TestAIEmailGitConfigPreflight:
                 }
             )
         assert not spy.called
+
+
+class TestReadMessageFileFallback:
+    """_read_message_file returns None when Path.resolve() raises.
+
+    Regression net: a permission error or symlink loop during resolve must
+    fail closed (decide() returns None / allow), not crash the hook.
+    """
+
+    def test_resolve_oserror_returns_none(self, tmp_path):
+        from guard.hooks.commit_message_validator import _read_message_file
+
+        target = tmp_path / "msg.txt"
+        target.write_text("body")
+        with patch.object(Path, "resolve", side_effect=OSError("simulated")):
+            assert _read_message_file(str(target), str(tmp_path)) is None
+
+    def test_resolve_valueerror_returns_none(self, tmp_path):
+        from guard.hooks.commit_message_validator import _read_message_file
+
+        target = tmp_path / "msg.txt"
+        target.write_text("body")
+        with patch.object(Path, "resolve", side_effect=ValueError("simulated")):
+            assert _read_message_file(str(target), str(tmp_path)) is None
+
+
+class TestExtractAllMessagesByteCap:
+    """_extract_all_messages caps scan window at 8 KiB to prevent ReDoS.
+
+    re.DOTALL + backreference patterns can backtrack heavily on adversarial
+    input. The cap keeps worst-case finite without affecting real commit
+    shapes (real commit-message argv stays well under 8 KiB).
+    """
+
+    def test_input_beyond_cap_is_truncated(self):
+        from guard.hooks.commit_message_validator import (
+            _MESSAGE_SCAN_MAX_BYTES,
+            _extract_all_messages,
+        )
+
+        # Build input where matches exist BOTH before and after the cap
+        # boundary. After truncation only the pre-cap matches are extracted.
+        prefix = 'git commit -m "early-msg"'
+        padding_len = _MESSAGE_SCAN_MAX_BYTES - len(prefix) + 100  # past the cap
+        padding = " " * padding_len
+        post_cap = ' -m "post-cap-msg"'
+        cmd = prefix + padding + post_cap
+        messages = _extract_all_messages(cmd)
+        assert "early-msg" in messages
+        assert "post-cap-msg" not in messages, "post-cap match should be excluded by the 8 KiB cap"
+
+    def test_normal_message_within_cap_works(self):
+        from guard.hooks.commit_message_validator import _extract_all_messages
+
+        messages = _extract_all_messages('git commit -m "fix bug" -m "see #123"')
+        assert messages == ["fix bug", "see #123"]
+
+    def test_oversized_input_completes_quickly(self):
+        """Adversarial input completes in bounded time. Without the cap, the
+        non-greedy regex on alternating quote characters could backtrack
+        quadratically; with the cap, scan window is at most 8 KiB."""
+        import time
+
+        from guard.hooks.commit_message_validator import _extract_all_messages
+
+        adversarial = "git commit " + ("-m 'x " * 5000)  # ~35 KB
+        start = time.perf_counter()
+        _extract_all_messages(adversarial)
+        elapsed = time.perf_counter() - start
+        # Real bound is microseconds. 1s is a generous CI ceiling.
+        assert elapsed < 1.0, f"_extract_all_messages took {elapsed:.3f}s"

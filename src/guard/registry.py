@@ -284,6 +284,28 @@ COMMANDS: list[CommandRule] = [
         "Mirrors local refs to remote, deleting any remote-only refs",
         "git-deny",
     ),
+    # --- Git remote mutations (DENY) ---
+    # Bare ``git remote`` lists remotes (read-only) and stays ALLOW above. The
+    # write-side subcommands re-point ``origin`` to attacker-controlled URLs;
+    # the follow-on ``git push origin main`` then goes to the attacker.
+    # Read-only forms (``git remote -v``, ``git remote show``,
+    # ``git remote get-url``) still fall through to the bare ALLOW.
+    CommandRule("git remote add", Safety.DENY, "Adds a remote URL", "git-deny"),
+    CommandRule("git remote set-url", Safety.DENY, "Re-points an existing remote", "git-deny"),
+    CommandRule("git remote rename", Safety.DENY, "Renames a remote", "git-deny"),
+    CommandRule("git remote remove", Safety.DENY, "Removes a remote", "git-deny"),
+    CommandRule("git remote rm", Safety.DENY, "Removes a remote (rm alias)", "git-deny"),
+    CommandRule("git remote prune", Safety.DENY, "Prunes remote-tracking refs", "git-deny"),
+    CommandRule("git remote update", Safety.DENY, "Fetches all configured remotes", "git-deny"),
+    CommandRule(
+        "git remote set-head", Safety.DENY, "Resets the remote's default branch", "git-deny"
+    ),
+    CommandRule(
+        "git remote set-branches",
+        Safety.DENY,
+        "Restricts the branches fetched from a remote",
+        "git-deny",
+    ),
     # --- File Read (ALLOW) ---
     CommandRule("cat", Safety.ALLOW, "Read file", "file-read", pipe_safe=True),
     CommandRule("head", Safety.ALLOW, "Read file head", "file-read", pipe_safe=True),
@@ -957,7 +979,20 @@ ALWAYS_DENY: frozenset[str] = frozenset(cmd.prefix for cmd in COMMANDS if cmd.sa
 # this set that matches optional version suffix (``python3.11``) and fully
 # qualified paths (``/usr/bin/python3``).
 DANGEROUS_INTERPRETERS: frozenset[str] = frozenset(
-    {"python", "python3", "node", "nodejs", "pypy", "pypy3", "bun", "deno"}
+    {
+        "python",
+        "python3",
+        "node",
+        "nodejs",
+        "pypy",
+        "pypy3",
+        "bun",
+        "deno",
+        # macOS shell-exec primitive: ``osascript -e 'do shell script "..."'``
+        # is equivalent to ``sh -c``. ``-l JavaScript`` switches language
+        # but ``-e`` still triggers the eval-flag matcher.
+        "osascript",
+    }
 )
 
 # Flags / subcommands that re-execute arbitrary code under any

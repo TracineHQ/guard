@@ -102,6 +102,17 @@ class TestDecide:
         assert decide("Read", {"file_path": "/Users/dev/x.output.bak"}) is None
         assert decide("Read", {"file_path": "/var/log/foo.output_old"}) is None
 
+    def test_session_dot_output_with_suffix_passes(self):
+        """``<session>/tasks/x.output.bak`` is a backup file, not the transcript.
+
+        Regression: the trailing negative lookahead was ``(?![A-Za-z0-9_])``
+        which let the ``.`` in ``.output.bak`` pass and falsely deny the
+        backup file. Fix tightened the class to ``(?![A-Za-z0-9_.])``.
+        """
+        assert decide("Read", {"file_path": "/tmp/claude-1/p/s/tasks/x.output.bak"}) is None
+        assert decide("Read", {"file_path": "/tmp/claude-1/p/s/tasks/x.output.json"}) is None
+        assert decide("Read", {"file_path": "/tmp/claude-1/p/s/tasks/x.output.tmp"}) is None
+
 
 class TestExpandedReaderCoverage:
     """File-reader coverage beyond cat/head/tail."""
@@ -339,6 +350,12 @@ class TestHookFunction:
         out = capsys.readouterr().out
         envelope = json.loads(out)
         assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    @pytest.mark.parametrize("malformed", [["not", "a", "dict"], "string", 42, None])
+    def test_non_dict_tool_input_passthrough(self, capsys, malformed):
+        """Malformed ``tool_input`` shapes silently passthrough rather than crash."""
+        hook({"tool_name": "Read", "tool_input": malformed})
+        assert capsys.readouterr().out == ""
 
 
 class TestSubprocess:

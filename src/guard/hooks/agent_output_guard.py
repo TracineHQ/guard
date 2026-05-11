@@ -33,11 +33,14 @@ _HOOK_ID = "guard.agent_output_guard"
 # bypass like ``cat /private/tmp/claude-*/proj/sess/tasks/*.output`` —
 # which expands to a real agent transcript at runtime — is still caught.
 # The negative-lookahead trailing class ensures ``.output.bak``,
-# ``.output_old``, ``.output2`` etc. do NOT match — only the bare
-# ``.output`` filename (or one followed by a non-identifier char such as
-# ``"`` or whitespace) is the actual agent transcript.
+# ``.output_old``, ``.outputs``, ``.output2`` etc. do NOT match — only the
+# bare ``.output`` filename (or one followed by a quote / whitespace /
+# operator) is the actual agent transcript. The class includes ``.`` so
+# ``x.output.bak`` (extension suffix) is excluded — without that, the
+# lookahead let ``.output.bak`` slip through and we falsely denied legit
+# backup-file paths.
 AGENT_OUTPUT_PATTERN = re.compile(
-    r"/(?:private/)?tmp/claude-[\d*?]+/.*/tasks/.*\.output(?![A-Za-z0-9_])"
+    r"/(?:private/)?tmp/claude-[\d*?]+/.*/tasks/.*\.output(?![A-Za-z0-9_.])"
 )
 
 # Detects a working directory inside an agent-output session tree. Used to
