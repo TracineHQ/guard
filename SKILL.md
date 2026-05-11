@@ -25,21 +25,23 @@ authoritative references. Quick map:
   sinks; `git commit -C <ref>` and `--reuse-message` (silent message reuse);
   destructive flags under `git -C` (`branch -d/-D/-m`, `tag -d`, `remote
   remove/rename/set-url`).
-- `commit_message_validator` — secrets in commit messages; AI-attribution
-  trailers (`Co-Authored-By: Claude`, `Generated with Claude Code`).
+- `commit_message_validator` — AI-attribution trailers in commit messages
+  (`Co-Authored-By: Claude`, `Generated with Claude Code`); also denies
+  opaque message sources (`-F <stream>`, `--file=-`, paths outside cwd).
 - `credential_check` — secret patterns in Edit/Write/Bash payloads.
 - `protected_files` — Edit/Write to `.git/hooks`, `.claude/settings.json`,
   `.claude/guard/allowlist.json`, `CLAUDE.md`, etc. (extensible via
   `GUARD_PROTECTED_EXTRA` and `.claude/guard-protected.txt`).
-- `agent_output_guard` — sensitive content in tool output before it reaches
-  the model.
+- `agent_output_guard` — denies tool calls whose input references a Claude
+  Code subagent output transcript (`/tmp/claude-<pid>/.../tasks/<id>.output`).
+  Stops the main agent from inlining noisy JSONL transcripts into context.
 - `subagent_scope` — file edits outside the declared `.claude/subagent-scope.json` allowlist.
 
 ## Environment variables
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `CLAUDE_AUTONOMOUS` | Set to `1` for strict default-deny in subagents / driven runs | unset (interactive mode) |
+| `CLAUDE_AUTONOMOUS` | Set to a truthy value (`1`, `true`, `yes`, `on` — case-insensitive) for strict default-deny in subagents / driven runs | unset (interactive mode) |
 | `GUARD_DECISIONS_PATH` | Override the JSONL decision-log path | `~/.claude/guard-decisions.jsonl` |
 | `GUARD_AUTONOMOUS_QUEUE_PATH` | Override the autonomous-deny queue path | `~/.claude/guard-autonomous-queue.jsonl` |
 | `GUARD_DEBUG` | Set to `1` to emit per-hook debug to stderr | unset |

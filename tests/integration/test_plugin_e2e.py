@@ -25,7 +25,10 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-PLUGIN_VERSION = "1.0.0"
+# Read from pyproject so a version bump doesn't require touching this constant.
+import tomllib
+
+PLUGIN_VERSION = tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["version"]
 STAGED_NAME = f"guard-{PLUGIN_VERSION}"
 
 # Constants used by structural assertions.

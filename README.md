@@ -1,7 +1,7 @@
 # guard
 
 Stdlib-only safety hooks for Claude Code.
-Every decision is logged to JSONL — query, trace, and prune in place with `guard status|noisy|silent`.
+Every decision is logged to JSONL — query and trace in place with `guard status|noisy|silent|trace`.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/TracineHQ/guard/ci.yml?branch=main&label=CI)](https://github.com/TracineHQ/guard/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -47,7 +47,7 @@ Standalone alternative (skip the catalog and install guard directly from this re
 `TracineHQ/guard` is the GitHub `owner/repo` shorthand for the marketplace source. `guard@tracinehq` is the `<plugin>@<marketplace>` reference Claude Code uses to install. To pin a specific tag:
 
 ```
-/plugin marketplace add TracineHQ/guard#v1.0.0
+/plugin marketplace add TracineHQ/guard#v1.1.0
 ```
 
 ### Requirements
@@ -77,7 +77,7 @@ Guard reads a small set of environment variables. See [SKILL.md](SKILL.md) for t
 | `GUARD_AUTONOMOUS_QUEUE_PATH` | Override the autonomous-deny queue path |
 | `GUARD_DEBUG` | Emit per-hook debug to stderr |
 | `GUARD_DATA_DIR` | Override guard's data directory |
-| `GUARD_PROTECTED_EXTRA` | Newline / colon-separated extra protected glob patterns (fallback when `~/.claude/guard-protected.txt` is absent) |
+| `GUARD_PROTECTED_EXTRA` | Comma-separated extra protected glob patterns (fallback when `~/.claude/guard-protected.txt` is absent) |
 
 To disable an individual hook, remove its entry from `~/.claude/settings.json` PreToolUse, or comment the line in `hooks/hooks.json` if you forked the plugin.
 
