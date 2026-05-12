@@ -439,19 +439,24 @@ def cmd_trace(
     return payload, "\n".join(lines) + "\n"
 
 
-def cmd_test(command: str) -> tuple[dict[str, Any], str]:
-    """Invoke each hook's ``decide()`` directly on the given command.
+def cmd_test(commands: list[str]) -> tuple[dict[str, Any], str]:
+    """Invoke each hook's ``decide()`` directly on each given command.
 
-    No log access, no subprocess. Hooks that decline to decide on this shape
-    are reported as ``passthrough``.
+    No log access, no subprocess. Hooks that decline to decide on a shape
+    are reported as ``passthrough``. Returns an array result so a single
+    invocation can verify many commands at once — ``guard test "cmd1" "cmd2"``.
     """
-    results: list[dict[str, Any]] = list(_test_specs(command))
-    payload: dict[str, Any] = {"command": command, "results": results}
-    lines = [f"guard test: {command!r}"]
-    for r in results:
-        decision = r.get("decision") or "passthrough"
-        reason = r.get("reason") or ""
-        lines.append(f"  {r['hook_id']:<35}  {decision:<11}  {reason[:80]}")
+    runs: list[dict[str, Any]] = []
+    lines: list[str] = []
+    for command in commands:
+        results: list[dict[str, Any]] = list(_test_specs(command))
+        runs.append({"command": command, "results": results})
+        lines.append(f"guard test: {command!r}")
+        for r in results:
+            decision = r.get("decision") or "passthrough"
+            reason = r.get("reason") or ""
+            lines.append(f"  {r['hook_id']:<35}  {decision:<11}  {reason[:80]}")
+    payload: dict[str, Any] = {"commands": runs}
     return payload, "\n".join(lines) + "\n"
 
 
@@ -887,15 +892,20 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_test = sub.add_parser(
         "test",
-        help="In-process invocation of each hook's decide() on the given command.",
+        help="In-process invocation of each hook's decide() on one or more commands.",
         epilog=(
             "Examples:\n"
-            "  guard test 'rm -rf /'           # preview which hook denies it\n"
-            "  guard test 'git -C /tmp status' # check git_c_validator behavior"
+            "  guard test 'rm -rf /'                       # single command\n"
+            "  guard test 'cmd a' 'cmd b' 'cmd c'          # batch — runs each, one JSON array\n"
+            "  guard test --json 'cmd a' 'cmd b'           # JSON output for tooling"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p_test.add_argument("command", help="Bash command to test.")
+    p_test.add_argument(
+        "commands",
+        nargs="+",
+        help="One or more bash commands to test. Each is run through every bash-surface hook.",
+    )
 
     sub.add_parser(
         "diff",
@@ -1037,7 +1047,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 -- linear command-
                 tool_name=args.tool_name,
             )
         elif cmd == "test":
-            payload, pretty = cmd_test(args.command)
+            payload, pretty = cmd_test(args.commands)
         elif cmd == "diff":
             payload, pretty = cmd_diff()
         elif cmd == "migrate-log":
