@@ -6,12 +6,13 @@ Tags are `vX.Y.Z`.
 
 This repo's convention: `pyproject.toml` `version` always reflects the
 **last released version** on `main`. Bump only when the next release is
-actually being prepared — no `-dev0` suffix on `main` between releases.
+actually being prepared. No `-dev0` suffix on `main` between releases.
 
 ## 1. Pre-tag checklist
 
-- [ ] `main` is green: latest `CI`, `CodeQL`, and `Scorecard` workflow runs all
-      passing on the commit you intend to tag.
+- [ ] `main` is green: every required workflow on the commit you intend to
+      tag is passing -- `CI`, `CodeQL`, `Scorecard`, `plugin-install`, and any
+      others listed under branch protection's required checks.
 - [ ] Working tree clean: `git status` shows nothing to commit.
 - [ ] `CHANGELOG.md` has a real `## [X.Y.Z] - YYYY-MM-DD` heading directly above
       `## [Unreleased]`. The entry covers user-facing notes under the relevant
@@ -24,7 +25,8 @@ actually being prepared — no `-dev0` suffix on `main` between releases.
       `metadata.version` both match `X.Y.Z`.
 - [ ] Version-consistency test passes:
       `uv run pytest tests/test_version_consistency.py`.
-- [ ] Full local check is clean: `just check` (ruff + mypy + pytest + coverage).
+- [ ] Full local check is clean: `just check` (ruff + mypy + pytest). For
+      coverage, run `just test-cov` separately.
 - [ ] Local wheel build reports the right CLI version:
 
       ```bash
@@ -36,12 +38,12 @@ actually being prepared — no `-dev0` suffix on `main` between releases.
 
 ## 2. Tag and push
 
-- [ ] Create the tag (signed if your git config has GPG/SSH signing set up):
+- [ ] Create a **signed** tag. Guard's whole pitch is supply-chain safety; an
+      unsigned release tag undercuts that. One-time setup: configure
+      `git config user.signingkey` (GPG or SSH) and `git config tag.gpgsign true`.
 
       ```bash
       git tag -s vX.Y.Z -m "vX.Y.Z"
-      # If signing is not configured:
-      # git tag vX.Y.Z -m "vX.Y.Z"
       ```
 
 - [ ] Push the tag:
@@ -50,33 +52,66 @@ actually being prepared — no `-dev0` suffix on `main` between releases.
       git push origin vX.Y.Z
       ```
 
-- [ ] The release workflow (`.github/workflows/release.yml`) fires automatically
-      on tag push matching `v[0-9]*.[0-9]*.[0-9]*`. It detects whether the tag
-      is a prerelease (rc/alpha/beta/.dev suffix), builds the sdist + wheel,
-      runs Trusted Publisher (OIDC) upload to PyPI, and drafts a GitHub Release
-      with the artifacts attached and CHANGELOG notes for `X.Y.Z` populated as
-      the body.
+- [ ] The release workflow (`.github/workflows/release.yml`) fires on tag push
+      matching `v[0-9]*.[0-9]*.[0-9]*`. Pipeline:
+
+      `detect-prerelease` -> `build` (sdist + wheel + sha256 manifest) ->
+      `testpypi-publish` (OIDC to TestPyPI) -> `testpypi-smoke` (matrix:
+      py3.11 / 3.12 / 3.13 x ubuntu / macos, hash-pinned install, hook deny
+      payload test, full pytest re-run against the installed wheel) ->
+      `pypi-publish` (production, OIDC, skipped for prereleases) ->
+      `gh-release` (uploads `.whl` and `.tar.gz`, posts auto-generated notes).
+
+- [ ] **Release notes come from `gh release create --generate-notes`** (the PR
+      and commit list since the previous tag). They do NOT come from
+      `CHANGELOG.md`. Keep PR titles clean -- they become the release body.
+      `CHANGELOG.md` is your curated historical record, separate from the
+      auto-generated GitHub Release body.
+
+### Prereleases
+
+To cut an rc / alpha / beta / dev, tag with a PEP 440 suffix:
+
+```bash
+git tag -s vX.Y.Zrc1 -m "vX.Y.Zrc1"
+```
+
+`detect-prerelease` flags any tag with a suffix and skips `pypi-publish`.
+TestPyPI publish + smoke still run, and `gh-release` still fires with the
+`--prerelease` flag set so the GitHub Release is marked accordingly.
 
 ## 3. Post-tag verification
 
 - [ ] Open the run under the **Release** workflow in GitHub Actions.
-- [ ] The `publish-to-pypi` job pauses on the protected `pypi` environment
-      (required reviewers). Approve the deployment.
+- [ ] **Two environment approvals are required**, in order:
+  - [ ] `TestPyPi` (before `testpypi-publish` runs). Approve it; the
+        `testpypi-smoke` matrix (6 jobs across py3.11 / 3.12 / 3.13 x ubuntu
+        / macos) gates everything downstream.
+  - [ ] `PyPi` (before `pypi-publish` runs). Only reachable after smoke
+        passes. Skipped automatically for prerelease tags.
 - [ ] Verify the release on [pypi.org/project/tracine-guard](https://pypi.org/project/tracine-guard/).
-      The new version must be the latest. Check that both wheel and sdist are
+      The new version must be the latest. Both wheel and sdist must be
       present.
 - [ ] Verify the GitHub Release exists at
       `https://github.com/TracineHQ/guard/releases/tag/vX.Y.Z` with:
   - [ ] `tracine_guard-X.Y.Z-py3-none-any.whl` attached.
   - [ ] `tracine_guard-X.Y.Z.tar.gz` attached.
-  - [ ] Body populated from the `## [X.Y.Z]` CHANGELOG section.
+  - [ ] Body populated with auto-generated notes (PR / commit list since the
+        previous tag). Sanity-check the list looks right; if a PR title was
+        wrong, you can edit the release body manually.
   - [ ] If it landed as draft, click **Publish release**.
 - [ ] Smoke-install from PyPI in a clean shell:
 
       ```bash
       pipx install tracine-guard==X.Y.Z
       guard --version    # expect: guard X.Y.Z
-      guard test         # built-in hook self-test
+
+      # Deterministic deny check: feed a dangerous payload to the bash
+      # validator hook; it must exit 2 with permissionDecision: deny.
+      echo '{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}' \
+        | python -m guard.hooks.bash_command_validator
+      echo "exit=$?"   # expect: exit=2
+
       pipx uninstall tracine-guard
       ```
 
@@ -96,16 +131,22 @@ instead.
       ```
       claude --plugin-dir /path/to/guard
       ```
-      Confirm guard's hooks load (`guard --version` reports the source-tree
-      version) and trigger as expected. Sanity hook trigger: in the session,
-      attempt a Bash tool call to `rm -rf /tmp/__guard-smoke__/*` against a
-      directory you created — guard's `bash_command_validator` should block
-      or warn per the configured policy. Run `guard trace` to confirm the
-      decision was recorded in the JSONL log.
+      Confirm `guard --version` in that session reports the source-tree
+      version. For a deterministic deny check that doesn't depend on a live
+      Claude session, run the hook directly (same recipe as section 3):
+
+      ```bash
+      echo '{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}' \
+        | python -m guard.hooks.bash_command_validator
+      ```
+
+      To inspect a real session's decisions, run `guard status` to list
+      session ids, then `guard trace <session-id>` to print the JSONL
+      records for that session.
 - [ ] PyPI publish is live at
-      [pypi.org/project/tracine-guard](https://pypi.org/project/tracine-guard/) —
-      the marketplace listing assumes users can `pipx install tracine-guard` to
-      get the `guard` binary the plugin shells out to.
+      [pypi.org/project/tracine-guard](https://pypi.org/project/tracine-guard/).
+      The marketplace listing assumes users can `pipx install tracine-guard`
+      to get the `guard` binary the plugin shells out to.
 
 ### Submit via the in-app form
 
@@ -151,7 +192,7 @@ Anthropic's internal pipeline. To ship an update:
 
 1. Cut a new release through this checklist (section 1 onward).
 2. Re-run the submission form for the new version (or follow whatever
-   "update existing listing" path the form provides — check before
+   "update existing listing" path the form provides; check before
    re-submitting from scratch).
 3. The synced mirror picks up the new version on its next nightly sync.
 
@@ -202,10 +243,12 @@ If `X.Y.Z` ships with a critical bug after PyPI publish:
 | File                                | Field                                     |
 |-------------------------------------|-------------------------------------------|
 | `pyproject.toml`                    | `[project] version`                       |
+| `uv.lock`                           | `[[package]] version` for `tracine-guard` |
 | `.claude-plugin/plugin.json`        | `version`                                 |
 | `.claude-plugin/marketplace.json`   | `metadata.version` + `plugins[0].version` |
 | `CHANGELOG.md`                      | `## [X.Y.Z] - YYYY-MM-DD`                 |
 | `src/guard/__init__.py`             | `__version__` (read from pkg)             |
 
-The version-consistency test (`tests/test_version_consistency.py`) is the
-guardrail: keep these in sync or the test fails before tagging.
+`tests/test_version_consistency.py` enforces `pyproject.toml`,
+`plugin.json`, and `marketplace.json` against `guard.__version__`. It does
+NOT check `uv.lock` or `CHANGELOG.md`; those two are on you.
