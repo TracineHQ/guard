@@ -18,7 +18,7 @@ Guardrails not walls: guard catches the obvious foot-guns at the Claude Code hoo
 
 | Hook | What it catches |
 |---|---|
-| bash_command_validator | dangerous shell commands (rm -rf, eval/source, env-var hijack, shell-wrapper bypass) |
+| bash_command_validator | dangerous shell commands (rm -rf, eval/source, env-var hijack, shell-wrapper bypass) + admin-CLI default-deny for `aws`/`gcloud`/`az`/`kubectl`/`launchctl` (only read-only verbs pass) |
 | git_c_validator | `git -C path` traversal, `git -c key=value` config injection, `git commit -C` silent message reuse |
 | credential_check | hardcoded credentials in tool inputs |
 | commit_message_validator | AI-attribution trailers (`Co-Authored-By: Claude…`) and missing/file-backed commit messages |
@@ -47,7 +47,7 @@ Standalone alternative (skip the catalog and install guard directly from this re
 `TracineHQ/guard` is the GitHub `owner/repo` shorthand for the marketplace source. `guard@tracinehq` is the `<plugin>@<marketplace>` reference Claude Code uses to install. To pin a specific tag:
 
 ```
-/plugin marketplace add TracineHQ/guard#v1.1.0
+/plugin marketplace add TracineHQ/guard#v1.1.1
 ```
 
 ### Requirements
@@ -78,6 +78,7 @@ Guard reads a small set of environment variables. See [SKILL.md](SKILL.md) for t
 | `GUARD_DEBUG` | Emit per-hook debug to stderr |
 | `GUARD_DATA_DIR` | Override guard's data directory |
 | `GUARD_PROTECTED_EXTRA` | Comma-separated extra protected glob patterns (fallback when `~/.claude/guard-protected.txt` is absent) |
+| `GUARD_ADMIN_ALLOW_VERBS` | Per-verb allow for `bash.admin_default_deny`; format `<cli>:<verb.path>,<cli>:<verb.path>` (e.g. `aws:ec2.run-instances,gcloud:functions.deploy`) |
 
 To disable an individual hook, remove its entry from `~/.claude/settings.json` PreToolUse, or comment the line in `hooks/hooks.json` if you forked the plugin.
 

@@ -106,10 +106,6 @@ def test_orchestration_destruction_denied(command: str) -> None:
 @pytest.mark.parametrize(
     "command",
     [
-        # Single-pod deletion is a normal dev op — must not be caught by the
-        # `kubectl delete --all` / `kubectl delete pods --all` prefixes.
-        "kubectl delete pod my-pod",
-        "kubectl delete pod my-pod -n staging",
         # Single-resource gh delete shapes don't exist (delete is the verb),
         # but local file removal must remain unaffected.
         "rm ./localfile",
@@ -125,11 +121,6 @@ def test_orchestration_destruction_denied(command: str) -> None:
         "uv pip install requests",
         "uv add requests",
         "poetry add pytest",
-        # Single-pod / single-resource kubectl deletions are routine.
-        "kubectl delete pod my-pod -n staging",
-        "kubectl delete deployment nginx",
-        "kubectl delete service my-svc",
-        "kubectl delete configmap app-config -n production",
         # gh API calls without -X DELETE are fine.
         "gh api /repos/owner/repo",
         "gh api -X GET /repos/owner/repo",
@@ -138,11 +129,8 @@ def test_orchestration_destruction_denied(command: str) -> None:
         "gpg --list-secret-keys",
         "gpg --import key.asc",
         "gpg --delete-key PUBLIC123",
-        # aws s3 read/list/copy ops.
+        # aws s3 read ops (writes now caught by admin_default_deny).
         "aws s3 ls s3://bucket",
-        "aws s3 cp file.txt s3://bucket/",
-        "aws s3 sync . s3://bucket",
-        "aws s3api list-buckets",
         # Scoped chmod in a project dir.
         "chmod -R 777 ./mydir",
         "chmod -R 777 /home/user/project",
