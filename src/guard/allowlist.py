@@ -57,6 +57,7 @@ _BASH_MATCHER_RULE_IDS: tuple[str, ...] = (
     # Bash: ALWAYS_DENY layer (coarse).
     "bash.always_deny",
     # Bash: synthetic matchers (fine-grained, one per matcher func).
+    "bash.admin_default_deny",
     "bash.aws_destructive",
     "bash.aws_s3_destructive",
     "bash.az_destructive",

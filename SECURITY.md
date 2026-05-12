@@ -2,12 +2,13 @@
 
 ## Supported versions
 
-The latest minor release receives security fixes. The v1.0.x line is the
+The latest minor release receives security fixes. The v1.1.x line is the
 current supported series.
 
 | Version | Supported |
 |---|---|
-| 1.0.x | yes |
+| 1.1.x | yes |
+| 1.0.x | no (missing `bash.admin_default_deny`) |
 | < 1.0 | no |
 
 ## Reporting a vulnerability
@@ -46,6 +47,13 @@ The validators are written with that in mind:
 - Bounded JSON parse size (~1 MiB stdin cap).
 - Path operations restricted to read-only inside `~/.claude/`.
 - Regex compiled with no nested quantifiers (ReDoS resistance).
+- Cloud admin CLIs (`aws`, `gcloud`, `az`, `kubectl`, `launchctl`) are
+  **default-deny**: only verbs on the read-only allowlist
+  (`describe-*`, `list-*`, `get-*` and curated equivalents) pass. Three CRIT
+  IAM escalation bypasses (`aws iam attach-user-policy`,
+  `az role assignment create`, `gcloud projects add-iam-policy-binding`)
+  motivated this flip from verb-denylist to default-deny. Override paths:
+  `allow_commands`, `disable_rules`, `GUARD_ADMIN_ALLOW_VERBS=<cli>:<verb.path>`.
 
 ## CVE-2025-59356 reference
 

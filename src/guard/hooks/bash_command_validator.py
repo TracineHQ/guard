@@ -51,6 +51,16 @@ from guard._utils import (
     token_basename as _basename,
 )
 from guard.allowlist import Allowlist, load_allowlist
+from guard.hooks._admin_specs import (
+    ADMIN_CLI_SPECS,
+    AdminCliSpec,
+)
+from guard.hooks._admin_specs import (
+    RULE_ID as _ADMIN_DEFAULT_DENY_RULE_ID,
+)
+from guard.hooks._admin_specs import (
+    summary_for as _admin_summary_for,
+)
 from guard.registry import (
     ALWAYS_DENY,
     AUTONOMOUS_FEEDBACK,
@@ -111,6 +121,27 @@ _SPEC_DECISION_MAP: dict[str, Literal["allow", "deny", "ask", "pass"]] = {
 # from it. Falls back to ``CLAUDE_SESSION_ID`` env when called outside a
 # ``hook()`` context (e.g. unit tests that drive ``decide`` directly).
 _REQUEST_CONTEXT: dict[str, Any] = {"session_id": "", "cwd": None}
+
+# Parsed once from GUARD_ADMIN_ALLOW_VERBS on first call to _get_admin_allow_verbs().
+_ADMIN_ALLOW_VERBS_CACHE: dict[str, frozenset[tuple[str, ...]]] | None = None
+
+
+def _get_admin_allow_verbs() -> dict[str, frozenset[tuple[str, ...]]]:
+    global _ADMIN_ALLOW_VERBS_CACHE  # noqa: PLW0603
+    if _ADMIN_ALLOW_VERBS_CACHE is not None:
+        return _ADMIN_ALLOW_VERBS_CACHE
+    raw = os.environ.get("GUARD_ADMIN_ALLOW_VERBS", "")
+    result: dict[str, set[tuple[str, ...]]] = {}
+    for entry in (e.strip() for e in raw.split(",") if e.strip()):
+        if ":" not in entry:
+            continue
+        cli, _, verb_dotted = entry.partition(":")
+        cli = cli.strip()
+        verb_tuple = tuple(v for v in verb_dotted.split(".") if v)
+        if cli and verb_tuple:
+            result.setdefault(cli, set()).add(verb_tuple)
+    _ADMIN_ALLOW_VERBS_CACHE = {k: frozenset(v) for k, v in result.items()}
+    return _ADMIN_ALLOW_VERBS_CACHE
 
 
 def _log_local(command: str, decision: str, reason: str) -> None:
@@ -596,6 +627,10 @@ CREDENTIAL_LEAK_FEEDBACK: dict[str, str] = {
 _ALWAYS_DENY_REASONS: dict[str, str] = {
     cmd.prefix: cmd.reason for cmd in COMMANDS if cmd.safety == Safety.DENY
 }
+
+# All registered COMMANDS prefixes (any Safety level). Used by admin_default_deny to
+# defer to the existing registry when a command is already covered by a specific rule.
+_COMMANDS_ALL_PREFIXES: frozenset[str] = frozenset(cmd.prefix for cmd in COMMANDS)
 
 
 def _normalize_segment(segment: str) -> str:
@@ -1629,6 +1664,7 @@ _SYNTH_DNS_EXFIL_DENY = "<DNS exfil candidate>"
 _SYNTH_GIT_FORCE_REFSPEC_DENY = "<git push +refspec force>"
 _SYNTH_GIT_SUBMODULE_ADD_DENY = "<git submodule add fetches arbitrary repo>"
 _SYNTH_GIT_WORKTREE_ADD_DENY = "<git worktree add path scoping>"
+_SYNTH_ADMIN_DEFAULT_DENY = "admin-default-deny"
 
 _SYNTH_DENY_REASONS: dict[str, str] = {
     _SYNTH_INTERPRETER_DENY: (
@@ -1857,6 +1893,7 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         "DNS-tunnel candidate (ping/dig/host/nslookup with a DNS label > 50 "
         "chars — likely encoded data). Use plain hostnames or refuse."
     ),
+    _SYNTH_ADMIN_DEFAULT_DENY: "Admin CLI command not on read-only allowlist.",
 }
 
 
@@ -3026,6 +3063,70 @@ def _strip_cloud_global_flags(
     return out
 
 
+def _prefix_match(verb_tuple: tuple[str, ...], verb_set: frozenset[tuple[str, ...]]) -> bool:
+    """Return True if any prefix of verb_tuple is in verb_set."""
+    return any(verb_tuple[:length] in verb_set for length in range(1, len(verb_tuple) + 1))
+
+
+def _is_admin_default_deny(normalized: str, spec: AdminCliSpec) -> bool:
+    """Return True if ``normalized`` is an admin CLI command not on the read-only allowlist.
+
+    ``--help`` / ``-h`` before any ``--`` end-of-flags marker is informational
+    and never a write op; pass through to the existing help handling.
+    """
+    raw = normalized.split()
+    if not raw or _basename(raw[0]) != spec.cli_name:
+        return False
+    pre_terminator = normalized.split(" -- ", 1)[0].split()
+    if "--help" in pre_terminator or "-h" in pre_terminator:
+        return False
+    tokens = _strip_cloud_global_flags(raw, spec.global_value_flags, spec.global_bare_flags)
+    if len(tokens) < 2:
+        return False
+    # Strip track prefix (gcloud alpha/beta)
+    if spec.track_prefixes and tokens[1] in spec.track_prefixes:
+        tokens = _strip_cloud_global_flags(
+            [tokens[0], *tokens[2:]], spec.global_value_flags, spec.global_bare_flags
+        )
+        if len(tokens) < 2:
+            return False
+    verb_tuple = spec.verb_extractor(tokens)
+    if not verb_tuple:
+        return False
+    # 1. Deny-override wins first (credential-issuing get-* etc.)
+    if _prefix_match(verb_tuple, spec.deny_overrides):
+        return True
+    # 2. Read-only tuple set
+    if _prefix_match(verb_tuple, spec.read_only_verbs):
+        return False
+    # 3. Read-only predicate (AWS hybrid)
+    if spec.read_only_predicate is not None and spec.read_only_predicate(verb_tuple):
+        return False
+    # 4. Env-var per-verb allow
+    allow_map = _get_admin_allow_verbs()
+    if spec.cli_name in allow_map and _prefix_match(verb_tuple, allow_map[spec.cli_name]):
+        return False
+    return True
+
+
+def _is_admin_default_deny_dispatch(normalized: str) -> bool:
+    """Dispatch admin default-deny check across all enrolled CLI specs."""
+    return any(_is_admin_default_deny(normalized, spec) for spec in ADMIN_CLI_SPECS)
+
+
+def _admin_deny_body(cli_name: str, verb_tuple: tuple[str, ...]) -> str:
+    """Build the deny body for an admin CLI default-deny hit."""
+    verb_path = " ".join(verb_tuple)
+    dot_verb = ".".join(verb_tuple)
+    summary = _admin_summary_for(cli_name)
+    return (
+        f"Admin CLI command not on the read-only allowlist. "
+        f"{cli_name} {verb_path} is not in the read-only set. "
+        f"Per-verb override: GUARD_ADMIN_ALLOW_VERBS={cli_name}:{dot_verb} "
+        f"Read-only verbs for {cli_name}: {summary}"
+    )
+
+
 _AWS_DESTRUCTIVE_SUBCOMMANDS = {
     "iam": {
         "delete-user",
@@ -3669,17 +3770,23 @@ _PER_FORM_MATCHERS: tuple[tuple[Callable[[str], bool], str, str], ...] = (
     (_is_git_submodule_add, _SYNTH_GIT_SUBMODULE_ADD_DENY, "bash.git_submodule_add"),
     (_is_git_worktree_add, _SYNTH_GIT_WORKTREE_ADD_DENY, "bash.git_worktree_add"),
     (_is_pipe_to_interpreter, _SYNTH_PIPE_TO_INTERPRETER_DENY, "bash.pipe_to_interpreter"),
+    (_is_admin_default_deny_dispatch, _SYNTH_ADMIN_DEFAULT_DENY, _ADMIN_DEFAULT_DENY_RULE_ID),
 )
 
 
-def _match_synthetic_deny(segment: str) -> tuple[str, str] | None:
-    """Return ``(label, rule_id)`` if a synthetic matcher fires, else ``None``.
+def _match_synthetic_deny(segment: str) -> tuple[str, str] | tuple[str, str, str] | None:
+    """Return ``(label, rule_id)`` or ``(label, rule_id, body)`` if a matcher fires, else ``None``.
 
     Covers non-canonical interpreters, dangerous rm shapes, and the git
     config-injection sinks. Iterates ``_candidate_forms(segment)`` so env /
     git / runner-wrapper bypasses are evaluated against the same matchers
     as their bare forms. The ``rule_id`` is the stable allowlist key — see
     ``_PER_FORM_MATCHERS`` for the canonical list.
+
+    Matchers that produce a dynamic deny body (e.g. admin default-deny) return
+    a 3-tuple ``(label, rule_id, body)``; all other matchers return the standard
+    2-tuple ``(label, rule_id)`` and the caller looks up the body in
+    ``_SYNTH_DENY_REASONS``.
     """
     if not segment:
         return None
@@ -3687,6 +3794,26 @@ def _match_synthetic_deny(segment: str) -> tuple[str, str] | None:
     for cand in forms:
         for matcher, label, rule_id in _PER_FORM_MATCHERS:
             if matcher(cand):
+                if matcher is _is_admin_default_deny_dispatch:
+                    # Re-derive the spec + verb_tuple for the dynamic body.
+                    for spec in ADMIN_CLI_SPECS:
+                        if _is_admin_default_deny(cand, spec):
+                            raw = cand.split()
+                            tokens = _strip_cloud_global_flags(
+                                raw, spec.global_value_flags, spec.global_bare_flags
+                            )
+                            if (
+                                spec.track_prefixes
+                                and len(tokens) > 1
+                                and tokens[1] in spec.track_prefixes
+                            ):
+                                tokens = _strip_cloud_global_flags(
+                                    [tokens[0], *tokens[2:]],
+                                    spec.global_value_flags,
+                                    spec.global_bare_flags,
+                                )
+                            verb_tuple = spec.verb_extractor(tokens)
+                            return (label, rule_id, _admin_deny_body(spec.cli_name, verb_tuple))
                 return label, rule_id
     # Variable-expanded head token: only the raw normalized form is what
     # matters; runner stripping would just hide the ``$VAR`` head.
@@ -3754,8 +3881,11 @@ def _get_always_deny(segments: list[str]) -> tuple[dict[str, str], str] | None:
             return _deny(_format_deny_reason("bash.always_deny", body)), "bash.always_deny"
         synth = _match_synthetic_deny(seg)
         if synth is not None:
-            label, rule_id = synth
-            body = f"Blocked: `{seg[:80]}` — {_SYNTH_DENY_REASONS[label]}"
+            if len(synth) == 3:
+                label, rule_id, body = synth
+            else:
+                label, rule_id = synth
+                body = f"Blocked: `{seg[:80]}` — {_SYNTH_DENY_REASONS[label]}"
             return _deny(_format_deny_reason(rule_id, body)), rule_id
         # Shell-wrapper recursion: ``bash -c "rm -rf /; other"`` has
         # operators inside the payload that the outer split missed.
@@ -3830,6 +3960,19 @@ def _deny(reason: str) -> dict[str, str]:
     return {"permissionDecision": "deny", "permissionDecisionReason": reason}
 
 
+_AGENT_GUIDANCE_INTERACTIVE = (
+    "Agents: don't apply overrides without asking. Recommended flow: "
+    "explain what this rule protects against → propose the specific override "
+    "that fits the user's intent → wait for explicit user approval → apply."
+)
+
+_AGENT_GUIDANCE_AUTONOMOUS = (
+    "Agents: this is a hard fence in autonomous mode. Do not retry, "
+    "do not invoke an override. Surface this deny in your output for the "
+    "operator's later review."
+)
+
+
 def _format_deny_reason(rule_id: str, body: str) -> str:
     """Append the unified rule_id + override-path footer to a deny ``body``.
 
@@ -3839,12 +3982,16 @@ def _format_deny_reason(rule_id: str, body: str) -> str:
     learn the shape once. ``<command>`` is a placeholder — substituting
     quoted shell text into the printed message is error-prone, so the
     user supplies the exact form they want when they invoke the CLI.
+
+    A mode-aware agent-guidance sentence is appended so agents know whether
+    to ask the user (interactive) or surface and stop (autonomous).
     """
     body = body.rstrip(" .")
+    guidance = _AGENT_GUIDANCE_AUTONOMOUS if is_autonomous_mode() else _AGENT_GUIDANCE_INTERACTIVE
     return (
         f"{body}. Rule: {rule_id}. "
         f"Override: `guard allowlist allow-command {rule_id} '<command>' --reason '...'` "
-        f"or `guard allowlist disable-rule {rule_id}`."
+        f"or `guard allowlist disable-rule {rule_id}`. {guidance}"
     )
 
 

@@ -18,7 +18,7 @@ Guardrails not walls: guard catches the obvious foot-guns at the Claude Code hoo
 
 | Hook | What it catches |
 |---|---|
-| bash_command_validator | dangerous shell commands (rm -rf, eval/source, env-var hijack, shell-wrapper bypass) |
+| bash_command_validator | dangerous shell commands (rm -rf, eval/source, env-var hijack, shell-wrapper bypass) + admin-CLI default-deny for `aws`/`gcloud`/`az`/`kubectl`/`launchctl` (only read-only verbs pass) |
 | git_c_validator | `git -C path` traversal, `git -c key=value` config injection, `git commit -C` silent message reuse |
 | credential_check | hardcoded credentials in tool inputs |
 | commit_message_validator | AI-attribution trailers (`Co-Authored-By: Claude…`) and missing/file-backed commit messages |

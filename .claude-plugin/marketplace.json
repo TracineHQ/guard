@@ -4,12 +4,12 @@
   "owner": { "name": "TracineHQ", "url": "https://github.com/TracineHQ" },
   "metadata": {
     "description": "TracineHQ's Claude Code plugin catalog.",
-    "version": "1.1.0"
+    "version": "1.1.1"
   },
   "plugins": [
     {
       "name": "guard",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "description": "Safety hooks for Claude Code (rm -rf, credential exfil, force-pushes, protected files, subagent scope) with a queryable JSONL decision log.",
       "author": { "name": "TracineHQ contributors", "url": "https://github.com/TracineHQ" },
       "source": "./",

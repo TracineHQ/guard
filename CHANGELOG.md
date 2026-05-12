@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] - 2026-05-12
+
+### Added
+
+- `bash.admin_default_deny`: cloud-admin CLIs (`aws`, `gcloud`, `az`, `kubectl`,
+  `launchctl`) flip from verb-denylist to default-deny. Only verbs on the
+  read-only allowlist pass; everything else denies. Override via
+  `allow_commands`, `disable_rules`, or `GUARD_ADMIN_ALLOW_VERBS=<cli>:<verb.path>`.
+- Mode-aware agent-guidance footer on every deny: interactive denies tell agents
+  to explain + ask before applying overrides; autonomous denies tell agents to
+  surface and stop.
+
+### Fixed
+
+- Three CRIT IAM escalation bypasses: `aws iam attach-user-policy`,
+  `az role assignment create`, `gcloud projects add-iam-policy-binding`.
+- HIGH `launchctl kickstart -k` persistence bypass.
+- Internal: `_kubectl_verb` now returns multi-positional verbs so
+  `kubectl auth can-i` and `kubectl config view` resolve correctly.
+
 ## [1.1.0] - 2026-05-11
 
 ### Added — new matchers

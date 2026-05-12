@@ -1650,17 +1650,14 @@ KUBECTL_BROAD_DENY = [
 ]
 
 KUBECTL_BROAD_LEGIT = [
-    # Single-target ops not flagged.
-    "kubectl scale deployment foo --replicas=3",
-    "kubectl scale deployment foo --replicas=0",  # single target, not --all
-    "kubectl drain prod-node-1",
-    "kubectl drain prod-node-1 --ignore-daemonsets",
-    "kubectl replace -f manifest.yaml",  # no --force
-    "kubectl rollout restart deployment/foo",
-    "kubectl rollout status deploy/foo",
-    "kubectl rollout undo deployment/foo",  # single-target undo, not cluster-wide
-    "kubectl rollout history deploy/foo",
+    # Read-only ops pass under admin_default_deny.
     "kubectl get deployments --all-namespaces",
+    "kubectl describe pod my-pod",
+    "kubectl logs my-pod",
+    "kubectl top nodes",
+    "kubectl events",
+    "kubectl auth can-i create pods",
+    "kubectl config view",
 ]
 
 

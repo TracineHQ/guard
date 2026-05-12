@@ -19,7 +19,12 @@ authoritative references. Quick map:
   eval (`python -c`, `node -e`, `pypy`, `bun`, `deno`, plus runner wrappers
   `uvx`/`pipx`); shell wrappers (`bash -c`, `sh -lc`); `eval`/`source`/`.`;
   dangerous env-var sinks (`GIT_SSH_COMMAND`, `LD_PRELOAD`, etc.); pipe-to-shell
-  (`curl ... | sh`); credential leaks (`gh auth token`, `aws sts get-session-token`).
+  (`curl ... | sh`); credential leaks (`gh auth token`, `aws sts get-session-token`);
+  **admin-CLI default-deny** for `aws`, `gcloud`, `az`, `kubectl`, `launchctl` —
+  only read-only verbs (`describe-*`, `list-*`, `get-*`, `kubectl get`, etc.)
+  pass; everything else denies with `bash.admin_default_deny`. Override per-command
+  via `allow_commands`, per-rule via `disable_rules`, or per-verb via
+  `GUARD_ADMIN_ALLOW_VERBS=aws:ec2.run-instances,gcloud:functions.deploy`.
 - `git_c_validator` — `git -c core.hooksPath=...` and `core.attributesFile=...`
   denied regardless of value; `git -c alias.x='!cmd'` and other config-exec
   sinks; `git commit -C <ref>` and `--reuse-message` (silent message reuse);
