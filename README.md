@@ -78,6 +78,7 @@ Guard reads a small set of environment variables. See [SKILL.md](SKILL.md) for t
 | `GUARD_DEBUG` | Emit per-hook debug to stderr |
 | `GUARD_DATA_DIR` | Override guard's data directory |
 | `GUARD_PROTECTED_EXTRA` | Comma-separated extra protected glob patterns (fallback when `~/.claude/guard-protected.txt` is absent) |
+| `GUARD_ADMIN_ALLOW_VERBS` | Per-verb allow for `bash.admin_default_deny`; format `<cli>:<verb.path>,<cli>:<verb.path>` (e.g. `aws:ec2.run-instances,gcloud:functions.deploy`) |
 
 To disable an individual hook, remove its entry from `~/.claude/settings.json` PreToolUse, or comment the line in `hooks/hooks.json` if you forked the plugin.
 
