@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## [1.1.1] - 2026-05-12
+## [1.2.0] - 2026-05-12
 
 ### Added
 
@@ -15,6 +15,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 - Mode-aware agent-guidance footer on every deny: interactive denies tell agents
   to explain + ask before applying overrides; autonomous denies tell agents to
   surface and stop.
+- `guard test` accepts multiple commands in one invocation:
+  `guard test "cmd1" "cmd2" "cmd3"`. JSON shape changed from
+  `{"command", "results"}` to `{"commands": [{"command", "results"}, ...]}`.
+  Single-command callers get a 1-element array.
 
 ### Fixed
 
