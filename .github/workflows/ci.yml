@@ -155,7 +155,7 @@ jobs:
           guard --json test "rm -rf /" | python -c "
           import json, sys
           d = json.load(sys.stdin)
-          decisions = {r['hook_id']: r['decision'] for r in d['results']}
+          decisions = {r['hook_id']: r['decision'] for r in d['commands'][0]['results']}
           assert decisions.get('guard.bash_command_validator') == 'deny', d
           print('guard test deny OK:', decisions)
           "
