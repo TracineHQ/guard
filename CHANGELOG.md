@@ -21,6 +21,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 - Three CRIT IAM escalation bypasses: `aws iam attach-user-policy`,
   `az role assignment create`, `gcloud projects add-iam-policy-binding`.
 - HIGH `launchctl kickstart -k` persistence bypass.
+- HIGH `--` end-of-flags terminator bypass on `az`/`gcloud`/`kubectl`
+  extractors (`az account show -- storage blob upload`,
+  `kubectl get pods -- delete deployment myapp`). Admin commands with tokens
+  after `--` now deny without further interpretation.
 - Internal: `_kubectl_verb` now returns multi-positional verbs so
   `kubectl auth can-i` and `kubectl config view` resolve correctly.
 

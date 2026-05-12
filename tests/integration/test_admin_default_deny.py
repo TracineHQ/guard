@@ -78,6 +78,29 @@ CLOUD_ADMIN_DENY = [
     pytest.param("aws sts get-session-token", id="aws-sts-get-session-token"),
     pytest.param("aws ecr get-login-password", id="aws-ecr-get-login-password"),
     pytest.param("aws ssm start-session --target i-xxx", id="aws-ssm-start-session"),
+    # End-of-flags `--` terminator bypass: safe pre-terminator verb must not
+    # mask unsafe post-terminator tokens (extractors filter on `t.startswith("-")`
+    # which silently drops `--`).
+    pytest.param(
+        "az account show -- storage blob upload -f /etc/passwd",
+        id="az-terminator-bypass",
+    ),
+    pytest.param(
+        "kubectl get pods -- delete deployment myapp",
+        id="kubectl-terminator-bypass",
+    ),
+    pytest.param(
+        "gcloud projects list -- iam policy bindings add",
+        id="gcloud-terminator-bypass",
+    ),
+    pytest.param(
+        "kubectl auth can-i -- delete pods",
+        id="kubectl-multi-positional-terminator-bypass",
+    ),
+    pytest.param(
+        "gcloud auth list -- compute instances create vm",
+        id="gcloud-track-prefix-after-terminator",
+    ),
 ]
 
 

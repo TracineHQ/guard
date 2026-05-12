@@ -3080,6 +3080,18 @@ def _is_admin_default_deny(normalized: str, spec: AdminCliSpec) -> bool:
     pre_terminator = normalized.split(" -- ", 1)[0].split()
     if "--help" in pre_terminator or "-h" in pre_terminator:
         return False
+    # Truncate at `--` end-of-flags terminator before flag-stripping and verb
+    # extraction. Without this, the non-AWS verb extractors (`_az_verb`,
+    # `_gcloud_verb`, `_kubectl_verb`) filter on `t.startswith("-")` and
+    # silently drop `--`, merging post-terminator tokens into the verb tuple.
+    # That lets a safe leading verb mask an unsafe trailing one
+    # (`az account show -- storage blob upload`) or lets unsafe trailing tokens
+    # never get evaluated. Deny if anything follows `--` for an admin CLI: that
+    # shape has no legitimate read-only use.
+    if "--" in raw:
+        if raw.index("--") != len(raw) - 1:
+            return True
+        raw = raw[:-1]
     tokens = _strip_cloud_global_flags(raw, spec.global_value_flags, spec.global_bare_flags)
     if len(tokens) < 2:
         return False
