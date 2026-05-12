@@ -47,7 +47,7 @@ Standalone alternative (skip the catalog and install guard directly from this re
 `TracineHQ/guard` is the GitHub `owner/repo` shorthand for the marketplace source. `guard@tracinehq` is the `<plugin>@<marketplace>` reference Claude Code uses to install. To pin a specific tag:
 
 ```
-/plugin marketplace add TracineHQ/guard#v1.1.0
+/plugin marketplace add TracineHQ/guard#v1.1.1
 ```
 
 ### Requirements
