@@ -355,16 +355,16 @@ def test_trace_unknown_session_returns_zero(populated_log: Path) -> None:
 def test_test_denies_rm_rf_root() -> None:
     from guard.cli import cmd_test
 
-    payload, _ = cmd_test("rm -rf /")
-    decisions = {r["hook_id"]: r["decision"] for r in payload["results"]}
+    payload, _ = cmd_test(["rm -rf /"])
+    decisions = {r["hook_id"]: r["decision"] for r in payload["commands"][0]["results"]}
     assert decisions["guard.bash_command_validator"] == "deny"
 
 
 def test_test_allows_safe_command() -> None:
     from guard.cli import cmd_test
 
-    payload, _ = cmd_test("ls -la")
-    decisions = {r["hook_id"]: r["decision"] for r in payload["results"]}
+    payload, _ = cmd_test(["ls -la"])
+    decisions = {r["hook_id"]: r["decision"] for r in payload["commands"][0]["results"]}
     # Either allow or passthrough — both are non-deny outcomes.
     assert decisions["guard.bash_command_validator"] in {"allow", "passthrough"}
 
@@ -372,13 +372,34 @@ def test_test_allows_safe_command() -> None:
 def test_test_payload_structure() -> None:
     from guard.cli import cmd_test
 
-    payload, _ = cmd_test("ls")
-    assert payload["command"] == "ls"
-    assert isinstance(payload["results"], list)
-    hook_ids = {r["hook_id"] for r in payload["results"]}
+    payload, _ = cmd_test(["ls"])
+    assert isinstance(payload["commands"], list)
+    assert len(payload["commands"]) == 1
+    run = payload["commands"][0]
+    assert run["command"] == "ls"
+    assert isinstance(run["results"], list)
+    hook_ids = {r["hook_id"] for r in run["results"]}
     assert "guard.bash_command_validator" in hook_ids
     assert "guard.git_c_validator" in hook_ids
     assert "guard.commit_message_validator" in hook_ids
+
+
+def test_test_batch_multiple_commands() -> None:
+    """Multiple commands in one call return one element per command, in order."""
+    from guard.cli import cmd_test
+
+    payload, _ = cmd_test(["rm -rf /", "ls -la", "git status"])
+    assert len(payload["commands"]) == 3
+    assert [r["command"] for r in payload["commands"]] == [
+        "rm -rf /",
+        "ls -la",
+        "git status",
+    ]
+    # First command denies, others don't.
+    first = {r["hook_id"]: r["decision"] for r in payload["commands"][0]["results"]}
+    assert first["guard.bash_command_validator"] == "deny"
+    second = {r["hook_id"]: r["decision"] for r in payload["commands"][1]["results"]}
+    assert second["guard.bash_command_validator"] != "deny"
 
 
 def test_test_fans_out_to_every_bash_surface_hook() -> None:
@@ -392,8 +413,8 @@ def test_test_fans_out_to_every_bash_surface_hook() -> None:
     from guard.cli import cmd_test
     from guard.hooks._registry import bash_surface_hooks
 
-    payload, _ = cmd_test("ls")
-    actual_hook_ids = {r["hook_id"] for r in payload["results"]}
+    payload, _ = cmd_test(["ls"])
+    actual_hook_ids = {r["hook_id"] for r in payload["commands"][0]["results"]}
     expected_hook_ids = {h.id for h in bash_surface_hooks()}
     assert actual_hook_ids == expected_hook_ids, (
         f"cmd_test fan-out drift: missing={expected_hook_ids - actual_hook_ids}, "
@@ -402,21 +423,15 @@ def test_test_fans_out_to_every_bash_surface_hook() -> None:
 
 
 def test_test_routes_credential_check_for_tar_create() -> None:
-    """Regression: ``tar --create`` against a credential path must hit ``credential_check``.
-
-    The original gap surfaced from a coverage-audit cron run: ``guard test``
-    only wired bash_command_validator / git_c_validator / commit_message_validator
-    and silently passed through credential_check. After registry rewiring this
-    must return an ``ask`` (the hook's correct verdict) instead of passthrough.
-    """
+    """Regression: ``tar --create`` against a credential path must hit ``credential_check``."""
     from guard.cli import cmd_test
 
-    payload, _ = cmd_test("tar --create -f /tmp/x.tar ~/.aws/credentials")
-    decisions = {r["hook_id"]: r["decision"] for r in payload["results"]}
+    payload, _ = cmd_test(["tar --create -f /tmp/x.tar ~/.aws/credentials"])
+    decisions = {r["hook_id"]: r["decision"] for r in payload["commands"][0]["results"]}
     assert decisions.get("guard.credential_check") == "ask", (
         f"credential_check should ask on tar --create against an AWS "
         f"credential path; got {decisions.get('guard.credential_check')!r}. "
-        f"Full results: {payload['results']}"
+        f"Full results: {payload['commands'][0]['results']}"
     )
 
 
