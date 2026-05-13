@@ -4,6 +4,43 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [1.3.1] - 2026-05-13
+
+### Security
+
+- Closed `gh api graphql` mutation bypass: `gh api -X DELETE|PATCH|PUT`
+  was already denied via `bash.gh_api_destructive`, but
+  `gh api graphql -f query='mutation { ... }'` is a POST to `/graphql`
+  carrying a GraphQL mutation (`deleteIssue`, `archiveRepository`,
+  `transferOwnership`, etc.) that slipped past the verb filter. The
+  matcher now also denies any `gh api` invocation against the
+  `graphql` / `/graphql` endpoint when the `mutation` keyword appears
+  in the normalized command, and denies opaque-body shapes
+  (`-f query=@file.graphql`, `-f query=-`) against the same endpoint.
+  Read-only `query` / `subscription` shapes continue to pass through.
+
+### Changed
+
+- `bash.gh_api_destructive` deny reason now mentions both the raw
+  DELETE/PATCH/PUT shape and the graphql mutation shape, and
+  references concrete `gh repo delete` / `gh release delete`
+  alternatives instead of the prior "outside this session" wording.
+- `docs/JSONL_FORMAT.md` documents the optional `unknown_flags` field
+  emitted on `bash.admin_*` decisions.
+- `CHANGELOG.md` now carries an `## [Unreleased]` placeholder per
+  Keep-a-Changelog convention.
+
+### Tests
+
+- Added branch coverage for: `git --config-env` two-token form
+  (`git_c_validator`), empty-CLI entries in `GUARD_ADMIN_ALLOW_VERBS`,
+  the unknown-flag passthrough in `_strip_cloud_global_flags`, the
+  non-dict-item skip in `_validate_allow_commands`, the non-AWS
+  branches of `summary_for`, and the stdin-redirect path in
+  `_is_reader_with_var_arg`.
+
 ## [1.3.0] - 2026-05-12
 
 ### Security
@@ -518,6 +555,7 @@ behavior are stable for the 1.x line.
   CVE-2025-59356 by validating the literal command shape rather than
   trusting model-emitted intent.
 
+[1.3.1]: https://github.com/TracineHQ/guard/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/TracineHQ/guard/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/TracineHQ/guard/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/TracineHQ/guard/compare/v1.1.0...v1.1.1

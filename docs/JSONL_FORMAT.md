@@ -65,6 +65,7 @@ section is the contract. Consumers can opt-in by reading the env var directly
 | `command_excerpt` | string \| null | optional | truncated to 4096 chars; only set for Bash-related decisions |
 | `session_id` | string | yes | from Claude Code stdin |
 | `cwd` | string | optional | from Claude Code stdin |
+| `unknown_flags` | array of strings | optional | long flags an admin CLI verb matcher could not classify against the spec's `known_flags`; capped at 8 entries. Populated only on `bash.admin_*` decisions and when the offending segment is for a CLI with a known-flags spec (currently: AWS). |
 
 ### 3.1 Mode semantics
 
