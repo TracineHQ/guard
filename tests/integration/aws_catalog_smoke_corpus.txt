@@ -1,0 +1,47 @@
+#allow
+aws iam list-users
+aws ec2 describe-instances
+aws s3 ls
+aws s3api list-buckets
+aws sts get-caller-identity
+aws lambda list-functions
+aws dynamodb describe-table --table-name t
+aws cloudformation describe-stacks
+aws cloudwatch describe-alarms
+aws logs describe-log-groups
+aws ecs list-clusters
+aws eks list-clusters
+aws ecr describe-repositories
+aws route53 list-hosted-zones
+aws sns list-topics
+aws sqs list-queues
+aws kms describe-key --key-id k
+aws stepfunctions list-state-machines
+aws glue get-databases
+aws athena list-data-catalogs
+aws cognito-idp list-user-pools --max-results 10
+aws cognito-identity list-identity-pools --max-results 10
+
+#deny
+aws secretsmanager get-secret-value --secret-id s
+aws ssm get-parameter --name p --with-decryption
+aws kinesis get-records --shard-iterator x
+aws logs get-log-events --log-group-name g --log-stream-name s
+aws s3api get-object --bucket b --key k /tmp/x
+aws s3 cp s3://b/k /tmp/x
+aws ec2 get-password-data --instance-id i
+aws ec2 get-console-output --instance-id i
+aws lambda get-function --function-name fn
+aws eks get-token --cluster-name c
+aws cognito-identity get-credentials-for-identity --identity-id i
+aws sts get-session-token --duration-seconds 900
+aws s3 presign s3://b/k --expires-in 604800
+
+#override aws:logs.tail
+aws logs tail my-log-group
+
+#override aws:dynamodb.scan
+aws dynamodb scan --table-name t
+
+#override aws:ssm.get-parameter
+aws ssm get-parameter --name p --with-decryption

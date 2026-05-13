@@ -1,0 +1,18 @@
+rules:
+  - id: no-prefix-predicate-in-readonly
+    languages: [python]
+    severity: ERROR
+    message: >
+      .startswith() used inside the read-only predicate $FUNC.
+      Prefix predicates are a known bypass class
+      (see docs/plan/strict-aws-allowlist/spec.md and SECURITY.md).
+      Replace with an explicit verb-tuple allowlist entry in
+      _AWS_READ_ONLY_VERBS_BY_SERVICE.
+    patterns:
+      - pattern-inside: |
+          def $FUNC(...):
+              ...
+      - metavariable-regex:
+          metavariable: $FUNC
+          regex: .*(read_only|readonly).*
+      - pattern: $X.startswith(...)

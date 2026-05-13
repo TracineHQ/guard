@@ -30,3 +30,7 @@ test-e2e:
 
 test-cov:
     uv run pytest --cov=src/guard --cov-report=term-missing
+
+# Run semgrep regression rules locally.
+semgrep:
+    uv run --with semgrep semgrep scan --error --config .semgrep/rules/ src/guard/hooks/

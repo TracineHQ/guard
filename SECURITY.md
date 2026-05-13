@@ -2,12 +2,14 @@
 
 ## Supported versions
 
-The latest minor release receives security fixes. The v1.1.x line is the
+The latest minor release receives security fixes. The v1.3.x line is the
 current supported series.
 
 | Version | Supported |
 |---|---|
-| 1.1.x | yes |
+| 1.3.x | yes |
+| 1.2.x | no (yanked: superseded by 1.3.0 — fixes AWS admin allowlist bypass) |
+| 1.1.x | no |
 | 1.0.x | no (missing `bash.admin_default_deny`) |
 | < 1.0 | no |
 
@@ -48,12 +50,110 @@ The validators are written with that in mind:
 - Path operations restricted to read-only inside `~/.claude/`.
 - Regex compiled with no nested quantifiers (ReDoS resistance).
 - Cloud admin CLIs (`aws`, `gcloud`, `az`, `kubectl`, `launchctl`) are
-  **default-deny**: only verbs on the read-only allowlist
-  (`describe-*`, `list-*`, `get-*` and curated equivalents) pass. Three CRIT
-  IAM escalation bypasses (`aws iam attach-user-policy`,
-  `az role assignment create`, `gcloud projects add-iam-policy-binding`)
-  motivated this flip from verb-denylist to default-deny. Override paths:
+  **default-deny**: only verbs on the read-only allowlist pass. v1.3.0
+  replaces the previous `describe-*`/`list-*`/`get-*` prefix shortcut with
+  an explicit `(service, verb)` catalog for `aws` (see
+  [AWS allow/deny policy](#aws-allowdeny-policy) below). Override paths:
   `allow_commands`, `disable_rules`, `GUARD_ADMIN_ALLOW_VERBS=<cli>:<verb.path>`.
+
+## AWS allow/deny policy
+
+Guard treats `aws` commands like any other admin CLI: the matcher
+checks `(service, verb)` against a curated read-only allowlist. The
+v1.2 implementation used a prefix shortcut (any `describe-*`,
+`list-*`, `get-*` verb was treated as read) which let dangerous
+verbs through. v1.3.0 replaces that shortcut with an explicit
+catalog.
+
+### Decision tree
+
+For `aws <service> <verb> [...]`:
+
+1. If the command contains an ALWAYS_DENY shape (pipe-to-shell,
+   glob-head, redirect to a block device), it is denied
+   regardless.
+2. If `(service, verb)` appears in `GUARD_ADMIN_ALLOW_VERBS`, it
+   is allowed.
+3. If `(service, verb)` is in the read-only catalog
+   (`_AWS_READ_ONLY_VERBS_BY_SERVICE` in
+   `src/guard/hooks/_admin_specs.py`), it is allowed.
+4. Otherwise it is denied.
+
+### What gets excluded from the catalog
+
+Verbs that match the safe prefix pattern but emit credential or
+content material are deliberately omitted, including:
+
+- `secretsmanager get-secret-value` / `batch-get-secret-value`
+  (decrypted secret material)
+- `ssm get-parameter` / `get-parameters` / `get-parameters-by-path`
+  / `get-parameter-history` (SSM SecureString values; SSM String
+  parameters are also covered)
+- `ssm get-command-invocation` (stdout/stderr of remote execution)
+- `kinesis get-records` (stream payload)
+- `logs get-log-events` / `filter-log-events` / `get-query-results`
+  / `start-live-tail` / `tail` (log content; often contains tokens)
+- `s3api get-object` (object body content)
+- `s3 presign` (issues credential-bearing presigned URL)
+- `cognito-identity get-credentials-for-identity` /
+  `get-open-id-token*` (federated credentials)
+- `cognito-idp get-tokens-from-refresh-token` (auth tokens)
+- `sts get-session-token` / `get-federation-token` /
+  `assume-role*` (credential issuance)
+- `ecr get-login-password` / `get-authorization-token` /
+  `batch-get-image` (Docker registry creds + image content)
+- `eks get-token` (cluster auth token)
+- `lambda get-function` (presigned source-code URL)
+- `ec2 get-password-data` (encrypted Windows admin password)
+- `ec2 get-console-output` / `get-console-screenshot`
+- `sqs receive-message` (queue message body)
+- `apigateway get-api-key[s]` (actual API key values)
+- `athena get-query-results` / `cloudtrail get-query-results`
+- `glue get-connection[s]` (embedded connection credentials)
+- `stepfunctions get-execution-history` (step I/O)
+- `dynamodb scan` / `query` / `get-item` / `batch-get-item`
+- `rds download-db-log-file-portion` /
+  `generate-db-auth-token`
+- `iam get-credential-report` / `get-ssh-public-key`
+
+### Extending the catalog
+
+If you need a verb that is not in the catalog, the supported path is
+the env-variable override:
+
+```bash
+export GUARD_ADMIN_ALLOW_VERBS="aws:kinesis.get-records,aws:emr.list-clusters"
+```
+
+The format is `<cli>:<service>.<verb>`, comma-separated. The
+override is read at hook-execution time and rescues a single
+`(service, verb)` tuple.
+
+For a permanent addition that other Guard users will benefit from,
+open a PR adding the tuple to
+`_AWS_READ_ONLY_VERBS_BY_SERVICE[<service>]` in
+`src/guard/hooks/_admin_specs.py`.
+
+### Catalog freshness
+
+The AWS verb catalog lags new AWS API additions. If you hit a deny on a
+legitimate read verb not yet in the catalog, add it to
+`GUARD_ADMIN_ALLOW_VERBS` and (optionally) open an issue at
+<https://github.com/TracineHQ/guard>.
+
+### Migrating from v1.2
+
+Twenty-three AWS verbs previously allowed under v1.2's prefix predicate or
+explicit carve-out now deny by default in v1.3. The most impactful
+allow→deny transitions are `aws logs tail`, `aws logs filter-log-events`,
+`aws dynamodb scan` / `query` / `batch-get-item`, `aws rds
+generate-db-auth-token`, `aws ssm get-command-invocation`, and the
+secret/credential-emitting `get-*` verbs (`secretsmanager`,
+`ssm --with-decryption`, `kinesis`, `s3api`, `cognito-*`, `lambda
+get-function`, `ec2 get-password-data`, `ec2 get-console-*`, `apigateway
+get-api-key --include-value`, `sqs receive-message`, `stepfunctions
+get-execution-history`, `eks get-token`). If your workflow needs one of
+these, add it to `GUARD_ADMIN_ALLOW_VERBS` before starting the session.
 
 ## CVE-2025-59356 reference
 

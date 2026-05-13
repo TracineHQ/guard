@@ -1893,7 +1893,13 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         "DNS-tunnel candidate (ping/dig/host/nslookup with a DNS label > 50 "
         "chars — likely encoded data). Use plain hostnames or refuse."
     ),
-    _SYNTH_ADMIN_DEFAULT_DENY: "Admin CLI command not on read-only allowlist.",
+    _SYNTH_ADMIN_DEFAULT_DENY: (
+        "Admin CLI command not on the read-only allowlist; Guard permits only"
+        " non-destructive read/list/describe subcommands for admin CLIs"
+        " (aws, gcloud, az, kubectl, launchctl). Run the command directly in a"
+        " terminal you control, or extend the allowlist via"
+        " GUARD_ADMIN_ALLOW_VERBS for one-off exceptions."
+    ),
 }
 
 
@@ -1999,22 +2005,34 @@ def _has_var_expanded_head(normalized: str) -> bool:
     return bool(_VAR_HEAD_RE.match(tokens[0]))
 
 
-def _is_shell_wrapper_invocation(segment: str) -> bool:
-    """Return True if any token sequence in ``segment`` matches ``<shell> -c``.
+_HEREDOC_RE = re.compile(r"^<<-?")
 
-    The mere presence of a shell wrapper with a ``-c``-style script body is
-    denied in agent contexts: the script body is attacker-controlled and the
-    shell silently re-interprets quoting / expansion / pipelines that the
-    static validator cannot reason about. Walks all tokens so wrappers buried
-    behind ``sudo`` / ``script /dev/null`` / ``time`` etc. are still caught.
+
+def _is_shell_wrapper_invocation(segment: str) -> bool:
+    """Return True if any token sequence in ``segment`` matches a shell-wrapper.
+
+    Matches ``<shell> -c`` or ``<shell> <<DELIM`` (heredoc).
+
+    Both shapes hand an attacker-controlled script body to the shell:
+    - ``bash -c '...'`` -- inline -c payload
+    - ``bash <<EOF ... EOF`` -- heredoc payload (split_pipeline sees the first
+      line ``bash <<EOF`` as a standalone segment)
+
+    Denied in agent contexts because the body is not statically evaluable.
+    Walks all tokens so wrappers buried behind ``sudo`` / ``time`` etc. are
+    still caught.
     """
     tokens = _shlex_tokens(segment)
     for i, tok in enumerate(tokens):
         if _basename(tok) in DANGEROUS_SHELL_WRAPPERS:
-            # Look ahead for a -c-style flag among the next few tokens (a
-            # shell wrapper followed by a -c flag is the bypass).
+            # Look ahead for a -c-style flag or heredoc redirect among the
+            # next few tokens.
             for j in range(i + 1, min(i + 4, len(tokens))):
                 if _SHELL_C_FLAGS_RE.match(tokens[j]):
+                    return True
+                # Heredoc: ``<<DELIM`` (fused) or ``<<`` followed by a
+                # delimiter token, including the strip-tabs variant ``<<-``.
+                if _HEREDOC_RE.match(tokens[j]):
                     return True
                 if not tokens[j].startswith("-"):
                     break
@@ -3135,7 +3153,8 @@ def _admin_deny_body(cli_name: str, verb_tuple: tuple[str, ...]) -> str:
         f"Admin CLI command not on the read-only allowlist. "
         f"{cli_name} {verb_path} is not in the read-only set. "
         f"Per-verb override: GUARD_ADMIN_ALLOW_VERBS={cli_name}:{dot_verb} "
-        f"Read-only verbs for {cli_name}: {summary}"
+        f"Read-only verbs for {cli_name}: {summary} "
+        f"add {cli_name}:{dot_verb} to GUARD_ADMIN_ALLOW_VERBS to override."
     )
 
 

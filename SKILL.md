@@ -21,9 +21,11 @@ authoritative references. Quick map:
   dangerous env-var sinks (`GIT_SSH_COMMAND`, `LD_PRELOAD`, etc.); pipe-to-shell
   (`curl ... | sh`); credential leaks (`gh auth token`, `aws sts get-session-token`);
   **admin-CLI default-deny** for `aws`, `gcloud`, `az`, `kubectl`, `launchctl` —
-  only read-only verbs (`describe-*`, `list-*`, `get-*`, `kubectl get`, etc.)
-  pass; everything else denies with `bash.admin_default_deny`. Override per-command
-  via `allow_commands`, per-rule via `disable_rules`, or per-verb via
+  only verbs whose `(service, verb)` tuple is in the read-only catalog pass;
+  everything else denies with `bash.admin_default_deny`. AWS uses the
+  strict-allowlist model (no prefix shortcut); see SECURITY.md for the
+  decision tree. Override per-command via `allow_commands`, per-rule via
+  `disable_rules`, or per-verb via
   `GUARD_ADMIN_ALLOW_VERBS=aws:ec2.run-instances,gcloud:functions.deploy`.
 - `git_c_validator` — `git -c core.hooksPath=...` and `core.attributesFile=...`
   denied regardless of value; `git -c alias.x='!cmd'` and other config-exec
