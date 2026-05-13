@@ -1717,8 +1717,11 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         "import-path hijack sinks; refuse to forward them to a subprocess."
     ),
     _SYNTH_WRAPPER_STACKING_DENY: (
-        "stacked command wrappers exceed allowed depth (3); split into "
-        "multiple commands or simplify the invocation."
+        "Wrapper-stacking depth exceeded (limit: 3). Each additional shell "
+        "wrapper (e.g. `bash -c \"sudo -- sh -c '...'\"`) adds an "
+        "uninspectable eval layer that defeats static analysis of the inner "
+        "payload. Emit the inner command directly without nested shell "
+        "wrappers."
     ),
     _SYNTH_PIP_INSTALL_URL_DENY: (
         "pip install with a URL / VCS / file source (https://, http://, "
@@ -1763,19 +1766,20 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         "(`~/.ssh/authorized_keys`, `~/.bashrc`, `/etc/sudoers`, "
         "`/etc/profile.d/`, `/usr/local/bin/`, `~/Library/LaunchAgents/`, "
         "etc.). These are persistence and privilege-escalation surfaces. "
-        "Edit the file directly via the Edit tool with explicit intent, or "
-        "run the write from a controlled terminal outside this session."
+        "Edit the file directly via the Edit tool with explicit intent."
     ),
     _SYNTH_PERSISTENCE_DENY: (
         "Persistence command (`crontab`, `at`, `systemctl enable|start|mask`, "
         "`launchctl load|bootstrap|submit`, `systemd-run`, `visudo`, "
         "`defaults write …loginwindow…Hook`). Each schedules or installs "
-        "code that runs without further agent action. Install the unit "
-        "from a controlled terminal so the artifact is auditable."
+        "code that runs without further agent action. Persistence belongs "
+        "in deployment tooling (systemd units, launchd plists committed to "
+        "config management), not ad-hoc shell from an agent."
     ),
     _SYNTH_CHMOD_SETUID_DENY: (
-        "chmod setting setuid (4xxx, u+s, +s) or setgid (2xxx, g+s) bit. "
-        "Creates a privilege-escalation primitive."
+        "chmod setting setuid (4xxx / u+s) or setgid (2xxx / g+s) lets any "
+        "user execute the file as its owner -- a privilege-escalation vector "
+        "an agent should not introduce. Set permissions without the s-bit."
     ),
     _SYNTH_CHMOD_SENSITIVE_TARGET_DENY: (
         "chmod with permissive group/other bits against a sensitive path "
@@ -1900,8 +1904,10 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         "(``../scratch``) or ``/tmp/wt`` instead."
     ),
     _SYNTH_DNS_EXFIL_DENY: (
-        "DNS-tunnel candidate (ping/dig/host/nslookup with a DNS label > 50 "
-        "chars — likely encoded data). Use plain hostnames or refuse."
+        "DNS-tunnel candidate: ping/dig/host/nslookup with a DNS label "
+        "longer than 50 characters is a common data-exfiltration pattern "
+        "(base64- or hex-encoded data in subdomains). Use an explicit short "
+        "hostname."
     ),
     _SYNTH_ADMIN_DEFAULT_DENY: (
         "Admin CLI command not on the read-only allowlist; Guard permits only"
@@ -1912,19 +1918,21 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
     ),
     _SYNTH_ADMIN_SENSITIVE_ENV: (
         "Sensitive admin-CLI env-var override detected. This redirects the"
-        " request destination, swaps credentials, or disables TLS verification;"
-        " remove the env-var prefix or run from a controlled terminal."
+        " request destination, swaps credentials, or disables TLS"
+        " verification. Remove the env-var prefix; the inline override"
+        " bypasses Guard's per-verb allowlist."
     ),
     _SYNTH_ADMIN_FORBIDDEN_SUBCOMMAND: (
         "Admin CLI subcommand bypasses the read-only allowlist (e.g. `az rest`"
         " issues arbitrary REST calls; `gcloud auth activate-service-account`"
-        " swaps credentials). Use the explicit subcommand instead, or run from"
-        " a controlled terminal."
+        " swaps credentials). Use an explicit allowlisted read subcommand"
+        " instead."
     ),
     _SYNTH_ADMIN_FORBIDDEN_FLAG: (
         "Admin CLI flag redirects request destination, swaps credentials,"
-        " disables TLS, or impersonates identity. No good reason in an agent"
-        " context; remove the flag or run from a controlled terminal."
+        " disables TLS, or impersonates identity. These flags have no safe"
+        " use on an allowlisted read verb in an agent context. Remove the"
+        " flag."
     ),
     _SYNTH_ADMIN_UNKNOWN_FLAG_AUTONOMOUS: (
         "Unknown flag on admin CLI in autonomous mode. Unrecognized flags may"
@@ -3971,8 +3979,8 @@ def _match_admin_forbidden_layers(
             body = (
                 f"Sensitive admin-CLI env-var override: `{var}`. This redirects"
                 " the request destination, swaps credentials, or disables TLS"
-                " verification; remove the env-var prefix or run from a"
-                " controlled terminal."
+                " verification. Remove the env-var prefix; the inline override"
+                " bypasses Guard's per-verb allowlist."
             )
             return (
                 _SYNTH_ADMIN_SENSITIVE_ENV,
@@ -4003,8 +4011,8 @@ def _match_admin_forbidden_layers(
                 f"Admin CLI subcommand `{matched_spec.cli_name} {path_str}`"
                 " bypasses the read-only allowlist (e.g. `az rest` issues"
                 " arbitrary REST calls; `gcloud auth activate-service-account`"
-                " swaps credentials). Use the explicit subcommand instead, or"
-                " run from a controlled terminal."
+                " swaps credentials). Use an explicit allowlisted read"
+                " subcommand instead."
             )
             return (
                 _SYNTH_ADMIN_FORBIDDEN_SUBCOMMAND,
@@ -4018,9 +4026,9 @@ def _match_admin_forbidden_layers(
         if flag is not None:
             body = (
                 f"Admin CLI flag `{flag}` redirects request destination, swaps"
-                " credentials, disables TLS, or impersonates identity. No good"
-                " reason in an agent context; remove the flag or run from a"
-                " controlled terminal."
+                " credentials, disables TLS, or impersonates identity. These"
+                " flags have no safe use on an allowlisted read verb in an"
+                " agent context. Remove the flag."
             )
             return (
                 _SYNTH_ADMIN_FORBIDDEN_FLAG,

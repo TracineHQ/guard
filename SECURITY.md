@@ -180,12 +180,13 @@ walks tokens after the CLI binary and classifies each `--flag`:
      `--credential-file-override`, `--access-token-file`,
      `--configuration`, `--account`, `--log-http`, `--flags-file`
    - az: `--debug` (leaks bearer token; CVE-2023-36052)
-   - kubectl: `--as`, `--as-group`, `--as-uid` (CRIT — RBAC
-     impersonation), `--server` / `-s`, `--cluster`,
-     `--insecure-skip-tls-verify`, `--certificate-authority`,
-     `--token`, `--client-certificate`, `--client-key`,
-     `--username`, `--password`, `--kubeconfig`, `--context`,
-     `--user`, `-v` / `--v` (verbose HTTP dumps bearer tokens)
+   - kubectl: `--as`, `--as-group`, `--as-uid`, `--as-user-extra`
+     (CRIT — RBAC impersonation), `--server` / `-s`, `--cluster`,
+     `--insecure-skip-tls-verify`, `--tls-server-name`,
+     `--certificate-authority`, `--token`, `--client-certificate`,
+     `--client-key`, `--username`, `--password`, `--kubeconfig`,
+     `--context`, `--user`, `-v` / `--v` (verbose HTTP dumps
+     bearer tokens)
 2. **Known-safe** — stripped before verb extraction (`--region`,
    `--output`, `--query`, `--max-results`, paging tokens).
 3. **Unknown** — long `--*` flags on neither list. Logged to the

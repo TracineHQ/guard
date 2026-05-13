@@ -1466,6 +1466,12 @@ _AWS_SENSITIVE_ENV_VARS: frozenset[str] = frozenset(
         "AWS_SHARED_CREDENTIALS_FILE",
         "AWS_CONFIG_FILE",
         "AWS_PROFILE",
+        # Inline-assignment of literal credentials. Lets an attacker run an
+        # allowlisted read verb against a foreign account without touching
+        # the local profile chain.
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
     }
 )
 
