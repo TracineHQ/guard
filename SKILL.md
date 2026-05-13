@@ -54,6 +54,7 @@ authoritative references. Quick map:
 | `GUARD_DEBUG` | Set to `1` to emit per-hook debug to stderr | unset |
 | `GUARD_DATA_DIR` | Override the directory containing guard's data files | `~/.claude/guard` |
 | `GUARD_PROTECTED_EXTRA` | Comma-separated extra patterns for `protected_files`. See below. | unset |
+| `GUARD_ADMIN_ALLOW_VERBS` | Per-verb allow for `bash.admin_default_deny`; format `<cli>:<service>.<verb>,<cli>:<service>.<verb>` (e.g. `aws:logs.tail,gcloud:functions.deploy`) | unset |
 
 ## Extending protected_files patterns
 
@@ -145,7 +146,7 @@ pipx install tracine-guard
 Then:
 - `guard status` — log location and last record summary.
 - `guard noisy --since 24h` — top rules by hit count in a time window.
-- `guard silent --since 7d` — rules that fired historically but not recently.
+- `guard silent --since 30d` — rules that fired historically but not recently.
 - `guard trace <session_id>` — chronological dump for one session.
 
 Without the CLI, the log is plain JSONL and works with anything that reads stdin: `tail -f ~/.claude/guard-decisions.jsonl | jq`.

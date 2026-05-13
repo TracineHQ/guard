@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TracineHQ contributors
-# ruff: noqa: INP001
 """Unit tests for _admin_deny_body override-hint interpolation (Task 1.5)."""
 
 from __future__ import annotations

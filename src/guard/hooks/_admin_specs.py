@@ -43,6 +43,11 @@ class AdminCliSpec:
     global_value_flags: frozenset[str] = frozenset()
     global_bare_flags: frozenset[str] = frozenset()
     track_prefixes: frozenset[str] = frozenset()
+    # v1.3.0 forbidden-flag layer (all default-empty for back-compat)
+    forbidden_flags: frozenset[str] = frozenset()
+    forbidden_subcommands: frozenset[tuple[str, ...]] = frozenset()
+    known_flags: frozenset[str] = frozenset()
+    sensitive_env_vars: frozenset[str] = frozenset()
 
 
 _GCLOUD_READ_ONLY_VERBS: frozenset[tuple[str, ...]] = frozenset(
@@ -1426,10 +1431,275 @@ def _launchctl_verb(tokens: list[str]) -> tuple[str, ...]:
     return (tokens[1],) if len(tokens) > 1 else ()
 
 
+# ---------------------------------------------------------------------------
+# v1.3.0 forbidden-flag layer constants
+# ---------------------------------------------------------------------------
+
+# AWS
+_AWS_FORBIDDEN_FLAGS: frozenset[str] = frozenset(
+    {
+        # CRIT -- endpoint redirect / credential delivery to attacker host
+        "--endpoint-url",
+        # CRIT -- disables TLS, enables MITM
+        "--no-verify-ssl",
+        # HIGH -- swaps CA bundle; stealth MITM
+        "--ca-bundle",
+        # HIGH -- strips SigV4 signing; loses CloudTrail attribution
+        "--no-sign-request",
+        # HIGH -- profile switching; credential escape hatch
+        "--profile",
+        # HIGH -- debug dumps Authorization header + response secrets to stderr
+        "--debug",
+        # HIGH -- overrides entire request body from attacker-controlled file
+        "--cli-input-json",
+        "--cli-input-yaml",
+    }
+)
+
+_AWS_SENSITIVE_ENV_VARS: frozenset[str] = frozenset(
+    {
+        "AWS_ENDPOINT_URL",
+        "AWS_ENDPOINT_URL_*",  # service-specific overrides -- prefix match
+        "AWS_CA_BUNDLE",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "AWS_SHARED_CREDENTIALS_FILE",
+        "AWS_CONFIG_FILE",
+        "AWS_PROFILE",
+    }
+)
+
+# Known-safe AWS global flags (value-consuming: each consumes next token).
+# These are safe to strip before verb extraction.
+_AWS_KNOWN_FLAGS: frozenset[str] = frozenset(
+    {
+        "--region",
+        "--output",
+        "--query",
+        "--color",
+        "--cli-binary-format",
+        "--page-size",
+        "--cli-read-timeout",
+        "--cli-connect-timeout",
+        "--no-paginate",
+        "--no-cli-pager",
+        "--no-cli-auto-prompt",
+        "--cli-error-format",
+        "--generate-cli-skeleton",
+        "--max-results",
+        "--starting-token",
+    }
+)
+
+# gcloud
+_GCLOUD_FORBIDDEN_FLAGS: frozenset[str] = frozenset(
+    {
+        # CRIT -- identity switching via service account impersonation
+        "--impersonate-service-account",
+        # CRIT -- credential file override; replaces auth context entirely
+        "--credential-file-override",
+        # CRIT -- bearer token injection from file
+        "--access-token-file",
+        # CRIT -- switches named configuration; bundles all other overrides
+        "--configuration",
+        # HIGH -- switches active account
+        "--account",
+        # HIGH -- dumps Authorization: Bearer token to stderr/logs
+        "--log-http",
+        # HIGH -- loads flags from file, bypassing flag-name checks
+        "--flags-file",
+    }
+)
+
+_GCLOUD_FORBIDDEN_SUBCOMMANDS: frozenset[tuple[str, ...]] = frozenset(
+    {
+        ("auth", "activate-service-account"),
+        ("auth", "login"),
+        ("config", "set", "auth/credential_file_override"),
+    }
+)
+
+_GCLOUD_SENSITIVE_ENV_VARS: frozenset[str] = frozenset(
+    {
+        "CLOUDSDK_API_ENDPOINT_OVERRIDES_*",  # prefix match
+        "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
+        "CLOUDSDK_CORE_PROJECT",
+        "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE",
+    }
+)
+
+_GCLOUD_KNOWN_FLAGS: frozenset[str] = frozenset(
+    {
+        "--project",
+        "--format",
+        "--verbosity",
+        "--quiet",
+        "-q",
+        "--filter",
+        "--limit",
+        "--page-size",
+        "--sort-by",
+        "--uri",
+        "--async",
+        "--billing-project",
+        "--quota-project",
+        "--no-user-output-enabled",
+        "--user-output-enabled",
+    }
+)
+
+# az
+_AZ_FORBIDDEN_FLAGS: frozenset[str] = frozenset(
+    {
+        # HIGH -- CVE-2023-36052: leaks bearer token to logs
+        "--debug",
+    }
+)
+
+_AZ_FORBIDDEN_SUBCOMMANDS: frozenset[tuple[str, ...]] = frozenset(
+    {
+        ("rest",),  # full allowlist bypass
+        ("cloud", "register"),
+        ("cloud", "set"),
+        ("cloud", "update"),
+        ("login", "--service-principal"),  # subcommand+flag combo
+        ("extension", "add"),  # --source <URL> is RCE
+        ("config", "set"),  # persistent config injection
+        ("logout",),  # auth-state mutation
+    }
+)
+
+_AZ_SENSITIVE_ENV_VARS: frozenset[str] = frozenset(
+    {
+        "AZURE_CONFIG_DIR",
+        "AZURE_CLI_DISABLE_CONNECTION_VERIFICATION",
+        "REQUESTS_CA_BUNDLE",
+    }
+)
+
+_AZ_KNOWN_FLAGS: frozenset[str] = frozenset(
+    {
+        "--subscription",
+        "--output",
+        "-o",
+        "--query",
+        "--verbose",
+        "--only-show-errors",
+        "--resource-group",
+        "-g",
+        "--name",
+        "-n",
+        "--location",
+        "-l",
+        "--no-wait",
+        "--yes",
+        "-y",
+    }
+)
+
+# kubectl: DENY-class flags moved OUT of the strip lists
+_KUBECTL_FORBIDDEN_FLAGS: frozenset[str] = frozenset(
+    {
+        # CRIT -- RBAC impersonation
+        "--as",
+        "--as-group",
+        "--as-uid",
+        "--as-user-extra",
+        # CRIT -- cluster redirect
+        "--server",
+        "-s",
+        "--cluster",
+        # CRIT -- TLS weakening
+        "--insecure-skip-tls-verify",
+        "--certificate-authority",
+        "--tls-server-name",
+        # CRIT -- credential swap
+        "--token",
+        "--client-certificate",
+        "--client-key",
+        "--kubeconfig",
+        # HIGH -- account/context switches
+        "--context",
+        "--user",
+        "--username",
+        "--password",
+        # MED -- verbosity token leakage (treat all as forbidden in agent context)
+        "-v",
+        "--v",
+    }
+)
+
+_KUBECTL_KNOWN_FLAGS: frozenset[str] = frozenset(
+    {
+        "--namespace",
+        "-n",
+        "--output",
+        "-o",
+        "--selector",
+        "-l",
+        "--field-selector",
+        "--request-timeout",
+        "--all-namespaces",
+        "-A",
+        "--show-labels",
+        "--sort-by",
+        "--no-headers",
+        "--ignore-not-found",
+        "--warnings-as-errors",
+        "--watch",
+        "-w",
+        "--watch-only",
+    }
+)
+
+# Safe kubectl global value flags for stripping before verb extraction.
+# CRITICAL: DENY-class flags are NOT in this list -- they go to forbidden_flags.
+_KUBECTL_GLOBAL_VALUE_FLAGS: frozenset[str] = frozenset(
+    {
+        "--namespace",
+        "-n",
+        "--request-timeout",
+        "--cache-dir",
+    }
+)
+
+_KUBECTL_GLOBAL_BARE_FLAGS: frozenset[str] = frozenset(
+    {
+        "--warnings-as-errors",
+    }
+)
+
 _AWS_SPEC = AdminCliSpec(
     cli_name="aws",
     read_only_verbs=_AWS_READ_ONLY_VERBS,
     verb_extractor=_aws_verb,
+    # Safe value-consuming global flags (stripped before verb extraction)
+    global_value_flags=frozenset(
+        {
+            "--region",
+            "--output",
+            "--query",
+            "--color",
+            "--cli-binary-format",
+            "--page-size",
+            "--cli-read-timeout",
+            "--cli-connect-timeout",
+            "--max-results",
+            "--starting-token",
+        }
+    ),
+    global_bare_flags=frozenset(
+        {
+            "--no-paginate",
+            "--no-cli-pager",
+            "--no-cli-auto-prompt",
+            "--cli-error-format",
+            "--",
+        }
+    ),
+    forbidden_flags=_AWS_FORBIDDEN_FLAGS,
+    sensitive_env_vars=_AWS_SENSITIVE_ENV_VARS,
+    known_flags=_AWS_KNOWN_FLAGS,
 )
 
 _GCLOUD_SPEC = AdminCliSpec(
@@ -1437,46 +1707,41 @@ _GCLOUD_SPEC = AdminCliSpec(
     read_only_verbs=_GCLOUD_READ_ONLY_VERBS,
     verb_extractor=_gcloud_verb,
     track_prefixes=frozenset({"alpha", "beta"}),
+    global_value_flags=frozenset(
+        {
+            "--project",
+            "--format",
+            "--verbosity",
+            "--billing-project",
+            "--quota-project",
+        }
+    ),
+    global_bare_flags=frozenset({"--quiet", "-q", "--help", "-h"}),
+    forbidden_flags=_GCLOUD_FORBIDDEN_FLAGS,
+    forbidden_subcommands=_GCLOUD_FORBIDDEN_SUBCOMMANDS,
+    sensitive_env_vars=_GCLOUD_SENSITIVE_ENV_VARS,
+    known_flags=_GCLOUD_KNOWN_FLAGS,
 )
 
 _AZ_SPEC = AdminCliSpec(
     cli_name="az",
     read_only_verbs=_AZ_READ_ONLY_VERBS,
     verb_extractor=_az_verb,
-)
-
-_KUBECTL_GLOBAL_VALUE_FLAGS: frozenset[str] = frozenset(
-    {
-        "--context",
-        "--kubeconfig",
-        "--cluster",
-        "--user",
-        "--namespace",
-        "-n",
-        "--server",
-        "-s",
-        "--token",
-        "--certificate-authority",
-        "--request-timeout",
-        "--as",
-        "--as-group",
-        "--as-uid",
-        "-v",
-        "--v",
-        "--client-certificate",
-        "--client-key",
-        "--tls-server-name",
-        "--cache-dir",
-        "--password",
-        "--username",
-    }
-)
-
-_KUBECTL_GLOBAL_BARE_FLAGS: frozenset[str] = frozenset(
-    {
-        "--insecure-skip-tls-verify",
-        "--warnings-as-errors",
-    }
+    global_value_flags=frozenset(
+        {
+            "--subscription",
+            "--output",
+            "-o",
+            "--query",
+            "--verbose",
+            "--only-show-errors",
+        }
+    ),
+    global_bare_flags=frozenset({"--help", "-h"}),
+    forbidden_flags=_AZ_FORBIDDEN_FLAGS,
+    forbidden_subcommands=_AZ_FORBIDDEN_SUBCOMMANDS,
+    sensitive_env_vars=_AZ_SENSITIVE_ENV_VARS,
+    known_flags=_AZ_KNOWN_FLAGS,
 )
 
 _KUBECTL_SPEC = AdminCliSpec(
@@ -1485,6 +1750,8 @@ _KUBECTL_SPEC = AdminCliSpec(
     verb_extractor=_kubectl_verb,
     global_value_flags=_KUBECTL_GLOBAL_VALUE_FLAGS,
     global_bare_flags=_KUBECTL_GLOBAL_BARE_FLAGS,
+    forbidden_flags=_KUBECTL_FORBIDDEN_FLAGS,
+    known_flags=_KUBECTL_KNOWN_FLAGS,
 )
 
 _LAUNCHCTL_SPEC = AdminCliSpec(

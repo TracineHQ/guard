@@ -155,6 +155,93 @@ get-api-key --include-value`, `sqs receive-message`, `stepfunctions
 get-execution-history`, `eks get-token`). If your workflow needs one of
 these, add it to `GUARD_ADMIN_ALLOW_VERBS` before starting the session.
 
+## Admin CLI flag-level policy
+
+The verb catalog is a floor, not a ceiling. `(service, verb)` on the
+allowlist is necessary but not sufficient — flags can still escalate
+an allowed read verb into a credential leak (`--endpoint-url=evil`),
+RBAC impersonation (`kubectl --as=cluster-admin`), or MITM
+(`--no-verify-ssl`). v1.3.0 adds a flag-level policy on top of the
+verb catalog.
+
+### Three-tier flag handling
+
+For every admin CLI (`aws`, `gcloud`, `az`, `kubectl`), the matcher
+walks tokens after the CLI binary and classifies each `--flag`:
+
+1. **Forbidden** — DENY outright. Preempts the verb catalog. Flags
+   that redirect the request destination, disable TLS, swap
+   credentials, impersonate identity, or override the request body
+   entirely. Examples:
+   - AWS: `--endpoint-url`, `--ca-bundle`, `--no-verify-ssl`,
+     `--no-sign-request`, `--profile`, `--debug`,
+     `--cli-input-json`, `--cli-input-yaml`
+   - gcloud: `--impersonate-service-account`,
+     `--credential-file-override`, `--access-token-file`,
+     `--configuration`, `--account`, `--log-http`, `--flags-file`
+   - az: `--debug` (leaks bearer token; CVE-2023-36052)
+   - kubectl: `--as`, `--as-group`, `--as-uid` (CRIT — RBAC
+     impersonation), `--server` / `-s`, `--cluster`,
+     `--insecure-skip-tls-verify`, `--certificate-authority`,
+     `--token`, `--client-certificate`, `--client-key`,
+     `--username`, `--password`, `--kubeconfig`, `--context`,
+     `--user`, `-v` / `--v` (verbose HTTP dumps bearer tokens)
+2. **Known-safe** — stripped before verb extraction (`--region`,
+   `--output`, `--query`, `--max-results`, paging tokens).
+3. **Unknown** — long `--*` flags on neither list. Logged to the
+   JSONL audit record under `unknown_flags: [...]` (flag name only,
+   never the value; capped at 8). In autonomous mode
+   (`CLAUDE_AUTONOMOUS=1`), presence of any unknown flag escalates
+   an otherwise-allow to DENY via `bash.admin_unknown_flag_autonomous`.
+
+### Forbidden subcommands
+
+A few admin-CLI subcommands bypass the verb model entirely. These
+deny outright regardless of flags:
+
+- `az rest` — issues arbitrary REST calls
+- `az cloud register|set|update` — ARM endpoint MITM
+- `az extension add --source <URL>` — extension RCE
+- `az config set` — persistent config injection
+- `az login --service-principal` — credential capture
+- `gcloud auth activate-service-account` — credential swap
+- `gcloud auth login` — interactive credential capture
+
+### Sensitive env-var inline-assignment
+
+Env-vars set inline on the command line are semantically equivalent
+to forbidden flags and deny via `bash.admin_sensitive_env_override`:
+
+- `AWS_ENDPOINT_URL=evil aws ...`,
+  `AWS_ENDPOINT_URL_<SERVICE>=...`,
+  `AWS_CA_BUNDLE=`, `AWS_SHARED_CREDENTIALS_FILE=`,
+  `AWS_CONFIG_FILE=`, `AWS_PROFILE=`, `HTTPS_PROXY=`, `HTTP_PROXY=`
+- `AZURE_CONFIG_DIR=`, `AZURE_CLI_DISABLE_CONNECTION_VERIFICATION=`,
+  `REQUESTS_CA_BUNDLE=`
+- `CLOUDSDK_API_ENDPOINT_OVERRIDES_*=`,
+  `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=`,
+  `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE=`
+
+(Process-level env-vars exported in a parent shell are not detected
+— that's outside the hook's input. Inline assignments on the
+command line are.)
+
+### Unknown-flag telemetry
+
+Every admin-CLI allow logs unrecognized `--*` flags to the JSONL
+audit trail. The data informs the next hardening pass — frequent
+benign flags get promoted to known-safe; suspicious ones get
+promoted to forbidden. Flag names only; values never leak to logs
+(fused `--token=BEARER` is captured as `--token` only).
+
+### Why this design
+
+A strict per-`(service, verb)` allowlist catches "agent ran a write
+verb." It misses "agent ran an allowed read verb pointed at the
+wrong place." Both are the same security event (data exfil), just
+expressed in different parts of the argv. The flag-level policy
+closes that gap without sacrificing the verb catalog's clarity.
+
 ## CVE-2025-59356 reference
 
 Claude Code's hooks system was the subject of CVE-2025-59356, a hook-RCE

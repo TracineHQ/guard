@@ -101,6 +101,8 @@ CLOUD_ADMIN_DENY = [
         "gcloud auth list -- compute instances create vm",
         id="gcloud-track-prefix-after-terminator",
     ),
+    # forbidden flag denies (v1.3.0)
+    pytest.param("kubectl --context prod get pods", id="kubectl-context-flag-forbidden"),
 ]
 
 
@@ -148,7 +150,7 @@ CLOUD_ADMIN_ALLOW = [
     pytest.param("kubectl logs mypod", id="kubectl-logs"),
     pytest.param("kubectl auth can-i create pods", id="kubectl-auth-can-i"),
     pytest.param("kubectl config view", id="kubectl-config-view"),
-    pytest.param("kubectl --context prod get pods", id="kubectl-context-flag"),
+    # kubectl-context-flag moved to DENY: --context is now a forbidden flag
     pytest.param("kubectl -n kube-system get pods", id="kubectl-namespace-flag"),
     # launchctl read-only
     pytest.param("launchctl list", id="launchctl-list"),

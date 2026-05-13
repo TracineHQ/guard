@@ -144,7 +144,12 @@ def _get_admin_allow_verbs() -> dict[str, frozenset[tuple[str, ...]]]:
     return _ADMIN_ALLOW_VERBS_CACHE
 
 
-def _log_local(command: str, decision: str, reason: str) -> None:
+def _log_local(
+    command: str,
+    decision: str,
+    reason: str,
+    extra: dict[str, Any] | None = None,
+) -> None:
     """Append a decision row to the JSONL log. Best-effort, never raises.
 
     Thin wrapper that maps the local decision strings (``passthrough`` etc.)
@@ -161,6 +166,7 @@ def _log_local(command: str, decision: str, reason: str) -> None:
         command_excerpt=command,
         session_id=session_id,
         cwd=_REQUEST_CONTEXT["cwd"],
+        extra=extra,
     )
 
 
@@ -1665,6 +1671,10 @@ _SYNTH_GIT_FORCE_REFSPEC_DENY = "<git push +refspec force>"
 _SYNTH_GIT_SUBMODULE_ADD_DENY = "<git submodule add fetches arbitrary repo>"
 _SYNTH_GIT_WORKTREE_ADD_DENY = "<git worktree add path scoping>"
 _SYNTH_ADMIN_DEFAULT_DENY = "admin-default-deny"
+_SYNTH_ADMIN_SENSITIVE_ENV = "admin-sensitive-env"
+_SYNTH_ADMIN_FORBIDDEN_SUBCOMMAND = "admin-forbidden-subcommand"
+_SYNTH_ADMIN_FORBIDDEN_FLAG = "admin-forbidden-flag"
+_SYNTH_ADMIN_UNKNOWN_FLAG_AUTONOMOUS = "admin-unknown-flag-autonomous"
 
 _SYNTH_DENY_REASONS: dict[str, str] = {
     _SYNTH_INTERPRETER_DENY: (
@@ -1900,6 +1910,28 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         " terminal you control, or extend the allowlist via"
         " GUARD_ADMIN_ALLOW_VERBS for one-off exceptions."
     ),
+    _SYNTH_ADMIN_SENSITIVE_ENV: (
+        "Sensitive admin-CLI env-var override detected. This redirects the"
+        " request destination, swaps credentials, or disables TLS verification;"
+        " remove the env-var prefix or run from a controlled terminal."
+    ),
+    _SYNTH_ADMIN_FORBIDDEN_SUBCOMMAND: (
+        "Admin CLI subcommand bypasses the read-only allowlist (e.g. `az rest`"
+        " issues arbitrary REST calls; `gcloud auth activate-service-account`"
+        " swaps credentials). Use the explicit subcommand instead, or run from"
+        " a controlled terminal."
+    ),
+    _SYNTH_ADMIN_FORBIDDEN_FLAG: (
+        "Admin CLI flag redirects request destination, swaps credentials,"
+        " disables TLS, or impersonates identity. No good reason in an agent"
+        " context; remove the flag or run from a controlled terminal."
+    ),
+    _SYNTH_ADMIN_UNKNOWN_FLAG_AUTONOMOUS: (
+        "Unknown flag on admin CLI in autonomous mode. Unrecognized flags may"
+        " alter request destination, credentials, or output format in ways"
+        " guard cannot statically verify. Remove unknown flags or run"
+        " interactively."
+    ),
 }
 
 
@@ -2025,14 +2057,20 @@ def _is_shell_wrapper_invocation(segment: str) -> bool:
     tokens = _shlex_tokens(segment)
     for i, tok in enumerate(tokens):
         if _basename(tok) in DANGEROUS_SHELL_WRAPPERS:
-            # Look ahead for a -c-style flag or heredoc redirect among the
-            # next few tokens.
+            # Look ahead for a -c-style flag, heredoc redirect, or stdin-device
+            # path among the next few tokens.
             for j in range(i + 1, min(i + 4, len(tokens))):
                 if _SHELL_C_FLAGS_RE.match(tokens[j]):
                     return True
                 # Heredoc: ``<<DELIM`` (fused) or ``<<`` followed by a
                 # delimiter token, including the strip-tabs variant ``<<-``.
                 if _HEREDOC_RE.match(tokens[j]):
+                    return True
+                # Stdin-device path: ``bash /dev/stdin``, ``bash -``, etc.
+                # Do NOT break here -- a non-flag non-stdin token stops the
+                # lookahead below, but stdin-device paths look non-flag-ish and
+                # would otherwise break prematurely.
+                if _STDIN_DEVICE_RE.match(tokens[j]):
                     return True
                 if not tokens[j].startswith("-"):
                     break
@@ -3040,6 +3078,95 @@ _AZ_GLOBAL_VALUE_FLAGS = frozenset(
 )
 _AZ_GLOBAL_BARE_FLAGS = frozenset({"--help", "-h"})
 
+# Stdin-device path tokens recognized as shell-wrapper lookahead targets (F).
+_STDIN_DEVICE_RE = re.compile(r"^(?:-|/dev/stdin|/dev/fd/0|/proc/self/fd/0)$")
+
+# ---------------------------------------------------------------------------
+# v1.3.0 admin forbidden-flag helpers
+# ---------------------------------------------------------------------------
+
+_ENV_ASSIGN_RE = re.compile(r"^([A-Z_][A-Z0-9_]*)=")
+
+
+def _check_sensitive_env_prefix(segment: str, sensitive: frozenset[str]) -> str | None:
+    """Return the matched env var name if any leading inline-assignment token matches.
+
+    Walks leading ``VAR=value`` tokens (before the CLI binary) and checks each
+    var name against ``sensitive``.  Supports trailing ``*`` for prefix-match
+    (e.g. ``AWS_ENDPOINT_URL_*``).
+    """
+    tokens = segment.split()
+    for tok in tokens:
+        m = _ENV_ASSIGN_RE.match(tok)
+        if not m:
+            # Reached the CLI binary or a non-assignment token -- stop.
+            break
+        var_name = m.group(1)
+        for pattern in sensitive:
+            if pattern.endswith("*"):
+                prefix = pattern[:-1]
+                if var_name.startswith(prefix):
+                    return var_name
+            elif var_name == pattern:
+                return var_name
+    return None
+
+
+def _check_admin_forbidden_flag(spec: AdminCliSpec, tokens: list[str]) -> str | None:
+    """Return the first matched forbidden flag, or None.
+
+    Handles both space-separated (``--flag value``) and fused (``--flag=value``)
+    forms.
+    """
+    for tok in tokens:
+        flag = tok.split("=", 1)[0] if "=" in tok else tok
+        if flag in spec.forbidden_flags:
+            return flag
+    return None
+
+
+def _check_admin_forbidden_subcommand(
+    spec: AdminCliSpec, tokens: list[str]
+) -> tuple[str, ...] | None:
+    """Return the matched forbidden subcommand path (post-CLI tokens), or None.
+
+    Matches the leading non-flag positionals against each path in
+    ``spec.forbidden_subcommands``.
+    """
+    # Build the positional-only token sequence (skip the CLI head token).
+    positionals = [t for t in tokens[1:] if not t.startswith("-")]
+    for path in spec.forbidden_subcommands:
+        n = len(path)
+        if tuple(positionals[:n]) == path:
+            return path
+    return None
+
+
+def _collect_unknown_flags(spec: AdminCliSpec, tokens: list[str], cap: int = 8) -> list[str]:
+    """Return long-flag names not in known_flags or forbidden_flags, capped.
+
+    Only ``--*`` tokens are collected; fused ``--foo=bar`` emits ``--foo`` only
+    (value stripped to avoid secret leakage).  Short flags (``-n``) are skipped.
+    Deduplicates and caps at ``cap`` entries.
+    """
+    seen: list[str] = []
+    i = 0
+    while i < len(tokens) and len(seen) < cap:
+        tok = tokens[i]
+        if not tok.startswith("--"):
+            i += 1
+            continue
+        flag = tok.split("=", 1)[0]
+        if flag not in spec.known_flags and flag not in spec.forbidden_flags:
+            if flag not in seen:
+                seen.append(flag)
+        # Skip next token if it looks like a value (not a flag).
+        if "=" not in tok and i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
+            i += 2
+        else:
+            i += 1
+    return seen
+
 
 def _strip_cloud_global_flags(
     tokens: list[str],
@@ -3805,13 +3932,112 @@ _PER_FORM_MATCHERS: tuple[tuple[Callable[[str], bool], str, str], ...] = (
 )
 
 
+def _match_admin_forbidden_layers(
+    cand: str,
+) -> tuple[str, str, str] | None:
+    """Check forbidden-flag layer (steps 2-4 of the admin decision tree).
+
+    Returns a 3-tuple ``(label, rule_id, body)`` on a hit, ``None`` otherwise.
+    Runs against a single candidate form (already normalized).
+
+    Handles leading env-var inline assignments (``VAR=val aws ...``): scans
+    past ``[A-Z_]+=`` tokens to locate the CLI binary.
+    """
+    raw = cand.split()
+    if not raw:
+        return None
+
+    # Find the admin CLI spec, walking past any leading env-var assignments.
+    cli_idx = 0
+    for i, tok in enumerate(raw):
+        if _ENV_ASSIGN_RE.match(tok):
+            continue  # skip leading VAR=value tokens
+        cli_idx = i
+        break
+
+    head = _basename(raw[cli_idx])
+    matched_spec: AdminCliSpec | None = None
+    for spec in ADMIN_CLI_SPECS:
+        if spec.cli_name == head:
+            matched_spec = spec
+            break
+    if matched_spec is None:
+        return None
+
+    # Step 2: Sensitive env-var inline assignment (e.g. AWS_ENDPOINT_URL=x aws ...)
+    if matched_spec.sensitive_env_vars:
+        var = _check_sensitive_env_prefix(cand, matched_spec.sensitive_env_vars)
+        if var is not None:
+            body = (
+                f"Sensitive admin-CLI env-var override: `{var}`. This redirects"
+                " the request destination, swaps credentials, or disables TLS"
+                " verification; remove the env-var prefix or run from a"
+                " controlled terminal."
+            )
+            return (
+                _SYNTH_ADMIN_SENSITIVE_ENV,
+                "bash.admin_sensitive_env_override",
+                body,
+            )
+
+    # Build the cli-and-beyond raw token list for subsequent checks.
+    cli_raw = raw[cli_idx:]
+
+    # Strip global flags to get service/subcommand tokens.
+    tokens = _strip_cloud_global_flags(
+        cli_raw, matched_spec.global_value_flags, matched_spec.global_bare_flags
+    )
+    if matched_spec.track_prefixes and len(tokens) > 1 and tokens[1] in matched_spec.track_prefixes:
+        tokens = _strip_cloud_global_flags(
+            [tokens[0], *tokens[2:]],
+            matched_spec.global_value_flags,
+            matched_spec.global_bare_flags,
+        )
+
+    # Step 3: Forbidden subcommand
+    if matched_spec.forbidden_subcommands:
+        path = _check_admin_forbidden_subcommand(matched_spec, tokens)
+        if path is not None:
+            path_str = " ".join(path)
+            body = (
+                f"Admin CLI subcommand `{matched_spec.cli_name} {path_str}`"
+                " bypasses the read-only allowlist (e.g. `az rest` issues"
+                " arbitrary REST calls; `gcloud auth activate-service-account`"
+                " swaps credentials). Use the explicit subcommand instead, or"
+                " run from a controlled terminal."
+            )
+            return (
+                _SYNTH_ADMIN_FORBIDDEN_SUBCOMMAND,
+                "bash.admin_forbidden_subcommand",
+                body,
+            )
+
+    # Step 4: Forbidden flag (scan ALL tokens after CLI binary, not just post-strip)
+    if matched_spec.forbidden_flags:
+        flag = _check_admin_forbidden_flag(matched_spec, cli_raw[1:])
+        if flag is not None:
+            body = (
+                f"Admin CLI flag `{flag}` redirects request destination, swaps"
+                " credentials, disables TLS, or impersonates identity. No good"
+                " reason in an agent context; remove the flag or run from a"
+                " controlled terminal."
+            )
+            return (
+                _SYNTH_ADMIN_FORBIDDEN_FLAG,
+                "bash.admin_forbidden_flag",
+                body,
+            )
+
+    return None
+
+
 def _match_synthetic_deny(segment: str) -> tuple[str, str] | tuple[str, str, str] | None:
     """Return ``(label, rule_id)`` or ``(label, rule_id, body)`` if a matcher fires, else ``None``.
 
     Covers non-canonical interpreters, dangerous rm shapes, and the git
     config-injection sinks. Iterates ``_candidate_forms(segment)`` so env /
     git / runner-wrapper bypasses are evaluated against the same matchers
-    as their bare forms. The ``rule_id`` is the stable allowlist key — see
+    as their bare forms. The ``rule_id`` is the stable allowlist key -- see
     ``_PER_FORM_MATCHERS`` for the canonical list.
 
     Matchers that produce a dynamic deny body (e.g. admin default-deny) return
@@ -3823,6 +4049,12 @@ def _match_synthetic_deny(segment: str) -> tuple[str, str] | tuple[str, str, str
         return None
     forms = _candidate_forms(segment)
     for cand in forms:
+        # Admin forbidden-layer checks (env-var, subcommand, flag) fire BEFORE
+        # the catalog check so they cannot be bypassed by a read-only verb.
+        forbidden_hit = _match_admin_forbidden_layers(cand)
+        if forbidden_hit is not None:
+            return forbidden_hit
+
         for matcher, label, rule_id in _PER_FORM_MATCHERS:
             if matcher(cand):
                 if matcher is _is_admin_default_deny_dispatch:
@@ -3844,7 +4076,12 @@ def _match_synthetic_deny(segment: str) -> tuple[str, str] | tuple[str, str, str
                                     spec.global_bare_flags,
                                 )
                             verb_tuple = spec.verb_extractor(tokens)
-                            return (label, rule_id, _admin_deny_body(spec.cli_name, verb_tuple))
+                            # Collect unknown flags and attach to deny body.
+                            unknown = _collect_unknown_flags(spec, raw[1:])
+                            body = _admin_deny_body(spec.cli_name, verb_tuple)
+                            if unknown:
+                                body += f" Unknown flags: {', '.join(unknown)}."
+                            return (label, rule_id, body)
                 return label, rule_id
     # Variable-expanded head token: only the raw normalized form is what
     # matters; runner stripping would just hide the ``$VAR`` head.
@@ -4061,6 +4298,26 @@ def _maybe_allow_via_allowlist(
     return None
 
 
+def _admin_unknown_flags_extra(segments: list[str]) -> dict[str, Any] | None:
+    """Return ``{"unknown_flags": [...]}`` if any segment is an allowed admin CLI with unknown flags.
+
+    Walks all segments; for the first admin CLI match, collects unknown long flags
+    and returns them for JSONL telemetry.  Returns ``None`` when empty or no admin CLI.
+    """
+    for seg in segments:
+        raw = seg.split()
+        if not raw:
+            continue
+        head = _basename(raw[0])
+        for spec in ADMIN_CLI_SPECS:
+            if spec.cli_name == head and spec.known_flags:
+                unknown = _collect_unknown_flags(spec, raw[1:])
+                if unknown:
+                    return {"unknown_flags": unknown}
+                break
+    return None
+
+
 def _evaluate_segments(
     command: str,
     segments: list[str],
@@ -4079,7 +4336,8 @@ def _evaluate_segments(
         return None
 
     reason = "All command segments are read-only/safe"
-    _log_local(command, "allow", reason)
+    extra = _admin_unknown_flags_extra(segments)
+    _log_local(command, "allow", reason, extra=extra)
     return _allow(reason)
 
 
@@ -4283,11 +4541,35 @@ def _evaluate_autonomous(command: str, segments: list[str]) -> dict[str, str]:
     AUTONOMOUS_FEEDBACK matches take priority over SAFE_PREFIXES — a command
     explicitly registered as feedback-required is denied even if a broader
     safe prefix would otherwise cover it.
+
+    Unknown-flag escalation: if an allowed admin CLI segment has unknown long
+    flags (not in spec.known_flags or spec.forbidden_flags), deny with
+    bash.admin_unknown_flag_autonomous in autonomous mode.
     """
     for i, segment in enumerate(segments):
         if not _matches_autonomous_feedback(segment) and is_safe_command(
             segment, is_piped=(i > 0), autonomous=True
         ):
+            # Unknown-flag autonomous escalation for admin CLIs.
+            raw = segment.split()
+            if raw:
+                head = _basename(raw[0])
+                for spec in ADMIN_CLI_SPECS:
+                    if spec.cli_name == head and spec.known_flags:
+                        unknown = _collect_unknown_flags(spec, raw[1:])
+                        if unknown:
+                            body = (
+                                f"Unknown flags on admin CLI `{head}` in autonomous mode:"
+                                f" {', '.join(unknown)}. "
+                                f"{_SYNTH_DENY_REASONS[_SYNTH_ADMIN_UNKNOWN_FLAG_AUTONOMOUS]}"
+                            )
+                            deny_body = _format_deny_reason(
+                                "bash.admin_unknown_flag_autonomous", body
+                            )
+                            _log_local(command, "deny", "admin-unknown-flag-autonomous")
+                            queue_denied_command(command)
+                            return _deny(deny_body)
+                        break
             continue
         result = get_autonomous_deny(segment)
         reason = result["permissionDecisionReason"]
@@ -4295,7 +4577,8 @@ def _evaluate_autonomous(command: str, segments: list[str]) -> dict[str, str]:
         queue_denied_command(command)
         return result
     reason = "All command segments are safe (autonomous mode)"
-    _log_local(command, "allow", reason)
+    extra = _admin_unknown_flags_extra(segments)
+    _log_local(command, "allow", reason, extra=extra)
     return _allow(reason)
 
 
