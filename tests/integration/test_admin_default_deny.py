@@ -101,6 +101,8 @@ CLOUD_ADMIN_DENY = [
         "gcloud auth list -- compute instances create vm",
         id="gcloud-track-prefix-after-terminator",
     ),
+    # forbidden flag denies (v1.3.0)
+    pytest.param("kubectl --context prod get pods", id="kubectl-context-flag-forbidden"),
 ]
 
 
@@ -119,8 +121,6 @@ CLOUD_ADMIN_ALLOW = [
     pytest.param("aws iam get-user", id="aws-iam-get-user"),
     pytest.param("aws lambda list-functions", id="aws-lambda-list"),
     # AWS explicit-allow exceptions
-    pytest.param("aws logs tail /aws/lambda/fn", id="aws-logs-tail"),
-    pytest.param("aws dynamodb scan --table-name t", id="aws-dynamodb-scan"),
     pytest.param(
         "aws iam simulate-principal-policy --policy-source-arn arn:x --action-names s3:GetObject",
         id="aws-iam-simulate",
@@ -128,10 +128,6 @@ CLOUD_ADMIN_ALLOW = [
     pytest.param(
         "aws cloudformation validate-template --template-body file://t.yaml",
         id="aws-cfn-validate",
-    ),
-    pytest.param(
-        "aws rds generate-db-auth-token --hostname h --port 5432 --username u",
-        id="aws-rds-auth-token",
     ),
     # gcloud read-only
     pytest.param("gcloud projects list", id="gcloud-projects-list"),
@@ -154,7 +150,7 @@ CLOUD_ADMIN_ALLOW = [
     pytest.param("kubectl logs mypod", id="kubectl-logs"),
     pytest.param("kubectl auth can-i create pods", id="kubectl-auth-can-i"),
     pytest.param("kubectl config view", id="kubectl-config-view"),
-    pytest.param("kubectl --context prod get pods", id="kubectl-context-flag"),
+    # kubectl-context-flag moved to DENY: --context is now a forbidden flag
     pytest.param("kubectl -n kube-system get pods", id="kubectl-namespace-flag"),
     # launchctl read-only
     pytest.param("launchctl list", id="launchctl-list"),
@@ -170,6 +166,207 @@ CLOUD_ADMIN_ALLOW = [
 def test_admin_default_deny_allows(command: str) -> None:
     result = decide(command)
     assert _is_allow(result), f"expected allow, got: {result}"
+
+
+AWS_CATALOG_ALLOW = [
+    pytest.param("aws iam list-users", id="aws-iam-list-users"),
+    pytest.param("aws ec2 describe-instances", id="aws-ec2-describe-instances"),
+    pytest.param("aws s3 ls", id="aws-s3-ls"),
+    pytest.param("aws s3api list-buckets", id="aws-s3api-list-buckets"),
+    pytest.param("aws sts get-caller-identity", id="aws-sts-get-caller-identity"),
+    pytest.param("aws lambda list-functions", id="aws-lambda-list-functions"),
+    pytest.param("aws dynamodb describe-table --table-name t", id="aws-dynamodb-describe-table"),
+    pytest.param("aws rds describe-db-instances", id="aws-rds-describe-db-instances"),
+    pytest.param("aws cloudformation describe-stacks", id="aws-cfn-describe-stacks"),
+    pytest.param("aws cloudwatch describe-alarms", id="aws-cw-describe-alarms"),
+    pytest.param("aws logs describe-log-groups", id="aws-logs-describe-log-groups"),
+    pytest.param("aws ecs list-clusters", id="aws-ecs-list-clusters"),
+    pytest.param("aws eks list-clusters", id="aws-eks-list-clusters"),
+    pytest.param("aws ecr describe-repositories", id="aws-ecr-describe-repositories"),
+    pytest.param("aws elbv2 describe-load-balancers", id="aws-elbv2-describe-lb"),
+    pytest.param("aws elb describe-load-balancers", id="aws-elb-describe-lb"),
+    pytest.param("aws route53 list-hosted-zones", id="aws-route53-list-zones"),
+    pytest.param("aws sns list-topics", id="aws-sns-list-topics"),
+    pytest.param("aws sqs list-queues", id="aws-sqs-list-queues"),
+    pytest.param("aws secretsmanager describe-secret --secret-id s", id="aws-sm-describe-secret"),
+    pytest.param("aws ssm describe-parameters", id="aws-ssm-describe-parameters"),
+    pytest.param("aws kms describe-key --key-id k", id="aws-kms-describe-key"),
+    pytest.param("aws apigateway get-rest-apis", id="aws-apigw-get-rest-apis"),
+    pytest.param("aws apigatewayv2 get-apis", id="aws-apigwv2-get-apis"),
+    pytest.param("aws glue get-databases", id="aws-glue-get-databases"),
+    pytest.param("aws athena list-data-catalogs", id="aws-athena-list-catalogs"),
+    pytest.param("aws cloudfront list-distributions", id="aws-cf-list-distributions"),
+    pytest.param(
+        "aws cognito-idp list-user-pools --max-results 10", id="aws-cognito-idp-list-pools"
+    ),
+    pytest.param(
+        "aws cognito-identity list-identity-pools --max-results 10", id="aws-cognito-id-list-pools"
+    ),
+    pytest.param("aws events list-rules", id="aws-events-list-rules"),
+    pytest.param("aws stepfunctions list-state-machines", id="aws-sfn-list-sm"),
+    pytest.param("aws organizations describe-organization", id="aws-org-describe-org"),
+    pytest.param("aws support describe-cases", id="aws-support-describe-cases"),
+    pytest.param("aws pricing describe-services", id="aws-pricing-describe-services"),
+    pytest.param("aws servicequotas list-services", id="aws-quotas-list-services"),
+    pytest.param("aws cloudtrail describe-trails", id="aws-ct-describe-trails"),
+    pytest.param("aws config describe-config-rules", id="aws-config-describe-rules"),
+    pytest.param("aws resourcegroupstaggingapi get-resources", id="aws-rgta-get-resources"),
+]
+
+
+@pytest.mark.parametrize("command", AWS_CATALOG_ALLOW)
+def test_aws_catalog_allow(command: str) -> None:
+    """Every enumerated service has at least one representative read verb that allows."""
+    result = decide(command)
+    assert _is_allow(result), f"Expected allow for {command}; got {result}"
+
+
+AWS_CATALOG_DENY = [
+    # The 9 named bypass shapes from spec.md
+    pytest.param("aws secretsmanager get-secret-value --secret-id s", id="sm-get-secret-value"),
+    pytest.param("aws ssm get-parameter --name p --with-decryption", id="ssm-get-parameter-wdec"),
+    pytest.param(
+        "aws ssm get-parameters --names p1 p2 --with-decryption", id="ssm-get-parameters-wdec"
+    ),
+    pytest.param(
+        "aws ssm get-parameters-by-path --path /p --with-decryption",
+        id="ssm-get-parameters-by-path",
+    ),
+    pytest.param("aws kinesis get-records --shard-iterator x", id="kinesis-get-records"),
+    pytest.param(
+        "aws logs get-log-events --log-group-name g --log-stream-name s", id="logs-get-log-events"
+    ),
+    pytest.param("aws logs filter-log-events --log-group-name g", id="logs-filter-log-events"),
+    pytest.param("aws s3api get-object --bucket b --key k out", id="s3api-get-object"),
+    pytest.param(
+        "aws cognito-identity get-credentials-for-identity --identity-id i", id="cogid-get-creds"
+    ),
+    # Additional EXCLUDE verbs from the catalog
+    pytest.param("aws sts get-session-token", id="sts-get-session-token"),
+    pytest.param("aws sts get-federation-token --name n", id="sts-get-federation-token"),
+    pytest.param("aws sts assume-role --role-arn r --role-session-name s", id="sts-assume-role"),
+    pytest.param("aws ecr get-login-password", id="ecr-get-login-password"),
+    pytest.param("aws ecr get-authorization-token", id="ecr-get-auth-token"),
+    pytest.param(
+        "aws ecr batch-get-image --repository-name r --image-ids x", id="ecr-batch-get-image"
+    ),
+    pytest.param("aws eks get-token --cluster-name c", id="eks-get-token"),
+    pytest.param("aws lambda get-function --function-name f", id="lambda-get-function"),
+    pytest.param("aws ec2 get-password-data --instance-id i", id="ec2-get-password-data"),
+    pytest.param("aws ec2 get-console-output --instance-id i", id="ec2-get-console-output"),
+    pytest.param("aws ec2 get-console-screenshot --instance-id i", id="ec2-get-console-screenshot"),
+    pytest.param("aws sqs receive-message --queue-url u", id="sqs-receive-message"),
+    pytest.param("aws apigateway get-api-key --api-key k --include-value", id="apigw-get-api-key"),
+    pytest.param("aws apigateway get-api-keys --include-values", id="apigw-get-api-keys"),
+    pytest.param(
+        "aws athena get-query-results --query-execution-id q", id="athena-get-query-results"
+    ),
+    pytest.param("aws logs get-query-results --query-id q", id="logs-get-query-results"),
+    pytest.param(
+        "aws cloudtrail get-query-results --query-id q --event-data-store eds",
+        id="ct-get-query-results",
+    ),
+    pytest.param("aws glue get-connection --name c", id="glue-get-connection"),
+    pytest.param(
+        "aws ssm get-command-invocation --command-id c --instance-id i",
+        id="ssm-get-command-invocation",
+    ),
+    pytest.param(
+        "aws stepfunctions get-execution-history --execution-arn a", id="sfn-get-execution-history"
+    ),
+    pytest.param("aws dynamodb get-item --table-name t --key {}", id="dynamodb-get-item"),
+    pytest.param("aws dynamodb scan --table-name t", id="dynamodb-scan"),
+    pytest.param(
+        "aws dynamodb query --table-name t --key-condition-expression x", id="dynamodb-query"
+    ),
+    pytest.param(
+        "aws rds download-db-log-file-portion --db-instance-identifier i --log-file-name f",
+        id="rds-download-log",
+    ),
+    pytest.param(
+        "aws rds generate-db-auth-token --hostname h --port 5432 --username u",
+        id="rds-gen-auth-token",
+    ),
+    pytest.param("aws logs start-live-tail --log-group-identifiers g", id="logs-start-live-tail"),
+    pytest.param("aws logs tail my-log-group", id="logs-tail"),
+    pytest.param(
+        "aws secretsmanager batch-get-secret-value --secret-id-list s1 s2", id="sm-batch-get"
+    ),
+    pytest.param("aws ssm get-parameter-history --name p", id="ssm-get-parameter-history"),
+    pytest.param("aws iam get-credential-report", id="iam-get-credential-report"),
+    pytest.param(
+        "aws iam get-ssh-public-key --user-name u --ssh-public-key-id k --encoding SSH",
+        id="iam-get-ssh-pub-key",
+    ),
+    # Cross-review: missing-from-deny-sweep additions
+    pytest.param(
+        "aws glue get-entity-records --entity-name e --connection-name c",
+        id="glue-get-entity-records",
+    ),
+    pytest.param("aws ssm get-access-token --access-request-id r", id="ssm-get-access-token"),
+    pytest.param(
+        "aws stepfunctions get-activity-task --activity-arn a", id="sfn-get-activity-task"
+    ),
+    pytest.param("aws s3 presign s3://bucket/key --expires-in 604800", id="s3-presign-long-ttl"),
+]
+
+
+@pytest.mark.parametrize("command", AWS_CATALOG_DENY)
+def test_aws_catalog_deny(command: str) -> None:
+    """Known-bad verbs that match a safe prefix but emit secret material -- must deny."""
+    result = decide(command)
+    assert _is_deny(result), f"Expected deny for {command}; got {result}"
+
+
+S3_WRAPPER_ALLOW = [
+    pytest.param("aws s3 ls", id="aws-s3-ls"),
+    pytest.param("aws s3 ls s3://bucket/prefix/", id="aws-s3-ls-prefix"),
+]
+
+
+S3_WRAPPER_DENY = [
+    pytest.param("aws s3 cp s3://b/k /tmp/x", id="aws-s3-cp"),
+    pytest.param("aws s3 sync s3://b /tmp/d", id="aws-s3-sync"),
+    pytest.param("aws s3 mv s3://b/k s3://b/k2", id="aws-s3-mv"),
+    pytest.param("aws s3 rm s3://b/k", id="aws-s3-rm"),
+    pytest.param("aws s3 mb s3://newbucket", id="aws-s3-mb"),
+    pytest.param("aws s3 rb s3://b", id="aws-s3-rb"),
+    pytest.param("aws s3 website s3://b", id="aws-s3-website"),
+    pytest.param("aws s3 presign s3://b/k", id="aws-s3-presign"),
+]
+
+
+@pytest.mark.parametrize("command", S3_WRAPPER_ALLOW)
+def test_s3_wrapper_allow(command: str) -> None:
+    assert _is_allow(decide(command))
+
+
+@pytest.mark.parametrize("command", S3_WRAPPER_DENY)
+def test_s3_wrapper_deny(command: str) -> None:
+    assert _is_deny(decide(command))
+
+
+OVERRIDE_RESCUES = [
+    pytest.param("aws:logs.tail", "aws logs tail my-log-group", id="rescue-logs-tail"),
+    pytest.param(
+        "aws:dynamodb.scan", "aws dynamodb scan --table-name t", id="rescue-dynamodb-scan"
+    ),
+    pytest.param(
+        "aws:ssm.get-parameter",
+        "aws ssm get-parameter --name p --with-decryption",
+        id="rescue-ssm-get-param",
+    ),
+]
+
+
+@pytest.mark.usefixtures("_bust_allow_verbs_cache")
+@pytest.mark.parametrize(("override", "command"), OVERRIDE_RESCUES)
+def test_override_rescue_allows(
+    override: str, command: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GUARD_ADMIN_ALLOW_VERBS adds a (service, verb) tuple to the allowlist at runtime."""
+    monkeypatch.setenv("GUARD_ADMIN_ALLOW_VERBS", override)
+    assert _is_allow(decide(command))
 
 
 def test_override_allow_commands(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:

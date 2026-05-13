@@ -199,6 +199,104 @@ jobs:
           assert d['hookSpecificOutput']['permissionDecision'] == 'deny', d
           print('hook deny OK')
           "
+      - name: Verify AWS catalog allow/deny/override end-to-end
+        shell: bash
+        run: |
+          set -eux
+          # Read the corpus and assert every command's disposition matches its
+          # block marker. Uses the wheel-installed guard binary so the full
+          # packaging + entry-point path is exercised.
+          #
+          # Block markers:
+          #   #allow           — no hook must return deny
+          #   #deny            — at least one hook must return deny
+          #   #override <env>  — set GUARD_ADMIN_ALLOW_VERBS=<env>, assert allow
+          #
+          # CLAUDE_AUTONOMOUS=0: override blocks must be tested in interactive
+          # mode so GUARD_ADMIN_ALLOW_VERBS takes effect before autonomous-deny.
+          CORPUS="tests/integration/aws_catalog_smoke_corpus.txt"
+          GUARD_BIN="/tmp/guard-smoke/bin/guard"
+          /tmp/guard-smoke/bin/python - "$CORPUS" "$GUARD_BIN" <<'PYEOF'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          corpus_path, guard_bin = sys.argv[1], sys.argv[2]
+
+          with open(corpus_path) as fh:
+              lines = fh.readlines()
+
+          current_marker = None
+          current_override_env = None
+          failures = []
+
+          for raw in lines:
+              line = raw.strip()
+              if not line:
+                  continue
+              if line.startswith("#allow"):
+                  current_marker = "allow"
+                  current_override_env = None
+                  continue
+              if line.startswith("#deny"):
+                  current_marker = "deny"
+                  current_override_env = None
+                  continue
+              if line.startswith("#override "):
+                  current_marker = "override"
+                  current_override_env = line[len("#override "):].strip()
+                  continue
+              if line.startswith("#"):
+                  continue
+
+              cmd = line
+              env = os.environ.copy()
+              env["CLAUDE_AUTONOMOUS"] = "0"
+              if current_marker == "override" and current_override_env:
+                  env["GUARD_ADMIN_ALLOW_VERBS"] = current_override_env
+
+              proc = subprocess.run(
+                  [guard_bin, "--json", "test", cmd],
+                  capture_output=True,
+                  text=True,
+                  env=env,
+              )
+              try:
+                  data = json.loads(proc.stdout)
+              except json.JSONDecodeError:
+                  failures.append(f"PARSE ERROR for {cmd!r}: stdout={proc.stdout!r}")
+                  continue
+
+              results = data.get("commands", [{}])[0].get("results", [])
+              decisions = [r.get("decision") for r in results]
+              has_deny = any(d == "deny" for d in decisions)
+
+              if current_marker == "allow":
+                  if has_deny:
+                      failures.append(
+                          f"[allow] UNEXPECTED DENY for {cmd!r}: {decisions}"
+                      )
+              elif current_marker == "deny":
+                  if not has_deny:
+                      failures.append(
+                          f"[deny] EXPECTED DENY for {cmd!r}: {decisions}"
+                      )
+              elif current_marker == "override":
+                  if has_deny:
+                      failures.append(
+                          f"[override {current_override_env}] UNEXPECTED DENY for {cmd!r}: {decisions}"
+                      )
+
+          if failures:
+              print("FAILURES:")
+              for f in failures:
+                  print(" ", f)
+              sys.exit(1)
+
+          print("AWS catalog smoke: all commands matched expected disposition.")
+          PYEOF
+
       - name: Run full pytest suite against the wheel-installed package
         shell: bash
         run: |
@@ -250,6 +348,20 @@ jobs:
           cache-dependency-glob: uv.lock
       - name: Run bandit
         run: uv run --with bandit bandit -c pyproject.toml -r src/
+
+  semgrep:
+    name: Semgrep static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Run semgrep
+        run: uv run --with semgrep semgrep scan --error --config .semgrep/rules/ src/guard/hooks/
 
   vulture:
     name: Dead-code sweep

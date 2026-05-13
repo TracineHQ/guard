@@ -47,7 +47,7 @@ Standalone alternative (skip the catalog and install guard directly from this re
 `TracineHQ/guard` is the GitHub `owner/repo` shorthand for the marketplace source. `guard@tracinehq` is the `<plugin>@<marketplace>` reference Claude Code uses to install. To pin a specific tag:
 
 ```
-/plugin marketplace add TracineHQ/guard#v1.1.1
+/plugin marketplace add TracineHQ/guard#v1.3.0
 ```
 
 ### Requirements
@@ -79,6 +79,8 @@ Guard reads a small set of environment variables. See [SKILL.md](SKILL.md) for t
 | `GUARD_DATA_DIR` | Override guard's data directory |
 | `GUARD_PROTECTED_EXTRA` | Comma-separated extra protected glob patterns (fallback when `~/.claude/guard-protected.txt` is absent) |
 | `GUARD_ADMIN_ALLOW_VERBS` | Per-verb allow for `bash.admin_default_deny`; format `<cli>:<verb.path>,<cli>:<verb.path>` (e.g. `aws:ec2.run-instances,gcloud:functions.deploy`) |
+
+**Catalog model (AWS):** the admin matcher uses an explicit `(service, verb)` allowlist for `aws`. Verbs not in the catalog deny by default. To rescue a long-tail verb without a code change, set `GUARD_ADMIN_ALLOW_VERBS="aws:<service>.<verb>"` (see [SECURITY.md](SECURITY.md) for the decision tree and the list of deliberately-excluded verbs).
 
 To disable an individual hook, remove its entry from `~/.claude/settings.json` PreToolUse, or comment the line in `hooks/hooks.json` if you forked the plugin.
 

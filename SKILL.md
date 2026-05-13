@@ -21,9 +21,11 @@ authoritative references. Quick map:
   dangerous env-var sinks (`GIT_SSH_COMMAND`, `LD_PRELOAD`, etc.); pipe-to-shell
   (`curl ... | sh`); credential leaks (`gh auth token`, `aws sts get-session-token`);
   **admin-CLI default-deny** for `aws`, `gcloud`, `az`, `kubectl`, `launchctl` —
-  only read-only verbs (`describe-*`, `list-*`, `get-*`, `kubectl get`, etc.)
-  pass; everything else denies with `bash.admin_default_deny`. Override per-command
-  via `allow_commands`, per-rule via `disable_rules`, or per-verb via
+  only verbs whose `(service, verb)` tuple is in the read-only catalog pass;
+  everything else denies with `bash.admin_default_deny`. AWS uses the
+  strict-allowlist model (no prefix shortcut); see SECURITY.md for the
+  decision tree. Override per-command via `allow_commands`, per-rule via
+  `disable_rules`, or per-verb via
   `GUARD_ADMIN_ALLOW_VERBS=aws:ec2.run-instances,gcloud:functions.deploy`.
 - `git_c_validator` — `git -c core.hooksPath=...` and `core.attributesFile=...`
   denied regardless of value; `git -c alias.x='!cmd'` and other config-exec
@@ -52,6 +54,7 @@ authoritative references. Quick map:
 | `GUARD_DEBUG` | Set to `1` to emit per-hook debug to stderr | unset |
 | `GUARD_DATA_DIR` | Override the directory containing guard's data files | `~/.claude/guard` |
 | `GUARD_PROTECTED_EXTRA` | Comma-separated extra patterns for `protected_files`. See below. | unset |
+| `GUARD_ADMIN_ALLOW_VERBS` | Per-verb allow for `bash.admin_default_deny`; format `<cli>:<service>.<verb>,<cli>:<service>.<verb>` (e.g. `aws:logs.tail,gcloud:functions.deploy`) | unset |
 
 ## Extending protected_files patterns
 
@@ -143,7 +146,7 @@ pipx install tracine-guard
 Then:
 - `guard status` — log location and last record summary.
 - `guard noisy --since 24h` — top rules by hit count in a time window.
-- `guard silent --since 7d` — rules that fired historically but not recently.
+- `guard silent --since 30d` — rules that fired historically but not recently.
 - `guard trace <session_id>` — chronological dump for one session.
 
 Without the CLI, the log is plain JSONL and works with anything that reads stdin: `tail -f ~/.claude/guard-decisions.jsonl | jq`.

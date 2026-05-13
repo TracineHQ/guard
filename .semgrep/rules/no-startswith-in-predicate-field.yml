@@ -1,0 +1,12 @@
+rules:
+  - id: no-startswith-in-predicate-field
+    languages: [python]
+    severity: ERROR
+    message: >
+      .startswith() inlined as a read_only_predicate field value.
+      Use an explicit verb-tuple catalog instead.
+    pattern-either:
+      - pattern: |
+          $SPEC = AdminCliSpec(..., read_only_predicate=lambda $V: $X.startswith(...), ...)
+      - pattern: |
+          read_only_predicate = lambda $V: $X.startswith(...)

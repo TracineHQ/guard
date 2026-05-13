@@ -338,16 +338,17 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
     command_excerpt: str | None = None,
     session_id: str = "",
     cwd: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     """Append a spec-compliant decision record to the JSONL log.
 
     Conforms to ``docs/JSONL_FORMAT.md`` (schema v1). Every record carries:
 
-    - ``v: 1`` — short schema-version alias for fast consumers
-    - ``schema_version: 1`` — long form, kept for backward compatibility
-    - ``mode: "enforce"`` — effective enforcement posture; reserved for
+    - ``v: 1`` -- short schema-version alias for fast consumers
+    - ``schema_version: 1`` -- long form, kept for backward compatibility
+    - ``mode: "enforce"`` -- effective enforcement posture; reserved for
       ``"shadow"`` / ``"off"`` once config-driven mode lands
-    - ``timestamp`` — ISO-8601 UTC with microsecond precision and ``Z`` suffix
+    - ``timestamp`` -- ISO-8601 UTC with microsecond precision and ``Z`` suffix
 
     Truncates ``command_excerpt`` to 4096 chars and ``reason`` to 1024 chars
     to fit within the 4 KiB record envelope. Fail-safe: never raises; logging
@@ -362,6 +363,10 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
         command_excerpt: Optional bash-command excerpt (truncated to 4096).
         session_id: Claude Code session id.
         cwd: Optional working directory string.
+        extra: Optional dict of additional fields merged into the record
+            (e.g. ``{"unknown_flags": ["--foo", "--bar"]}``). Values are
+            written verbatim; callers are responsible for not including
+            secret material.
     """
     timestamp = datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
     redacted_reason = _redact_secrets(reason)
@@ -382,6 +387,8 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
         record["command_excerpt"] = redacted_excerpt[:_COMMAND_EXCERPT_MAX_CHARS]
     if cwd is not None:
         record["cwd"] = cwd
+    if extra:
+        record.update(extra)
     append_jsonl(GUARD_DECISIONS_PATH, record)
 
 
