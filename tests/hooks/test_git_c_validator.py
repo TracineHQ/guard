@@ -286,6 +286,23 @@ class TestDangerousPathsConfigKeys:
         decision, _ = _run("git -c color.ui=../foo status")
         assert decision != "deny"
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git --config-env core.hooksPath=DANGER status",
+            "git --config-env core.attributesFile=ENV diff",
+            "git -C /repo --config-env core.hooksPath=X status",
+        ],
+    )
+    def test_config_env_two_token_denied(self, command):
+        decision, code = _run(command)
+        assert decision == "deny", f"two-token --config-env not denied: {command!r}"
+        assert code == 2
+
+    def test_config_env_two_token_unrelated_passthrough(self):
+        decision, _ = _run("git --config-env color.ui=ENV status")
+        assert decision != "deny"
+
 
 class TestStashUnknownAction:
     """``git -C <path> stash <unknown>`` exercises the ``_decide_stash``

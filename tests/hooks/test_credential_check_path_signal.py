@@ -160,6 +160,16 @@ class TestTier3VarIndirection:
         assert not _is_reader_with_var_arg("echo $P")
         assert not _is_reader_with_var_arg("ls -la")
 
+    def test_stdin_redirect_with_var_triggers_regardless_of_head(self):
+        # ``< $VAR`` stdin redirect is treated as a read even when the
+        # head verb is not in the reader allowlist.
+        from guard.hooks.credential_check import _is_reader_with_var_arg
+
+        assert _is_reader_with_var_arg("python3 < $SECRET")
+        assert _is_reader_with_var_arg("xxd < ${CRED_PATH}")
+        # Sanity: bare ``<`` with no var does not match.
+        assert not _is_reader_with_var_arg("cat < /tmp/literal")
+
 
 # --- Tier 4: symlink resolution ---
 

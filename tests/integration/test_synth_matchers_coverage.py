@@ -1351,6 +1351,47 @@ def test_gh_api_patch_put_denied(command: str) -> None:
     assert _is_deny(decide(command)), f"gh api PATCH/PUT bypass: {command!r}"
 
 
+# gh api graphql mutation — POST to /graphql carrying a mutation body is
+# functionally a DELETE/PATCH/PUT; covered by the same matcher.
+GH_API_GRAPHQL_MUTATION_DENY = [
+    "gh api graphql -f query='mutation { deleteIssue(input:{issueId:\"I_x\"}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation Delete { deleteIssue(input:{issueId:\"x\"}) }'",
+    "gh api graphql --raw-field query='mutation { archiveRepository(input:{repositoryId:\"R_x\"}) }'",
+    "gh api graphql --field query='mutation { x }'",
+    "gh api graphql --field=query='mutation { x }'",
+    "gh api graphql --raw-field=query='mutation { x }'",
+    "gh api graphql -F query=@mutation.graphql",  # @file body — opaque, deny
+    "gh api graphql -f query=-",  # stdin body — opaque, deny
+    "gh api /graphql -X POST -f query='mutation { x }'",  # explicit /graphql path
+    "gh api graphql -f query='query Foo { viewer } mutation Bar { deleteIssue(input:{issueId:\"x\"}) }'",
+    "gh api graphql -f query='mutation($id:ID!){deleteIssue(input:{issueId:$id}){clientMutationId}}'",
+    "gh api graphql -f mutation='mutation { x }'",  # key name `mutation` also catches
+]
+
+
+@pytest.mark.parametrize("command", GH_API_GRAPHQL_MUTATION_DENY)
+def test_gh_api_graphql_mutation_denied(command: str) -> None:
+    assert _is_deny(decide(command)), f"gh api graphql mutation bypass: {command!r}"
+
+
+GH_API_GRAPHQL_QUERY_ALLOW = [
+    "gh api graphql -f query='query { viewer { login } }'",
+    'gh api graphql -f query=\'query GetIssues { repository(owner:"o",name:"r") { issues(first:10) { nodes { title } } } }\'',
+    "gh api graphql -f query='{ viewer { login } }'",  # implicit query op
+    "gh api graphql -f query='subscription { commentAdded { id } }'",
+    "gh api graphql",  # no field args at all
+]
+
+
+@pytest.mark.parametrize("command", GH_API_GRAPHQL_QUERY_ALLOW)
+def test_gh_api_graphql_read_only_allowed(command: str) -> None:
+    res = decide(command)
+    if res is not None:
+        assert res.get("permissionDecision") != "deny", (
+            f"unexpected deny for read-only graphql: {command!r} -> {res}"
+        )
+
+
 # Bonus: nsenter / podman exec / lxc exec
 EXEC_WRAPPER_DENY = [
     "nsenter -t 1234 -m -p rm -rf /",

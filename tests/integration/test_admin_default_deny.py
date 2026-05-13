@@ -413,6 +413,18 @@ def test_override_env_var_malformed(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _is_deny(result2), "command not allowed by env var should still deny"
 
 
+@pytest.mark.usefixtures("_bust_allow_verbs_cache")
+def test_override_env_var_empty_cli_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Entries with an empty CLI half (``:verb``, ``  :verb``) are dropped."""
+    monkeypatch.setenv("GUARD_ADMIN_ALLOW_VERBS", ":get,  :list,aws:ec2.run-instances")
+    result = decide("aws ec2 run-instances --image-id ami-xyz")
+    assert _is_allow(result), "valid entry after empty-CLI entries should still parse"
+    # The bare ``:get`` / ``:list`` should not allow anything; an
+    # otherwise-denied command must still deny.
+    result2 = decide("aws iam delete-user --user-name x")
+    assert _is_deny(result2)
+
+
 PRECEDENCE_CASES = [
     pytest.param(
         "aws iam delete-user --user-name x",

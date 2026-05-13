@@ -1641,7 +1641,7 @@ _SYNTH_DANGEROUS_ENV_DENY = "<dangerous env-var sink>"
 _SYNTH_WRAPPER_STACKING_DENY = "<wrapper-stacking>"
 _SYNTH_PIP_INSTALL_URL_DENY = "<pip install from URL/VCS>"
 _SYNTH_KUBECTL_DESTRUCTION_DENY = "<kubectl cluster-wide deletion>"
-_SYNTH_GH_API_DELETE_DENY = "<gh api raw DELETE>"
+_SYNTH_GH_API_DELETE_DENY = "<gh api raw DELETE/PATCH/PUT or graphql mutation>"
 _SYNTH_GPG_SECRET_DELETE_DENY = "<gpg secret-key deletion>"
 _SYNTH_AWS_S3_DESTRUCTION_DENY = "<aws s3 destruction>"
 _SYNTH_CHMOD_777_ROOT_DENY = "<chmod 777 against system path>"
@@ -1739,10 +1739,12 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         "manually with full intent."
     ),
     _SYNTH_GH_API_DELETE_DENY: (
-        "`gh api -X DELETE` bypasses the gh subcommand deny rules via the "
-        "raw GitHub API; blocked regardless of resource path. Run the "
-        "deletion directly in your terminal outside this session so it's "
-        "intentional and audited."
+        "`gh api` shapes that mutate GitHub state: `-X DELETE|PATCH|PUT` "
+        "and `graphql` with a `mutation` body (deleteIssue, "
+        "archiveRepository, transferOwnership, etc.). Both bypass the "
+        "high-level gh subcommand deny rules. Run the change directly "
+        "in your terminal (`gh repo delete <repo>`, `gh release delete "
+        "<tag>`, etc.) so it's intentional and auditable."
     ),
     _SYNTH_GPG_SECRET_DELETE_DENY: (
         "`gpg --delete-secret-key` / `--delete-secret-and-public-keys` "
@@ -2269,26 +2271,46 @@ def _is_kubectl_destructive(normalized: str) -> bool:
 
 
 _GH_API_DESTRUCTIVE_VERBS = {"DELETE", "PATCH", "PUT"}
+_GH_GRAPHQL_PATHS = {"graphql", "/graphql"}
+_GH_MUTATION_RE = re.compile(r"\bmutation\b", re.IGNORECASE)
+# ``gh api graphql -f query=@file.graphql`` (file body) and ``-f query=-``
+# (stdin body) — both opaque to static inspection. Conservative: when
+# paired with the graphql path, treat as suspicious.
+_GH_GRAPHQL_OPAQUE_BODY_RE = re.compile(
+    r"(?:^|\s)(?:-f|-F|--field|--raw-field)(?:\s+|=)[A-Za-z_][\w]*=(?:@|-(?=\s|$))"
+)
 
 
 def _is_gh_api_destructive(normalized: str) -> bool:
-    """Return True for ``gh api -X <DELETE|PATCH|PUT> ...`` raw-API bypasses.
+    """Return True for ``gh api`` shapes that mutate GitHub state.
 
     The literal ``gh repo delete`` / ``gh release delete`` rules block the
-    high-level subcommands, but ``gh api -X DELETE /repos/owner/repo`` does
-    the same thing through the raw GitHub API and otherwise passes through.
-    PATCH / PUT can edit / archive a repo (e.g. ``PATCH /repos/{o}/{r}`` with
-    ``archived=true`` is functionally a soft delete).
-    POST is intentionally NOT included — it covers issue creation, comments,
-    workflow dispatches, etc. (mostly legitimate); add specific path-level
-    POST denies if a pattern emerges.
-    Covers separate (``-X DELETE``), fused (``-XDELETE``), and long-form
-    (``--method DELETE``) variants; case-insensitive on the verb.
+    high-level subcommands; this matcher covers two raw-API bypasses that
+    otherwise pass through:
+
+    1. ``gh api -X DELETE|PATCH|PUT <path>`` — raw verb. PATCH/PUT can
+       edit/archive a repo (e.g. ``PATCH /repos/{o}/{r}`` with
+       ``archived=true`` is functionally a soft delete). Covers separate
+       (``-X DELETE``), fused (``-XDELETE``), and long-form
+       (``--method DELETE``) variants; case-insensitive on the verb.
+    2. ``gh api graphql -f query='mutation { ... }'`` — POST to the
+       GraphQL endpoint carrying a mutation body. Functionally a
+       DELETE/PATCH/PUT through the GraphQL endpoint (deleteIssue,
+       archiveRepository, transferOwnership, dismissPullRequestReview,
+       etc.). Detects via the ``mutation`` keyword anywhere in the
+       normalized string once the graphql endpoint is confirmed.
+       ``@<file>`` and ``-`` (stdin) bodies cannot be inspected, so
+       are denied as suspicious when paired with the graphql path.
+
+    Plain POST is intentionally NOT a verb match — it covers issue
+    creation, comments, workflow dispatches, etc. (mostly legitimate).
+    The graphql-mutation shape is the one POST that mutates uniformly.
     """
     tokens = normalized.split()
     if len(tokens) < 3 or _basename(tokens[0]) != "gh" or tokens[1] != "api":
         return False
     rest = tokens[2:]
+    # Shape 1: raw destructive verb.
     for i, tok in enumerate(rest):
         if (
             tok in {"-X", "--method"}
@@ -2307,6 +2329,16 @@ def _is_gh_api_destructive(normalized: str) -> bool:
             and tok[len("--method=") :].upper() in _GH_API_DESTRUCTIVE_VERBS
         ):
             return True
+    # Shape 2: graphql endpoint with a mutation body. ``_normalize_segment``
+    # flattens shlex quoting (quoted query bodies lose their boundaries), so
+    # we search the full normalized string for the mutation keyword once
+    # the graphql endpoint token is confirmed.
+    if not any(tok in _GH_GRAPHQL_PATHS for tok in rest):
+        return False
+    if _GH_MUTATION_RE.search(normalized):
+        return True
+    if _GH_GRAPHQL_OPAQUE_BODY_RE.search(normalized):
+        return True
     return False
 
 
