@@ -26,7 +26,9 @@ import argparse
 import json
 import os
 import re
+import subprocess  # nosec B404 -- used for guard healthcheck to invoke the bundled hook
 import sys
+import time
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -157,6 +159,59 @@ class JsonlReader:
             last = rec
         return last
 
+    def counters(self, *, since: datetime | None = None) -> dict[str, Any]:
+        """Aggregate record counts by ``type`` (default → "decision").
+
+        Returns OTEL-friendly totals so external monitoring can scrape via
+        ``guard status --json | jq``.
+        """
+        totals: dict[str, Any] = {
+            "decisions_total": 0,
+            "denies_total": 0,
+            "internal_errors_total": 0,
+            "heartbeats_total": 0,
+            "last_activity_ts": None,
+        }
+        if not self.path.exists():
+            return totals
+        with self.path.open(encoding="utf-8", errors="replace") as fh:
+            for raw in fh:
+                rec = _parse_record(raw)
+                if rec is None:
+                    continue
+                if since is not None:
+                    ts_val = _parse_ts(rec)
+                    if ts_val is None or ts_val < since:
+                        continue
+                _bump_counter(totals, rec)
+        return totals
+
+
+def _parse_record(raw: str) -> dict[str, Any] | None:
+    line = raw.strip()
+    if not line:
+        return None
+    try:
+        rec = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def _bump_counter(totals: dict[str, Any], rec: dict[str, Any]) -> None:
+    kind = rec.get("type") or ("decision" if "decision" in rec else None)
+    if kind == "decision":
+        totals["decisions_total"] += 1
+        if rec.get("decision") == "deny":
+            totals["denies_total"] += 1
+    elif kind == "internal_error":
+        totals["internal_errors_total"] += 1
+    elif kind == "heartbeat":
+        totals["heartbeats_total"] += 1
+    ts = rec.get("timestamp")
+    if isinstance(ts, str):
+        totals["last_activity_ts"] = ts
+
 
 # === Effective log path ===
 
@@ -263,6 +318,7 @@ def cmd_status() -> tuple[dict[str, Any], str]:
     last_ts = (last or {}).get("timestamp") if last else None
     wiring = _check_wiring()
 
+    counters = reader.counters()
     payload: dict[str, Any] = {
         "version": __version__,
         "active": wiring["active"],
@@ -273,6 +329,7 @@ def cmd_status() -> tuple[dict[str, Any], str]:
         "last_record_timestamp": last_ts,
         "mode": "enforce",
         "schema_version": 1,
+        "counters": counters,
     }
 
     def tick(*, ok: bool) -> str:
@@ -301,6 +358,60 @@ def cmd_status() -> tuple[dict[str, Any], str]:
             ]
         )
     return payload, "\n".join(lines) + "\n"
+
+
+def cmd_healthcheck() -> tuple[dict[str, Any], str]:
+    """Synthesize a known-deny PreToolUse payload and assert guard denies.
+
+    Pipes a ``rm -rf /`` payload (always in ALWAYS_DENY) to the bash hook
+    entry point as a subprocess. Returns healthy=True iff the hook responds
+    with ``permissionDecision: deny`` within the timeout. Used by CI and
+    external monitoring as the front-line liveness probe.
+    """
+    payload = {
+        "session_id": "guard-healthcheck",
+        "tool_name": "Bash",
+        "tool_input": {"command": "rm -rf /"},
+        "hook_event_name": "PreToolUse",
+        "cwd": str(Path.home()),
+        "permission_mode": "default",
+    }
+    hook_path = Path(__file__).parent / "hooks" / "bash_command_validator.py"
+    start = time.monotonic()
+    try:
+        proc = subprocess.run(  # noqa: S603  # nosec B603 -- fixed argv (sys.executable + bundled hook script), no shell
+            [sys.executable, str(hook_path)],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        result = {
+            "healthy": False,
+            "reason": "hook timed out (>2s)",
+            "elapsed_ms": int((time.monotonic() - start) * 1000),
+        }
+        return result, f"guard healthcheck: UNHEALTHY ({result['reason']})\n"
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    decision = None
+    if proc.stdout.strip():
+        try:
+            envelope = json.loads(proc.stdout)
+            hso = envelope.get("hookSpecificOutput", {}) if isinstance(envelope, dict) else {}
+            decision = hso.get("permissionDecision") or envelope.get("permissionDecision")
+        except (json.JSONDecodeError, ValueError):
+            decision = None
+    healthy = decision == "deny"
+    result = {
+        "healthy": healthy,
+        "decision": decision,
+        "elapsed_ms": elapsed_ms,
+        "exit_code": proc.returncode,
+    }
+    status_label = "OK" if healthy else "UNHEALTHY"
+    return result, f"guard healthcheck: {status_label} (decision={decision} {elapsed_ms}ms)\n"
 
 
 def cmd_noisy(
@@ -854,6 +965,17 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
+    sub.add_parser(
+        "healthcheck",
+        help="Liveness probe: synthesize a known-deny PreToolUse payload and assert deny.",
+        epilog=(
+            "Examples:\n"
+            "  guard healthcheck         # exit 0 if guard responds with deny\n"
+            "  guard --json healthcheck  # structured output for monitoring"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
     p_noisy = sub.add_parser(
         "noisy",
         help="Top N rules by hit count, grouped by (hook_id, decision).",
@@ -1006,7 +1128,7 @@ def _emit(payload: dict[str, Any], pretty: str, *, as_json: bool) -> None:
         sys.stdout.write(pretty)
 
 
-def main(argv: list[str] | None = None) -> int:  # noqa: C901 -- linear command-dispatch ladder, one branch per subcommand
+def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 -- linear command-dispatch ladder, one branch per subcommand
     """CLI entry point. Returns the exit code."""
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -1022,6 +1144,10 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 -- linear command-
     try:
         if cmd == "status":
             payload, pretty = cmd_status()
+        elif cmd == "healthcheck":
+            payload, pretty = cmd_healthcheck()
+            _emit(payload, pretty, as_json=as_json)
+            return 0 if payload.get("healthy") else 1
         elif cmd == "noisy":
             since = parse_since(args.since)
             payload, pretty = cmd_noisy(

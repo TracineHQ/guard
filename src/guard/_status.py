@@ -18,9 +18,8 @@ from typing import Any
 from guard import __version__
 
 KNOWN_ENV_VARS = (
-    "CLAUDE_AUTONOMOUS",
     "GUARD_DECISIONS_PATH",
-    "GUARD_AUTONOMOUS_QUEUE_PATH",
+    "GUARD_STRICT_DENY_QUEUE_PATH",
     "GUARD_DEBUG",
     "GUARD_DATA_DIR",
 )

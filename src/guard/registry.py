@@ -3,12 +3,12 @@
 """Single source of truth for command safety classifications.
 
 Imported by ``bash_command_validator`` for ``SAFE_PREFIXES``,
-``AUTONOMOUS_FEEDBACK`` and the synthetic-deny lookup tables.
+``STRICT_FEEDBACK`` and the synthetic-deny lookup tables.
 """
 # The COMMANDS table is the contract for this module. Lints that would force
 # restructuring it are silenced:
 #   D101: Safety/CommandRule are self-describing; docstrings would just restate names.
-#   E501: a few autonomous_feedback strings are slightly over 100 chars; rewriting
+#   E501: a few strict_feedback strings are slightly over 100 chars; rewriting
 #         them changes the user-visible message.
 # ruff: noqa: D101, E501
 
@@ -31,7 +31,7 @@ class CommandRule:
     reason: str
     category: str
     pipe_safe: bool = False
-    autonomous_feedback: str = ""
+    strict_feedback: str = ""
     # When True, the command is documented as ALLOW for permission generation
     # but is NOT exported via SAFE_PREFIXES. Bash command validation must route
     # the prefix through a custom classifier (e.g. `_is_safe_env`,
@@ -72,147 +72,147 @@ COMMANDS: list[CommandRule] = [
         Safety.ASK,
         "Stages files",
         "git-write",
-        autonomous_feedback="Queue git add for session end. Continue implementing.",
+        strict_feedback="Queue git add for session end. Continue implementing.",
     ),
     CommandRule(
         "git commit",
         Safety.ASK,
         "Creates commit",
         "git-write",
-        autonomous_feedback="Queue git commit for session end. Continue implementing.",
+        strict_feedback="Queue git commit for session end. Continue implementing.",
     ),
     CommandRule(
         "git push",
         Safety.ASK,
         "Pushes to remote",
         "git-write",
-        autonomous_feedback="Queue git push for session end. Complete all work first.",
+        strict_feedback="Queue git push for session end. Complete all work first.",
     ),
     CommandRule(
         "git pull",
         Safety.ASK,
         "Pulls from remote",
         "git-write",
-        autonomous_feedback="Git pull requires confirmation. Note it for session end.",
+        strict_feedback="Git pull requires confirmation. Note it for session end.",
     ),
     CommandRule(
         "git fetch",
         Safety.ASK,
         "Fetches from remote",
         "git-write",
-        autonomous_feedback="Queue git fetch for session end.",
+        strict_feedback="Queue git fetch for session end.",
     ),
     CommandRule(
         "git checkout",
         Safety.ASK,
         "Switches branches",
         "git-write",
-        autonomous_feedback="Use 'git branch' to check branches. Queue checkout for session end.",
+        strict_feedback="Use 'git branch' to check branches. Queue checkout for session end.",
     ),
     CommandRule(
         "git switch",
         Safety.ASK,
         "Switches branches",
         "git-write",
-        autonomous_feedback="Queue branch switch for session end.",
+        strict_feedback="Queue branch switch for session end.",
     ),
     CommandRule(
         "git merge",
         Safety.ASK,
         "Merges branches",
         "git-write",
-        autonomous_feedback="Queue merge for session end.",
+        strict_feedback="Queue merge for session end.",
     ),
     CommandRule(
         "git rebase",
         Safety.ASK,
         "Rebases commits",
         "git-write",
-        autonomous_feedback="Queue rebase for session end.",
+        strict_feedback="Queue rebase for session end.",
     ),
     CommandRule(
         "git reset",
         Safety.ASK,
         "Resets state",
         "git-write",
-        autonomous_feedback="Git reset is destructive. Flag for human review.",
+        strict_feedback="Git reset is destructive. Flag for human review.",
     ),
     CommandRule(
         "git revert",
         Safety.ASK,
         "Reverts commits",
         "git-write",
-        autonomous_feedback="Queue revert for session end.",
+        strict_feedback="Queue revert for session end.",
     ),
     CommandRule(
         "git stash",
         Safety.ASK,
         "Stashes changes",
         "git-write",
-        autonomous_feedback="Use Write tool to save state to a file instead.",
+        strict_feedback="Use Write tool to save state to a file instead.",
     ),
     CommandRule(
         "git stash pop",
         Safety.ASK,
         "Pops stash",
         "git-write",
-        autonomous_feedback="Queue stash pop for session end.",
+        strict_feedback="Queue stash pop for session end.",
     ),
     CommandRule(
         "git stash drop",
         Safety.ASK,
         "Drops stash",
         "git-write",
-        autonomous_feedback="Queue stash drop for session end.",
+        strict_feedback="Queue stash drop for session end.",
     ),
     CommandRule(
         "git clean",
         Safety.ASK,
         "Removes untracked files",
         "git-write",
-        autonomous_feedback="Git clean is destructive. Flag for human review.",
+        strict_feedback="Git clean is destructive. Flag for human review.",
     ),
     CommandRule(
         "git restore",
         Safety.ASK,
         "Discards changes",
         "git-write",
-        autonomous_feedback="Git restore discards work. Flag for human review.",
+        strict_feedback="Git restore discards work. Flag for human review.",
     ),
     CommandRule(
         "git cherry-pick",
         Safety.ASK,
         "Cherry-picks commits",
         "git-write",
-        autonomous_feedback="Queue cherry-pick for session end.",
+        strict_feedback="Queue cherry-pick for session end.",
     ),
     CommandRule(
         "git branch -d",
         Safety.ASK,
         "Deletes branch (safe)",
         "git-branch",
-        autonomous_feedback="Queue branch deletion for session end.",
+        strict_feedback="Queue branch deletion for session end.",
     ),
     CommandRule(
         "git branch -m",
         Safety.ASK,
         "Renames branch",
         "git-branch",
-        autonomous_feedback="Queue branch rename for session end.",
+        strict_feedback="Queue branch rename for session end.",
     ),
     CommandRule(
         "git tag -a",
         Safety.ASK,
         "Creates annotated tag",
         "git-branch",
-        autonomous_feedback="Queue tag creation for session end.",
+        strict_feedback="Queue tag creation for session end.",
     ),
     CommandRule(
         "git tag -d",
         Safety.ASK,
         "Deletes tag",
         "git-branch",
-        autonomous_feedback="Queue tag deletion for session end.",
+        strict_feedback="Queue tag deletion for session end.",
     ),
     # --- Git DENY ---
     CommandRule("git add -A", Safety.DENY, "Adds all files indiscriminately", "git-deny"),
@@ -414,28 +414,28 @@ COMMANDS: list[CommandRule] = [
         Safety.ASK,
         "Delete files",
         "file-write",
-        autonomous_feedback="File deletion requires confirmation. Flag files for deletion at session end.",
+        strict_feedback="File deletion requires confirmation. Flag files for deletion at session end.",
     ),
     CommandRule(
         "rm -rf",
         Safety.ASK,
         "Force delete files",
         "file-write",
-        autonomous_feedback="Recursive deletion requires confirmation. Flag for session end.",
+        strict_feedback="Recursive deletion requires confirmation. Flag for session end.",
     ),
     CommandRule(
         "rmdir",
         Safety.ASK,
         "Delete directory",
         "file-write",
-        autonomous_feedback="Directory deletion requires confirmation. Flag for session end.",
+        strict_feedback="Directory deletion requires confirmation. Flag for session end.",
     ),
     CommandRule(
         "mv",
         Safety.ASK,
         "Move/rename files",
         "file-write",
-        autonomous_feedback="Use Write tool to create new file, flag old for deletion at session end.",
+        strict_feedback="Use Write tool to create new file, flag old for deletion at session end.",
     ),
     # --- GitHub CLI Write (ASK) ---
     CommandRule(
@@ -443,105 +443,105 @@ COMMANDS: list[CommandRule] = [
         Safety.ASK,
         "Create PR",
         "gh-write",
-        autonomous_feedback="Queue PR creation for session end.",
+        strict_feedback="Queue PR creation for session end.",
     ),
     CommandRule(
         "gh pr merge",
         Safety.ASK,
         "Merge PR",
         "gh-write",
-        autonomous_feedback="Queue PR merge for session end.",
+        strict_feedback="Queue PR merge for session end.",
     ),
     CommandRule(
         "gh pr close",
         Safety.ASK,
         "Close PR",
         "gh-write",
-        autonomous_feedback="Queue PR close for session end.",
+        strict_feedback="Queue PR close for session end.",
     ),
     CommandRule(
         "gh pr comment",
         Safety.ASK,
         "Comment on PR",
         "gh-write",
-        autonomous_feedback="Queue PR comment for session end.",
+        strict_feedback="Queue PR comment for session end.",
     ),
     CommandRule(
         "gh pr review",
         Safety.ASK,
         "Review PR",
         "gh-write",
-        autonomous_feedback="Queue PR review for session end.",
+        strict_feedback="Queue PR review for session end.",
     ),
     CommandRule(
         "gh pr edit",
         Safety.ASK,
         "Edit PR",
         "gh-write",
-        autonomous_feedback="Queue PR edit for session end.",
+        strict_feedback="Queue PR edit for session end.",
     ),
     CommandRule(
         "gh pr reopen",
         Safety.ASK,
         "Reopen PR",
         "gh-write",
-        autonomous_feedback="Queue PR reopen for session end.",
+        strict_feedback="Queue PR reopen for session end.",
     ),
     CommandRule(
         "gh issue create",
         Safety.ASK,
         "Create issue",
         "gh-write",
-        autonomous_feedback="Queue issue creation for session end.",
+        strict_feedback="Queue issue creation for session end.",
     ),
     CommandRule(
         "gh issue close",
         Safety.ASK,
         "Close issue",
         "gh-write",
-        autonomous_feedback="Queue issue close for session end.",
+        strict_feedback="Queue issue close for session end.",
     ),
     CommandRule(
         "gh issue comment",
         Safety.ASK,
         "Comment on issue",
         "gh-write",
-        autonomous_feedback="Queue issue comment for session end.",
+        strict_feedback="Queue issue comment for session end.",
     ),
     CommandRule(
         "gh issue edit",
         Safety.ASK,
         "Edit issue",
         "gh-write",
-        autonomous_feedback="Queue issue edit for session end.",
+        strict_feedback="Queue issue edit for session end.",
     ),
     CommandRule(
         "gh release create",
         Safety.ASK,
         "Create release",
         "gh-write",
-        autonomous_feedback="Queue release creation for session end.",
+        strict_feedback="Queue release creation for session end.",
     ),
     CommandRule(
         "gh run cancel",
         Safety.ASK,
         "Cancel workflow run",
         "gh-write",
-        autonomous_feedback="Queue run cancellation for session end.",
+        strict_feedback="Queue run cancellation for session end.",
     ),
     CommandRule(
         "gh run rerun",
         Safety.ASK,
         "Rerun workflow",
         "gh-write",
-        autonomous_feedback="Queue workflow rerun for session end.",
+        strict_feedback="Queue workflow rerun for session end.",
     ),
     CommandRule(
         "gh workflow run",
         Safety.ASK,
         "Trigger workflow",
         "gh-write",
-        autonomous_feedback="Queue workflow trigger for session end.",
+        strict_feedback="Queue workflow trigger for session end.",
     ),
     # --- Docker Write (ASK) ---
     CommandRule(
@@ -549,70 +549,70 @@ COMMANDS: list[CommandRule] = [
         Safety.ASK,
         "Run container",
         "docker-write",
-        autonomous_feedback="Container execution requires confirmation. Queue for session end.",
+        strict_feedback="Container execution requires confirmation. Queue for session end.",
     ),
     CommandRule(
         "docker stop",
         Safety.ASK,
         "Stop container",
         "docker-write",
-        autonomous_feedback="Queue container stop for session end.",
+        strict_feedback="Queue container stop for session end.",
     ),
     CommandRule(
         "docker rm",
         Safety.ASK,
         "Remove container",
         "docker-write",
-        autonomous_feedback="Queue container removal for session end.",
+        strict_feedback="Queue container removal for session end.",
     ),
     CommandRule(
         "docker rmi",
         Safety.ASK,
         "Remove image",
         "docker-write",
-        autonomous_feedback="Queue image removal for session end.",
+        strict_feedback="Queue image removal for session end.",
     ),
     CommandRule(
         "docker build",
         Safety.ASK,
         "Build image",
         "docker-write",
-        autonomous_feedback="Queue docker build for session end.",
+        strict_feedback="Queue docker build for session end.",
     ),
     CommandRule(
         "docker push",
         Safety.ASK,
         "Push image",
         "docker-write",
-        autonomous_feedback="Queue image push for session end.",
+        strict_feedback="Queue image push for session end.",
     ),
     CommandRule(
         "docker pull",
         Safety.ASK,
         "Pull image",
         "docker-write",
-        autonomous_feedback="Queue image pull for session end.",
+        strict_feedback="Queue image pull for session end.",
     ),
     CommandRule(
         "docker compose up",
         Safety.ASK,
         "Start compose",
         "docker-write",
-        autonomous_feedback="Queue compose up for session end.",
+        strict_feedback="Queue compose up for session end.",
     ),
     CommandRule(
         "docker compose down",
         Safety.ASK,
         "Stop compose",
         "docker-write",
-        autonomous_feedback="Queue compose down for session end.",
+        strict_feedback="Queue compose down for session end.",
     ),
     CommandRule(
         "docker system prune",
         Safety.ASK,
         "Prune docker",
         "docker-write",
-        autonomous_feedback="Docker prune is destructive. Flag for human review.",
+        strict_feedback="Docker prune is destructive. Flag for human review.",
     ),
     # --- Cloud Write (ASK) ---
     CommandRule(
@@ -620,63 +620,63 @@ COMMANDS: list[CommandRule] = [
         Safety.ASK,
         "Access secret",
         "cloud-write",
-        autonomous_feedback="Secret access requires confirmation. Queue for session end.",
+        strict_feedback="Secret access requires confirmation. Queue for session end.",
     ),
     CommandRule(
         "gcloud secrets create",
         Safety.ASK,
         "Create secret",
         "cloud-write",
-        autonomous_feedback="Queue secret creation for session end.",
+        strict_feedback="Queue secret creation for session end.",
     ),
     CommandRule(
         "gcloud secrets versions add",
         Safety.ASK,
         "Add secret version",
         "cloud-write",
-        autonomous_feedback="Queue secret version add for session end.",
+        strict_feedback="Queue secret version add for session end.",
     ),
     CommandRule(
         "gcloud services enable",
         Safety.ASK,
         "Enable service",
         "cloud-write",
-        autonomous_feedback="Queue service enable for session end.",
+        strict_feedback="Queue service enable for session end.",
     ),
     CommandRule(
         "gcloud iam",
         Safety.ASK,
         "IAM operations",
         "cloud-write",
-        autonomous_feedback="IAM changes require confirmation. Queue for session end.",
+        strict_feedback="IAM changes require confirmation. Queue for session end.",
     ),
     CommandRule(
         "gcloud auth print-access-token",
         Safety.ASK,
         "Print access token",
         "cloud-write",
-        autonomous_feedback="Token access requires confirmation. Queue for session end.",
+        strict_feedback="Token access requires confirmation. Queue for session end.",
     ),
     CommandRule(
         "gcloud auth print-identity-token",
         Safety.ASK,
         "Print identity token",
         "cloud-write",
-        autonomous_feedback="Token access requires confirmation. Queue for session end.",
+        strict_feedback="Token access requires confirmation. Queue for session end.",
     ),
     CommandRule(
         "gcloud run deploy",
         Safety.ASK,
         "Deploy Cloud Run",
         "cloud-write",
-        autonomous_feedback="Deployment requires confirmation. Queue for session end.",
+        strict_feedback="Deployment requires confirmation. Queue for session end.",
     ),
     CommandRule(
         "gcloud app deploy",
         Safety.ASK,
         "Deploy App Engine",
         "cloud-write",
-        autonomous_feedback="Deployment requires confirmation. Queue for session end.",
+        strict_feedback="Deployment requires confirmation. Queue for session end.",
     ),
     # --- Terraform Write (ASK) ---
     CommandRule(
@@ -684,63 +684,63 @@ COMMANDS: list[CommandRule] = [
         Safety.ASK,
         "Apply terraform",
         "terraform-write",
-        autonomous_feedback="Terraform apply requires confirmation. Queue for session end.",
+        strict_feedback="Terraform apply requires confirmation. Queue for session end.",
     ),
     CommandRule(
         "terraform import",
         Safety.ASK,
         "Import resource",
         "terraform-write",
-        autonomous_feedback="Queue terraform import for session end.",
+        strict_feedback="Queue terraform import for session end.",
     ),
     CommandRule(
         "terraform state mv",
         Safety.ASK,
         "Move state",
         "terraform-write",
-        autonomous_feedback="Queue state move for session end.",
+        strict_feedback="Queue state move for session end.",
     ),
     CommandRule(
         "terraform state rm",
         Safety.ASK,
         "Remove from state",
         "terraform-write",
-        autonomous_feedback="Queue state removal for session end.",
+        strict_feedback="Queue state removal for session end.",
     ),
     CommandRule(
         "terraform taint",
         Safety.ASK,
         "Taint resource",
         "terraform-write",
-        autonomous_feedback="Queue taint for session end.",
+        strict_feedback="Queue taint for session end.",
     ),
     CommandRule(
         "terraform untaint",
         Safety.ASK,
         "Untaint resource",
         "terraform-write",
-        autonomous_feedback="Queue untaint for session end.",
+        strict_feedback="Queue untaint for session end.",
     ),
     CommandRule(
         "terraform workspace new",
         Safety.ASK,
         "New workspace",
         "terraform-write",
-        autonomous_feedback="Queue workspace creation for session end.",
+        strict_feedback="Queue workspace creation for session end.",
     ),
     CommandRule(
         "terraform workspace select",
         Safety.ASK,
         "Select workspace",
         "terraform-write",
-        autonomous_feedback="Queue workspace switch for session end.",
+        strict_feedback="Queue workspace switch for session end.",
     ),
     CommandRule(
         "terraform workspace delete",
         Safety.ASK,
         "Delete workspace",
         "terraform-write",
-        autonomous_feedback="Queue workspace deletion for session end.",
+        strict_feedback="Queue workspace deletion for session end.",
     ),
     # --- Terraform DENY ---
     CommandRule("terraform destroy", Safety.DENY, "Destroys infrastructure", "terraform-deny"),
@@ -792,9 +792,9 @@ COMMANDS: list[CommandRule] = [
     ),
     # --- Interpreter RCE DENY ---
     # `python -c`, `python3 -c`, `node -e`, `node --eval` are canonical RCE
-    # primitives — denied unconditionally in both interactive and autonomous
+    # primitives — denied unconditionally in both interactive and strict
     # modes. Note: `_is_safe_interpreter` further restricts ANY flagged form
-    # in autonomous mode; these entries exist so even interactive mode denies.
+    # in strict mode; these entries exist so even interactive mode denies.
     CommandRule(
         "python -c",
         Safety.DENY,
@@ -835,28 +835,28 @@ COMMANDS: list[CommandRule] = [
         Safety.ASK,
         "Install package",
         "package-mgmt",
-        autonomous_feedback="Package install requires confirmation. Queue for session end.",
+        strict_feedback="Package install requires confirmation. Queue for session end.",
     ),
     CommandRule(
         "pip uninstall",
         Safety.ASK,
         "Uninstall package",
         "package-mgmt",
-        autonomous_feedback="Package uninstall requires confirmation. Queue for session end.",
+        strict_feedback="Package uninstall requires confirmation. Queue for session end.",
     ),
     CommandRule(
         "uv pip install",
         Safety.ASK,
         "UV install package",
         "package-mgmt",
-        autonomous_feedback="Package install requires confirmation. Queue for session end.",
+        strict_feedback="Package install requires confirmation. Queue for session end.",
     ),
     CommandRule(
         "make install",
         Safety.ASK,
         "Make install",
         "package-mgmt",
-        autonomous_feedback="Package install requires confirmation. Queue for session end.",
+        strict_feedback="Package install requires confirmation. Queue for session end.",
     ),
     # --- Orchestration Destruction (DENY) ---
     # Each shape below has no legitimate dev-time variant. The literal-prefix
@@ -933,21 +933,21 @@ COMMANDS: list[CommandRule] = [
         Safety.ASK,
         "Prunes stopped containers",
         "docker-mgmt",
-        autonomous_feedback="Docker prune is destructive. Flag for human review.",
+        strict_feedback="Docker prune is destructive. Flag for human review.",
     ),
     CommandRule(
         "docker volume prune",
         Safety.ASK,
         "Prunes unused volumes (data loss risk)",
         "docker-mgmt",
-        autonomous_feedback="Docker volume prune deletes data. Flag for human review.",
+        strict_feedback="Docker volume prune deletes data. Flag for human review.",
     ),
     CommandRule(
         "aws s3 rm",
         Safety.ASK,
         "S3 object removal",
         "aws-mgmt",
-        autonomous_feedback="S3 deletion requires confirmation. Queue for session end.",
+        strict_feedback="S3 deletion requires confirmation. Queue for session end.",
     ),
 ]
 
@@ -960,10 +960,10 @@ SAFE_PREFIXES: frozenset[str] = frozenset(
 
 SAFE_PIPE_COMMANDS: frozenset[str] = frozenset(cmd.prefix for cmd in COMMANDS if cmd.pipe_safe)
 
-AUTONOMOUS_FEEDBACK: dict[str, str] = {
-    cmd.prefix: cmd.autonomous_feedback
+STRICT_FEEDBACK: dict[str, str] = {
+    cmd.prefix: cmd.strict_feedback
     for cmd in COMMANDS
-    if cmd.safety == Safety.ASK and cmd.autonomous_feedback
+    if cmd.safety == Safety.ASK and cmd.strict_feedback
 }
 
 ALWAYS_DENY: frozenset[str] = frozenset(cmd.prefix for cmd in COMMANDS if cmd.safety == Safety.DENY)

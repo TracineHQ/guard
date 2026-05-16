@@ -44,13 +44,20 @@ authoritative references. Quick map:
   Stops the main agent from inlining noisy JSONL transcripts into context.
 - `subagent_scope` — file edits outside the declared `.claude/subagent-scope.json` allowlist.
 
+## Strict mode
+
+Strict default-deny activates from Claude Code's `permission_mode` field in
+PreToolUse hook input. Modes `dontAsk` and `bypassPermissions` route the
+command through guard's default-deny path (anything not on the safe-prefix
+allowlist is denied with an `STRICT_FEEDBACK` message). All other modes
+(`default`, `plan`, `acceptEdits`, `auto`) use advisory evaluation.
+
 ## Environment variables
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `CLAUDE_AUTONOMOUS` | Set to a truthy value (`1`, `true`, `yes`, `on` — case-insensitive) for strict default-deny in subagents / driven runs | unset (interactive mode) |
 | `GUARD_DECISIONS_PATH` | Override the JSONL decision-log path | `~/.claude/guard-decisions.jsonl` |
-| `GUARD_AUTONOMOUS_QUEUE_PATH` | Override the autonomous-deny queue path | `~/.claude/guard-autonomous-queue.jsonl` |
+| `GUARD_STRICT_DENY_QUEUE_PATH` | Override the strict-deny queue path | `~/.claude/guard-strict-deny-queue.jsonl` |
 | `GUARD_DEBUG` | Set to `1` to emit per-hook debug to stderr | unset |
 | `GUARD_DATA_DIR` | Override the directory containing guard's data files | `~/.claude/guard` |
 | `GUARD_PROTECTED_EXTRA` | Comma-separated extra patterns for `protected_files`. See below. | unset |

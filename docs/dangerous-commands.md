@@ -19,7 +19,7 @@ the full list.
 ## Always-deny
 
 These prefixes are in `ALWAYS_DENY` and block in both interactive and
-autonomous mode.
+strict mode.
 
 ### Filesystem destruction (`rm-deny`)
 
@@ -117,9 +117,9 @@ naive prefix matching would let attacker-controlled flags re-exec code.
 
 ## High-risk ASK commands
 
-These are not denied but are surfaced for human confirmation. In autonomous
-mode (`CLAUDE_AUTONOMOUS=1`) they are denied with a queued-for-session-end
-message.
+These are not denied but are surfaced for human confirmation. In strict mode
+(`permission_mode` is `dontAsk` or `bypassPermissions`) they are denied with
+a queued-for-session-end message.
 
 ### Filesystem writes
 

@@ -6,8 +6,8 @@ One test group per matcher family. Each group has DENY_CASES (must
 produce a deny envelope) and LEGIT_CASES (must NOT deny). Every shape
 the matchers are designed to catch is exercised at least once.
 
-Tests run against the live ``decide()`` in interactive mode (autonomous
-unset) — this is the worst-case for false-negatives because autonomous
+Tests run against the live ``decide()`` in interactive mode (permission_mode
+default) — this is the worst-case for false-negatives because strict
 mode default-denies anything not on the safe-prefix allowlist.
 """
 
@@ -27,9 +27,10 @@ def _is_deny(result: dict | None) -> bool:
 
 
 @pytest.fixture(autouse=True)
-def _interactive_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force interactive mode — agentic default-deny would mask real gaps."""
-    monkeypatch.delenv("CLAUDE_AUTONOMOUS", raising=False)
+def _interactive_mode() -> None:
+    """No-op: permission_mode defaults to 'default' (interactive) when not passed
+    to decide(). Kept as an explicit fixture for clarity at the test boundary.
+    """
 
 
 # ============================================================================
@@ -1594,7 +1595,7 @@ GUARD_LOG_PROTECT_DENY = [
     "cp /tmp/forge.jsonl ~/.claude/guard-decisions.jsonl",
     "tee ~/.claude/guard-decisions.jsonl",
     "truncate -s 0 ~/.claude/guard-decisions.jsonl",
-    "mv /tmp/x ~/.claude/guard-autonomous-queue.jsonl",
+    "mv /tmp/x ~/.claude/guard-strict-deny-queue.jsonl",
     "cp /tmp/x ~/.claude/guard/allowlist.json",
     "tee ~/.claude/guard/allowlist.json",
     "ln -sf /tmp/evil ~/.claude/guard-decisions.jsonl",

@@ -212,8 +212,8 @@ jobs:
           #   #deny            — at least one hook must return deny
           #   #override <env>  — set GUARD_ADMIN_ALLOW_VERBS=<env>, assert allow
           #
-          # CLAUDE_AUTONOMOUS=0: override blocks must be tested in interactive
-          # mode so GUARD_ADMIN_ALLOW_VERBS takes effect before autonomous-deny.
+          # permission_mode=default: override blocks must be tested in interactive
+          # mode so GUARD_ADMIN_ALLOW_VERBS takes effect before strict-deny.
           CORPUS="tests/integration/aws_catalog_smoke_corpus.txt"
           GUARD_BIN="/tmp/guard-smoke/bin/guard"
           /tmp/guard-smoke/bin/python - "$CORPUS" "$GUARD_BIN" <<'PYEOF'
@@ -252,7 +252,6 @@ jobs:
 
               cmd = line
               env = os.environ.copy()
-              env["CLAUDE_AUTONOMOUS"] = "0"
               if current_marker == "override" and current_override_env:
                   env["GUARD_ADMIN_ALLOW_VERBS"] = current_override_env
 

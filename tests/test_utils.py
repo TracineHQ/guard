@@ -19,8 +19,9 @@ from guard._utils import (
     all_paths_in,
     append_jsonl,
     emit_pretooluse_decision,
-    is_autonomous_mode,
+    is_strict_mode,
     log_decision,
+    read_permission_mode,
     sanitize_for_stderr,
 )
 
@@ -293,20 +294,39 @@ def test_emit_pretooluse_decision_ask() -> None:
 # === _env_int: malformed/unset handling ===
 
 
-def test_is_autonomous_mode_when_unset() -> None:
-    with mock.patch.dict(os.environ, {}, clear=False):
-        os.environ.pop("CLAUDE_AUTONOMOUS", None)
-        assert is_autonomous_mode() is False
+def test_read_permission_mode_default_when_missing() -> None:
+    assert read_permission_mode({}) == "default"
+    assert read_permission_mode(None) == "default"
 
 
-def test_is_autonomous_mode_when_set() -> None:
-    with mock.patch.dict(os.environ, {"CLAUDE_AUTONOMOUS": "1"}):
-        assert is_autonomous_mode() is True
+def test_read_permission_mode_returns_value() -> None:
+    for mode in ("default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions"):
+        assert read_permission_mode({"permission_mode": mode}) == mode
 
 
-def test_is_autonomous_mode_when_set_to_zero() -> None:
-    with mock.patch.dict(os.environ, {"CLAUDE_AUTONOMOUS": "0"}):
-        assert is_autonomous_mode() is False
+def test_read_permission_mode_strips_whitespace() -> None:
+    assert read_permission_mode({"permission_mode": "  dontAsk  "}) == "dontAsk"
+
+
+def test_read_permission_mode_ignores_non_string() -> None:
+    assert read_permission_mode({"permission_mode": 1}) == "default"
+    assert read_permission_mode({"permission_mode": None}) == "default"
+    assert read_permission_mode({"permission_mode": ""}) == "default"
+
+
+def test_is_strict_mode_true_for_dontAsk_and_bypass() -> None:
+    assert is_strict_mode({"permission_mode": "dontAsk"}) is True
+    assert is_strict_mode({"permission_mode": "bypassPermissions"}) is True
+
+
+def test_is_strict_mode_false_for_other_modes() -> None:
+    for mode in ("default", "plan", "acceptEdits", "auto"):
+        assert is_strict_mode({"permission_mode": mode}) is False
+
+
+def test_is_strict_mode_false_when_missing() -> None:
+    assert is_strict_mode({}) is False
+    assert is_strict_mode(None) is False
 
 
 def test_env_int_unset_returns_default() -> None:
@@ -438,19 +458,6 @@ def test_log_decision_oversize_record_is_valid_json(guard_decisions_jsonl: Path)
         isinstance(record.get(f), str) and "…[truncated]" in record[f]
         for f in ("command_excerpt", "reason")
     )
-
-
-def test_is_autonomous_mode_accepts_string_truthy(monkeypatch) -> None:
-    """`CLAUDE_AUTONOMOUS=true|yes|on|1` (case-insensitive) all enable strict mode."""
-    for value in ("1", "true", "True", "TRUE", "yes", "YES", "on", "ON", "  true "):
-        monkeypatch.setenv("CLAUDE_AUTONOMOUS", value)
-        assert is_autonomous_mode(), f"truthy value rejected: {value!r}"
-
-
-def test_is_autonomous_mode_rejects_falsy(monkeypatch) -> None:
-    for value in ("", "0", "false", "no", "off", "anything-else"):
-        monkeypatch.setenv("CLAUDE_AUTONOMOUS", value)
-        assert not is_autonomous_mode(), f"falsy value accepted: {value!r}"
 
 
 # Synthetic credential shapes used to verify the log-redaction catalog.

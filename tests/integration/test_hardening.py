@@ -24,11 +24,9 @@ PROTECTED = REPO / "src" / "guard" / "hooks" / "protected_files.py"
 COMMIT_MSG_HOOK = REPO / "src" / "guard" / "hooks" / "commit_message_validator.py"
 
 
-def _run_bash(command: str, *, autonomous: bool = False) -> tuple[int, str, str]:
+def _run_bash(command: str, *, strict: bool = False) -> tuple[int, str, str]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO / "src")
-    if autonomous:
-        env["CLAUDE_AUTONOMOUS"] = "1"
     proc = subprocess.run(
         [sys.executable, str(HOOK)],
         input=json.dumps(
@@ -38,6 +36,7 @@ def _run_bash(command: str, *, autonomous: bool = False) -> tuple[int, str, str]
                 "tool_input": {"command": command},
                 "hook_event_name": "PreToolUse",
                 "cwd": "/tmp",
+                "permission_mode": "dontAsk" if strict else "default",
             }
         ),
         capture_output=True,
@@ -61,40 +60,40 @@ def _run_bash(command: str, *, autonomous: bool = False) -> tuple[int, str, str]
     ],
 )
 def test_rm_rf_root_denied_in_both_modes(cmd: str) -> None:
-    for autonomous in (False, True):
-        _, stdout, _ = _run_bash(cmd, autonomous=autonomous)
-        assert _decision(stdout) == "deny", f"{cmd!r} mode={autonomous} not denied"
+    for strict in (False, True):
+        _, stdout, _ = _run_bash(cmd, strict=strict)
+        assert _decision(stdout) == "deny", f"{cmd!r} strict={strict} not denied"
 
 
 def test_find_exec_rm_denied_in_interactive() -> None:
-    _, stdout, _ = _run_bash("find . -name '*.py' -exec rm {} \\;", autonomous=False)
+    _, stdout, _ = _run_bash("find . -name '*.py' -exec rm {} \\;", strict=False)
     assert _decision(stdout) == "deny", "find -exec rm not denied"
 
 
 def test_command_substitution_denied_in_interactive() -> None:
-    _, stdout, _ = _run_bash("cat $(rm -rf /tmp/foo)", autonomous=False)
+    _, stdout, _ = _run_bash("cat $(rm -rf /tmp/foo)", strict=False)
     assert _decision(stdout) == "deny", "$() substitution not denied"
 
 
 def test_backtick_substitution_denied_in_interactive() -> None:
-    _, stdout, _ = _run_bash("cat `rm -rf /tmp/foo`", autonomous=False)
+    _, stdout, _ = _run_bash("cat `rm -rf /tmp/foo`", strict=False)
     assert _decision(stdout) == "deny", "backtick substitution not denied"
 
 
-def test_env_dash_i_bash_denied_in_autonomous() -> None:
-    _, stdout, _ = _run_bash("env -i bash -c 'rm -rf /tmp/marker'", autonomous=True)
+def test_env_dash_i_bash_denied_in_strict() -> None:
+    _, stdout, _ = _run_bash("env -i bash -c 'rm -rf /tmp/marker'", strict=True)
     assert _decision(stdout) == "deny", "env -i bash bypass not closed"
 
 
 def test_env_dash_i_bash_denied_in_interactive() -> None:
     """env -i is also caught in interactive mode via ALWAYS_DENY."""
-    _, stdout, _ = _run_bash("env -i bash -c 'rm -rf /tmp/marker'", autonomous=False)
+    _, stdout, _ = _run_bash("env -i bash -c 'rm -rf /tmp/marker'", strict=False)
     assert _decision(stdout) == "deny", "env -i should be ALWAYS_DENY in interactive too"
 
 
-def test_bare_env_still_allowed_in_autonomous() -> None:
-    _, stdout, _ = _run_bash("env", autonomous=True)
-    assert _decision(stdout) == "allow", "bare env should still be safe in autonomous"
+def test_bare_env_still_allowed_in_strict() -> None:
+    _, stdout, _ = _run_bash("env", strict=True)
+    assert _decision(stdout) == "allow", "bare env should still be safe in strict"
 
 
 def test_settings_json_edit_asks() -> None:
@@ -175,9 +174,9 @@ def test_malformed_json_denied() -> None:
     ],
 )
 def test_curl_pipe_shell_denied_in_both_modes(cmd: str) -> None:
-    for autonomous in (False, True):
-        _, stdout, _ = _run_bash(cmd, autonomous=autonomous)
-        assert _decision(stdout) == "deny", f"{cmd!r} mode={autonomous} not denied"
+    for strict in (False, True):
+        _, stdout, _ = _run_bash(cmd, strict=strict)
+        assert _decision(stdout) == "deny", f"{cmd!r} strict={strict} not denied"
 
 
 @pytest.mark.parametrize(
@@ -191,7 +190,7 @@ def test_curl_pipe_shell_denied_in_both_modes(cmd: str) -> None:
     ],
 )
 def test_curl_safe_uses_not_denied(cmd: str) -> None:
-    _, stdout, _ = _run_bash(cmd, autonomous=False)
+    _, stdout, _ = _run_bash(cmd, strict=False)
     assert _decision(stdout) != "deny", f"{cmd!r} should not be denied"
 
 
@@ -263,9 +262,9 @@ def test_git_commit_long_file_flag_with_ai_attribution_denied(tmp_path: Path) ->
 )
 def test_always_deny_normalized(cmd: str) -> None:
     """Quoting/whitespace bypass must not evade ALWAYS_DENY (Fix 3+4)."""
-    for autonomous in (False, True):
-        _, stdout, _ = _run_bash(cmd, autonomous=autonomous)
-        assert _decision(stdout) == "deny", f"{cmd!r} mode={autonomous} not denied"
+    for strict in (False, True):
+        _, stdout, _ = _run_bash(cmd, strict=strict)
+        assert _decision(stdout) == "deny", f"{cmd!r} strict={strict} not denied"
 
 
 @pytest.mark.parametrize(
@@ -280,9 +279,9 @@ def test_always_deny_normalized(cmd: str) -> None:
 )
 def test_interpreter_rce_denied_in_both_modes(cmd: str) -> None:
     """python -c / python3 -c / node -e are RCE primitives (Fix 1)."""
-    for autonomous in (False, True):
-        _, stdout, _ = _run_bash(cmd, autonomous=autonomous)
-        assert _decision(stdout) == "deny", f"{cmd!r} mode={autonomous} not denied"
+    for strict in (False, True):
+        _, stdout, _ = _run_bash(cmd, strict=strict)
+        assert _decision(stdout) == "deny", f"{cmd!r} strict={strict} not denied"
 
 
 @pytest.mark.parametrize(
@@ -297,10 +296,10 @@ def test_interpreter_rce_denied_in_both_modes(cmd: str) -> None:
         "python -p 'print(1)'",
     ],
 )
-def test_python_flagged_forms_denied_in_autonomous(cmd: str) -> None:
-    """Generic flag forms of bare python must deny in autonomous mode (Fix 1)."""
-    _, stdout, _ = _run_bash(cmd, autonomous=True)
-    assert _decision(stdout) == "deny", f"{cmd!r} not denied in autonomous"
+def test_python_flagged_forms_denied_in_strict(cmd: str) -> None:
+    """Generic flag forms of bare python must deny in strict mode (Fix 1)."""
+    _, stdout, _ = _run_bash(cmd, strict=True)
+    assert _decision(stdout) == "deny", f"{cmd!r} not denied in strict"
 
 
 @pytest.mark.parametrize(
@@ -314,10 +313,10 @@ def test_python_flagged_forms_denied_in_autonomous(cmd: str) -> None:
         "node -v",
     ],
 )
-def test_interpreter_version_probes_allowed_in_autonomous(cmd: str) -> None:
+def test_interpreter_version_probes_allowed_in_strict(cmd: str) -> None:
     """Version probes are the only flagged interpreter form allowed."""
-    _, stdout, _ = _run_bash(cmd, autonomous=True)
-    assert _decision(stdout) == "allow", f"{cmd!r} should be allowed in autonomous"
+    _, stdout, _ = _run_bash(cmd, strict=True)
+    assert _decision(stdout) == "allow", f"{cmd!r} should be allowed in strict"
 
 
 def test_jsonl_writer_truncates_to_4096_bytes(tmp_path: Path) -> None:

@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Strict default-deny now activates from Claude Code's documented
+  `permission_mode` field in PreToolUse hook input (`dontAsk` or
+  `bypassPermissions`). The userland `CLAUDE_AUTONOMOUS` env var is no
+  longer read; the rename touches the hook contract, registry field name
+  (`autonomous_feedback` → `strict_feedback`), public API
+  (`STRICT_FEEDBACK`, `get_strict_deny`, `_evaluate_strict`), env var
+  (`GUARD_STRICT_DENY_QUEUE_PATH`), queue file path
+  (`~/.claude/guard-strict-deny-queue.jsonl`), and matcher rule_id
+  (`bash.admin_unknown_flag_strict`).
+- Deny messages now lead with a `guard [permission_mode=<mode>] denied:
+  <rule_id>` annunciator line so the active mode is visible to operators
+  reviewing transcripts.
+
 ## [1.3.1] - 2026-05-13
 
 ### Security

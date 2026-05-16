@@ -61,7 +61,8 @@ def run_hook(  # noqa: PLR0913 - kw-only flags, all optional and orthogonal
     hook_name: str,
     command: str,
     *,
-    autonomous: bool = False,
+    strict: bool = False,
+    permission_mode: str | None = None,
     decisions_path: Path | None = None,
     env_extra: Mapping[str, str] | None = None,
     session_id: str = "test",
@@ -69,22 +70,24 @@ def run_hook(  # noqa: PLR0913 - kw-only flags, all optional and orthogonal
 ) -> tuple[int, str, str]:
     """Spawn the named hook with a Bash PreToolUse payload, return (rc, stdout, stderr).
 
-    The default payload is the canonical bash-command shape. Tests that need
-    a different tool/event should call ``subprocess.run`` directly.
+    The default payload is the canonical bash-command shape. ``strict=True``
+    is a shortcut for ``permission_mode="dontAsk"``; pass ``permission_mode``
+    directly for any other mode (``plan``, ``acceptEdits``, ...).
     """
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_ROOT / "src")
-    env["CLAUDE_AUTONOMOUS"] = "1" if autonomous else "0"
     if decisions_path is not None:
         env["GUARD_DECISIONS_PATH"] = str(decisions_path)
     if env_extra:
         env.update(env_extra)
+    mode = permission_mode if permission_mode is not None else ("dontAsk" if strict else "default")
     payload: dict[str, Any] = {
         "session_id": session_id,
         "tool_name": "Bash",
         "tool_input": {"command": command},
         "hook_event_name": "PreToolUse",
         "cwd": cwd,
+        "permission_mode": mode,
     }
     proc = subprocess.run(
         [sys.executable, str(hook_path(hook_name))],

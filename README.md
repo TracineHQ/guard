@@ -70,11 +70,14 @@ Then `guard status` shows the log location and last record, `guard noisy --since
 
 Guard reads a small set of environment variables. See [SKILL.md](SKILL.md) for the canonical descriptions and defaults.
 
+Strict default-deny activates from Claude Code's `permission_mode` field in
+PreToolUse hook input (no env var). The strict modes are `dontAsk` and
+`bypassPermissions`.
+
 | Variable | Purpose |
 |---|---|
-| `CLAUDE_AUTONOMOUS` | Strict default-deny in subagents / driven runs |
 | `GUARD_DECISIONS_PATH` | Override the JSONL decision-log path |
-| `GUARD_AUTONOMOUS_QUEUE_PATH` | Override the autonomous-deny queue path |
+| `GUARD_STRICT_DENY_QUEUE_PATH` | Override the strict-deny queue path |
 | `GUARD_DEBUG` | Emit per-hook debug to stderr |
 | `GUARD_DATA_DIR` | Override guard's data directory |
 | `GUARD_PROTECTED_EXTRA` | Comma-separated extra protected glob patterns (fallback when `~/.claude/guard-protected.txt` is absent) |
