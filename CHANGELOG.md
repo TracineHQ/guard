@@ -71,9 +71,14 @@ adheres to [Semantic Versioning](https://semver.org/).
 - Shells / CI exporting `CLAUDE_AUTONOMOUS=1`: switch to launching Claude
   Code with `--permission-mode dontAsk` (or `auto` for the
   classifier-mediated mode). The env-var fallback works for one minor
-  cycle but emits a stderr warning.
+  cycle but emits a stderr warning. Removed in v1.5.0.
 - Monitoring pointing at `~/.claude/guard-autonomous-queue.jsonl`: update
   to `~/.claude/guard-strict-deny-queue.jsonl`.
+- Allowlist entries (`.claude/guard/allowlist.json`) referencing the old
+  rule_id `bash.admin_unknown_flag_autonomous` (under `disable_rules` or
+  `allow_commands.rule`) must be renamed to
+  `bash.admin_unknown_flag_strict`. The old id silently no-ops -- guard
+  treats unknown rule_ids as inert with a stderr warning at CLI time.
 - Log consumers parsing deny reasons: the prefix `guard [permission_mode=
   <mode>] denied: <rule_id>` replaces the trailing `Rule: <rule_id>`. The
   `rule_id` is still surfaced, now leading.

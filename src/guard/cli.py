@@ -175,8 +175,9 @@ class JsonlReader:
     def counters(self, *, since: datetime | None = None) -> dict[str, Any]:
         """Aggregate record counts by ``type`` (default → "decision").
 
-        Returns OTEL-friendly totals so external monitoring can scrape via
-        ``guard status --json | jq``.
+        Returns Prometheus-style totals (counters named with the ``_total``
+        suffix per Prometheus naming conventions) so external monitoring can
+        scrape via ``guard status --json | jq``.
         """
         totals: dict[str, Any] = {
             "decisions_total": 0,
@@ -371,14 +372,14 @@ def cmd_status() -> tuple[dict[str, Any], str]:
 
 
 _HEALTHCHECK_PROBES: tuple[tuple[str, str], ...] = (
-    # (command, expected substring in deny reason). Two independent probes
-    # so a single registry change cannot turn the healthcheck into a
-    # false-positive: both must deny AND surface the expected substring.
-    # We assert against the rule_id (``bash.always_deny``) plus a phrase
-    # specific to the matched ALWAYS_DENY entry, so a routing change that
-    # quietly demotes one of these from ALWAYS_DENY would be caught.
-    ("rm -rf /", "Recursive root"),
-    ("python -c 'x'", "re-execs"),
+    # (command, expected rule_id substring in deny reason). Two independent
+    # probes so a single registry change cannot turn the healthcheck into a
+    # false-positive: both must deny AND the deny reason must carry the
+    # expected rule_id (emitted by the ``_format_deny_reason`` annunciator).
+    # We pin to rule_id, not body text, because body wording is operational
+    # copy and gets rephrased; rule_id is the stable contract.
+    ("rm -rf /", "bash.always_deny"),
+    ("python -c 'x'", "bash.always_deny"),
 )
 
 
@@ -571,7 +572,11 @@ def cmd_trace(
     reader = JsonlReader(effective_log_path())
     records = list(
         reader.iter_records(
-            session_id=session_id, decision=decision, hook_id=hook_id, tool_name=tool_name
+            session_id=session_id,
+            decision=decision,
+            hook_id=hook_id,
+            tool_name=tool_name,
+            include_all_types=True,
         )
     )
     records.sort(key=lambda r: str(r.get("timestamp", "")))
@@ -586,10 +591,16 @@ def cmd_trace(
     else:
         for rec in records:
             ts = rec.get("timestamp", "?")
-            decision = rec.get("decision", "?")
-            hook_id = rec.get("hook_id", "?")
-            reason = str(rec.get("reason", ""))[:80]
-            lines.append(f"  {ts}  {decision:<5}  {hook_id}  {reason}")
+            rec_type = rec.get("type", "decision")
+            if rec_type == "internal_error":
+                exc_class = rec.get("exc_class", "?")
+                exc_msg = str(rec.get("exc_msg", ""))[:80]
+                lines.append(f"  {ts}  ERROR  {exc_class}  {exc_msg}")
+            else:
+                decision = rec.get("decision", "?")
+                hook_id = rec.get("hook_id", "?")
+                reason = str(rec.get("reason", ""))[:80]
+                lines.append(f"  {ts}  {decision:<5}  {hook_id}  {reason}")
     return payload, "\n".join(lines) + "\n"
 
 

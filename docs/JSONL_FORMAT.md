@@ -55,15 +55,17 @@ section is the contract. Consumers can opt-in by reading the env var directly
 |---|---|---|---|
 | `v` | int | yes | schema version, currently `1`. Short alias of `schema_version`. |
 | `schema_version` | int | yes | long form, kept for backward compatibility |
-| `mode` | enum string | yes | one of `"enforce"`, `"shadow"`, `"off"` |
+| `type` | enum string | optional | record-shape discriminator. Defaults to `"decision"` when absent. Currently one of `"decision"` or `"internal_error"`. Consumers MUST filter on `type` to avoid blending crash records into decision tallies. |
+| `mode` | enum string | yes (decision) | one of `"enforce"`, `"shadow"`, `"off"` |
 | `timestamp` | string (ISO-8601 UTC, microsecond precision, `Z` suffix) | yes | e.g. `"2026-04-29T14:32:11.123456Z"` |
-| `hook_id` | string | yes | namespaced: `guard.<hook_module>` (e.g. `guard.bash_command_validator`) |
-| `event` | string | yes | matches Claude Code event names (`PreToolUse`, `PostToolUse`) |
+| `hook_id` | string | yes (decision) | namespaced: `guard.<hook_module>` (e.g. `guard.bash_command_validator`) |
+| `event` | string | yes (decision) | matches Claude Code event names (`PreToolUse`, `PostToolUse`) |
 | `tool_name` | string \| null | yes for PreToolUse/PostToolUse | `Bash`, `Edit`, etc. |
-| `decision` | enum string | yes | one of `allow`, `deny`, `ask`, `defer`, `pass` |
-| `reason` | string | yes | human-readable; ≤ 1024 chars |
-| `command_excerpt` | string \| null | optional | truncated to 4096 chars; only set for Bash-related decisions |
-| `session_id` | string | yes | from Claude Code stdin |
+| `decision` | enum string | yes (decision) | one of `allow`, `deny`, `ask`, `defer`, `pass` |
+| `permission_mode` | enum string \| null | optional | Claude Code `permission_mode` at decision time (`default`, `plan`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`). Threaded from the PreToolUse payload; populated for Bash decisions. |
+| `reason` | string | yes (decision) | human-readable; ≤ 1024 chars. Secret-shapes are redacted at write time. |
+| `command_excerpt` | string \| null | optional | truncated to 4096 chars; only set for Bash-related decisions. Secret-shapes are redacted at write time. |
+| `session_id` | string | yes (decision) | from Claude Code stdin |
 | `cwd` | string | optional | from Claude Code stdin |
 | `unknown_flags` | array of strings | optional | long flags an admin CLI verb matcher could not classify against the spec's `known_flags`; capped at 8 entries. Populated only on `bash.admin_*` decisions and when the offending segment is for a CLI with a known-flags spec (currently: AWS). |
 
@@ -89,6 +91,26 @@ Consumers SHOULD resolve the log path in this order:
 2. `~/.claude/guard-decisions.jsonl` (default).
 3. If the default file is exactly one line and parses as `{"redirect": "<path>"}`,
    follow it (one hop only).
+
+### 3.3 `internal_error` records
+
+When a hook raises an uncaught exception, the guard process catches it and
+appends an `internal_error` record before re-raising. These records share
+`v`, `schema_version`, `timestamp`, and `session_id` with decisions but
+carry a different shape:
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `type` | string | yes | always `"internal_error"` for this record shape |
+| `exc_class` | string | yes | exception class name (e.g. `"ValueError"`) |
+| `exc_msg` | string | yes | exception message, secret-shape-redacted, ≤ 1024 chars |
+| `traceback_hash` | string | yes | `sha256:<hex>` of the traceback. Same crash collapses to the same hash so consumers can group recurrences without storing full tracebacks. |
+| `session_id` | string \| null | yes | from Claude Code stdin if available |
+
+Consumers tallying decisions MUST filter on `type == "decision"` (or absent)
+so crash records don't pollute counters. The bundled `guard trace <session>`
+surfaces `internal_error` records inline; `guard status` aggregates them as
+`internal_errors_total`.
 
 ## 4. Schema versioning rules
 

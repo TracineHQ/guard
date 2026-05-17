@@ -32,9 +32,9 @@ Validates the `command` string in `Bash` tool input. The validator:
 - Looks up each segment in the registry (`src/guard/registry.py`) — `ALLOW`
   prefixes pass, `ASK` prefixes are surfaced for confirmation, and
   `ALWAYS_DENY` prefixes block hard.
-- In strict mode (`permission_mode` is `dontAsk` or `bypassPermissions`),
-  `ASK`-tier commands are denied with a queued-for-session-end message
-  instead of prompting.
+- In strict mode (`permission_mode` is `auto`, `dontAsk`, or
+  `bypassPermissions` — any unattended mode), `ASK`-tier commands are
+  denied with a queued-for-session-end message instead of prompting.
 
 ### Example block
 

@@ -56,6 +56,30 @@ def test_log_internal_error_record_shape(tmp_path: Path, monkeypatch: pytest.Mon
     assert rec["session_id"] == "sess-1"
 
 
+def test_log_internal_error_redacts_secret_shapes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exception messages must run through ``_redact_secrets`` before landing in JSONL.
+
+    Without this, a hook that crashes while constructing a deny reason that
+    contains the offending command's credential would leak that credential
+    into the audit log — the same channel guard exists to keep clean.
+    """
+    log_path = tmp_path / "log.jsonl"
+    monkeypatch.setattr("guard._utils.GUARD_DECISIONS_PATH", str(log_path))
+    msg = "boom near AKIAIOSFODNN7EXAMPLE token"  # pragma: allowlist secret
+    try:
+        raise RuntimeError(msg)  # noqa: TRY301 -- intentional: synthesise an exc to capture
+    except RuntimeError as exc:
+        log_internal_error(exc)
+    records = _read_records(log_path)
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["type"] == "internal_error"
+    assert "AKIAIOSFODNN7EXAMPLE" not in rec["exc_msg"]  # pragma: allowlist secret
+    assert "[REDACTED-AWS-ID]" in rec["exc_msg"]
+
+
 def test_counters_aggregate_by_type(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from guard.cli import JsonlReader
 

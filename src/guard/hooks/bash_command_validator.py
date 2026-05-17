@@ -4217,21 +4217,29 @@ DEFAULT_STRICT_DENY_BODY = (
 )
 
 
-def get_strict_deny(segment: str) -> dict[str, str]:
-    """Return a deny envelope for a strict-mode segment.
+def get_strict_deny(segment: str) -> tuple[dict[str, str], str]:
+    """Return ``(deny envelope, rule_id)`` for a strict-mode segment.
 
     Matches the segment against ``STRICT_FEEDBACK`` (longest prefix wins).
     Normalizes via ``_normalize_segment`` so quoting/whitespace cannot bypass
     a feedback rule. Falls back to the generic strict default-deny on no
     match. Every branch routes through ``_format_deny_reason`` so the
     ``guard [permission_mode=...] denied: <rule_id>`` annunciator appears
-    on every strict deny -- not just the rule-matched ones.
+    on every strict deny -- not just the rule-matched ones. The rule_id is
+    returned alongside so callers can route the deny through
+    ``_maybe_allow_via_allowlist`` (the annunciator advertises an override
+    path; that path has to actually fire).
     """
     normalized = _normalize_segment(segment)
     for prefix, feedback in sorted(STRICT_FEEDBACK.items(), key=lambda kv: -len(kv[0])):
         if normalized == prefix or normalized.startswith(prefix + " "):
-            return _deny(_format_deny_reason("bash.strict_feedback", feedback))
-    return _deny(_format_deny_reason("bash.strict_default_deny", DEFAULT_STRICT_DENY_BODY))
+            return _deny(
+                _format_deny_reason("bash.strict_feedback", feedback)
+            ), "bash.strict_feedback"
+    return (
+        _deny(_format_deny_reason("bash.strict_default_deny", DEFAULT_STRICT_DENY_BODY)),
+        "bash.strict_default_deny",
+    )
 
 
 def queue_denied_command(command: str) -> None:
@@ -4420,8 +4428,9 @@ def decide(
     # ``shlex.split`` work. Real bash command lines sit far below 8 KiB; deny
     # outright before any scan so the validator can't be DoS'd by an agent
     # emitting (or being tricked into emitting) a giant payload.
+    allowlist = load_allowlist()
     if len(command) > _COMMAND_LENGTH_CAP:
-        return _deny(
+        deny = _deny(
             _format_deny_reason(
                 "bash.command_too_long",
                 (
@@ -4431,6 +4440,10 @@ def decide(
                 ),
             )
         )
+        bypass = _maybe_allow_via_allowlist(
+            allowlist, "bash.command_too_long", original_command, deny
+        )
+        return bypass if bypass is not None else deny
     # Fold POSIX line continuations and unicode whitespace before any other
     # processing so downstream pipeline split / normalization sees a canonical
     # ASCII form.
@@ -4441,7 +4454,7 @@ def decide(
     # process before any matcher runs. Re-apply the cap post-canonicalize
     # so the budget covers expansion blowup as well as raw input length.
     if len(command) > _COMMAND_LENGTH_CAP:
-        return _deny(
+        deny = _deny(
             _format_deny_reason(
                 "bash.command_too_long",
                 (
@@ -4451,7 +4464,10 @@ def decide(
                 ),
             )
         )
-    allowlist = load_allowlist()
+        bypass = _maybe_allow_via_allowlist(
+            allowlist, "bash.command_too_long", original_command, deny
+        )
+        return bypass if bypass is not None else deny
 
     leak = get_credential_leak_deny(command)
     if leak is not None:
@@ -4494,7 +4510,9 @@ def decide(
     # structured rejection (with feedback) instead of a silent passthrough
     # that would otherwise hang waiting for permission.
     if permission_mode in STRICT_PERMISSION_MODES:
-        return _evaluate_strict(command, segments)
+        return _evaluate_strict(
+            command, segments, allowlist=allowlist, original_command=original_command
+        )
 
     has_comments = command.strip() != cleaned
     has_pipes = len(segments) > 1
@@ -4596,7 +4614,13 @@ def _matches_strict_feedback(segment: str) -> bool:
     return False
 
 
-def _evaluate_strict(command: str, segments: list[str]) -> dict[str, str]:
+def _evaluate_strict(
+    command: str,
+    segments: list[str],
+    *,
+    allowlist: Allowlist,
+    original_command: str,
+) -> dict[str, str]:
     """Walk every segment under strict-mode rules.
 
     Returns deny on first non-safe segment (with optional STRICT_FEEDBACK
@@ -4609,6 +4633,10 @@ def _evaluate_strict(command: str, segments: list[str]) -> dict[str, str]:
     Unknown-flag escalation: if an allowed admin CLI segment has unknown long
     flags (not in spec.known_flags or spec.forbidden_flags), deny with
     bash.admin_unknown_flag_strict in strict mode.
+
+    Every strict-mode deny is routed through ``_maybe_allow_via_allowlist``
+    so the override path that ``_format_deny_reason`` advertises (`guard
+    allowlist allow-command ...` / `disable-rule ...`) actually fires.
     """
     for i, segment in enumerate(segments):
         if not _matches_strict_feedback(segment) and is_safe_command(
@@ -4628,12 +4656,24 @@ def _evaluate_strict(command: str, segments: list[str]) -> dict[str, str]:
                                 f"{_SYNTH_DENY_REASONS[_SYNTH_ADMIN_UNKNOWN_FLAG_STRICT]}"
                             )
                             deny_body = _format_deny_reason("bash.admin_unknown_flag_strict", body)
+                            deny = _deny(deny_body)
+                            bypass = _maybe_allow_via_allowlist(
+                                allowlist,
+                                "bash.admin_unknown_flag_strict",
+                                original_command,
+                                deny,
+                            )
+                            if bypass is not None:
+                                return bypass
                             _log_local(command, "deny", "admin-unknown-flag-strict")
                             queue_denied_command(command)
-                            return _deny(deny_body)
+                            return deny
                         break
             continue
-        result = get_strict_deny(segment)
+        result, rule_id = get_strict_deny(segment)
+        bypass = _maybe_allow_via_allowlist(allowlist, rule_id, original_command, result)
+        if bypass is not None:
+            return bypass
         reason = result["permissionDecisionReason"]
         _log_local(command, "deny", reason)
         queue_denied_command(command)

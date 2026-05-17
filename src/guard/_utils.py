@@ -100,6 +100,47 @@ _CLAUDE_AUTONOMOUS_TRUTHY = frozenset({"1", "true", "yes", "on"})
 _CLAUDE_AUTONOMOUS_WARNED: dict[str, bool] = {"once": False}
 
 
+def _autonomous_deprecation_sentinel_path() -> Path:
+    """Resolve the sentinel path against the current ``GUARD_DATA_DIR``.
+
+    Computed lazily (not at module import) so test fixtures that point
+    ``GUARD_DATA_DIR`` at a per-test tmpdir get an isolated sentinel.
+    """
+    return (
+        Path(os.environ.get("GUARD_DATA_DIR", str(Path.home() / ".claude" / "guard")))
+        / ".autonomous-warned"
+    )
+
+
+def _emit_autonomous_deprecation_warning() -> None:
+    """Emit the CLAUDE_AUTONOMOUS deprecation warning at most once per machine.
+
+    Each PreToolUse hook is a fresh Python subprocess, so a module-level
+    "warned" flag fires the warning on every invocation. A sentinel file in
+    ``GUARD_HOME`` survives subprocesses; once it exists, subsequent
+    invocations skip the stderr write. Failure to create the sentinel falls
+    back to the in-process flag so warnings still appear.
+    """
+    if _CLAUDE_AUTONOMOUS_WARNED["once"]:
+        return
+    sentinel = _autonomous_deprecation_sentinel_path()
+    try:
+        if sentinel.exists():
+            _CLAUDE_AUTONOMOUS_WARNED["once"] = True
+            return
+    except OSError:
+        pass
+    sys.stderr.write(
+        "guard: CLAUDE_AUTONOMOUS is deprecated; set Claude Code's "
+        "permission_mode (dontAsk/bypassPermissions/auto) instead. "
+        "The env-var fallback will be removed in v1.5.0.\n"
+    )
+    _CLAUDE_AUTONOMOUS_WARNED["once"] = True
+    with contextlib.suppress(OSError):
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.touch()
+
+
 def read_permission_mode(hook_input: dict[str, Any] | None) -> str:
     """Return ``permission_mode`` from a PreToolUse hook-input payload.
 
@@ -107,31 +148,25 @@ def read_permission_mode(hook_input: dict[str, Any] | None) -> str:
     Unknown literal values are returned as-is so downstream callers can
     emit a one-line warning and treat them as advisory.
 
-    Backwards compatibility for one minor cycle: if the legacy
-    ``CLAUDE_AUTONOMOUS`` env var is set to a truthy value AND the payload
-    carries no explicit ``permission_mode`` (or the literal ``"default"``),
-    escalate to ``"dontAsk"`` and emit a single stderr deprecation warning
-    so existing shells / CI configs don't silently downgrade to advisory.
-    The env-var path will be removed in the next minor release.
+    Backwards compatibility for one minor cycle: if the payload carries no
+    ``permission_mode`` field at all AND the legacy ``CLAUDE_AUTONOMOUS``
+    env var is set to a truthy value, escalate to ``"dontAsk"`` and emit a
+    one-time stderr deprecation warning. An explicit ``"default"`` from
+    Claude Code is honored as-is — the env var no longer overrides an
+    explicit payload value. The env-var path will be removed in v1.5.0.
     """
     explicit_mode: str | None = None
     if hook_input is not None:
         raw = hook_input.get("permission_mode")
         if isinstance(raw, str) and raw.strip():
             explicit_mode = raw.strip()
-    if explicit_mode is not None and explicit_mode != "default":
+    if explicit_mode is not None:
         return explicit_mode
     env = os.environ.get("CLAUDE_AUTONOMOUS", "").strip().lower()
     if env in _CLAUDE_AUTONOMOUS_TRUTHY:
-        if not _CLAUDE_AUTONOMOUS_WARNED["once"]:
-            _CLAUDE_AUTONOMOUS_WARNED["once"] = True
-            sys.stderr.write(
-                "guard: CLAUDE_AUTONOMOUS is deprecated; set Claude Code's "
-                "permission_mode (dontAsk/bypassPermissions/auto) instead. "
-                "The env-var fallback will be removed in the next minor release.\n"
-            )
+        _emit_autonomous_deprecation_warning()
         return "dontAsk"
-    return explicit_mode or "default"
+    return "default"
 
 
 def is_strict_mode(hook_input: dict[str, Any] | None) -> bool:

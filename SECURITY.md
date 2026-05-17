@@ -192,9 +192,9 @@ walks tokens after the CLI binary and classifies each `--flag`:
 3. **Unknown** — long `--*` flags on neither list. Logged to the
    JSONL audit record under `unknown_flags: [...]` (flag name only,
    never the value; capped at 8). In strict mode (`permission_mode`
-   is `dontAsk` or `bypassPermissions`), presence of any unknown flag
-   escalates an otherwise-allow to DENY via
-   `bash.admin_unknown_flag_strict`.
+   is `auto`, `dontAsk`, or `bypassPermissions` — any unattended
+   mode), presence of any unknown flag escalates an otherwise-allow
+   to DENY via `bash.admin_unknown_flag_strict`.
 
 ### Forbidden subcommands
 
