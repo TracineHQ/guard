@@ -102,7 +102,7 @@ class JsonlReader:
         """Return True if the log file exists."""
         return self.path.exists()
 
-    def iter_records(  # noqa: C901 -- linear filter ladder; one branch per filter.
+    def iter_records(  # noqa: C901, PLR0912, PLR0913 -- linear filter ladder; one branch per filter.
         self,
         *,
         since: datetime | None = None,
@@ -110,8 +110,17 @@ class JsonlReader:
         decision: str | None = None,
         tool_name: str | None = None,
         session_id: str | None = None,
+        include_all_types: bool = False,
     ) -> Iterator[dict[str, Any]]:
-        """Yield records matching the supplied filters."""
+        """Yield records matching the supplied filters.
+
+        Default behaviour: only ``type == "decision"`` records (or pre-PR
+        records without a ``type`` discriminator, which are inferred as
+        decisions). Operational records (``internal_error``) are skipped so
+        ``noisy`` / ``silent`` / ``trace`` views don't surface a ``? ?``
+        pollution row. Pass ``include_all_types=True`` for raw scans
+        (counters, debugging).
+        """
         if not self.path.exists():
             return
         with self.path.open(encoding="utf-8", errors="replace") as fh:
@@ -128,6 +137,10 @@ class JsonlReader:
                 # Skip a redirect pointer (single-line marker, see JSONL_FORMAT.md §1.1).
                 if "redirect" in rec and len(rec) == 1:
                     continue
+                if not include_all_types:
+                    kind = rec.get("type") or ("decision" if "decision" in rec else None)
+                    if kind != "decision":
+                        continue
                 if hook_id is not None and rec.get("hook_id") != hook_id:
                     continue
                 if decision is not None and rec.get("decision") != decision:
@@ -169,7 +182,6 @@ class JsonlReader:
             "decisions_total": 0,
             "denies_total": 0,
             "internal_errors_total": 0,
-            "heartbeats_total": 0,
             "last_activity_ts": None,
         }
         if not self.path.exists():
@@ -206,8 +218,6 @@ def _bump_counter(totals: dict[str, Any], rec: dict[str, Any]) -> None:
             totals["denies_total"] += 1
     elif kind == "internal_error":
         totals["internal_errors_total"] += 1
-    elif kind == "heartbeat":
-        totals["heartbeats_total"] += 1
     ts = rec.get("timestamp")
     if isinstance(ts, str):
         totals["last_activity_ts"] = ts
@@ -360,23 +370,29 @@ def cmd_status() -> tuple[dict[str, Any], str]:
     return payload, "\n".join(lines) + "\n"
 
 
-def cmd_healthcheck() -> tuple[dict[str, Any], str]:
-    """Synthesize a known-deny PreToolUse payload and assert guard denies.
+_HEALTHCHECK_PROBES: tuple[tuple[str, str], ...] = (
+    # (command, expected substring in deny reason). Two independent probes
+    # so a single registry change cannot turn the healthcheck into a
+    # false-positive: both must deny AND surface the expected substring.
+    # We assert against the rule_id (``bash.always_deny``) plus a phrase
+    # specific to the matched ALWAYS_DENY entry, so a routing change that
+    # quietly demotes one of these from ALWAYS_DENY would be caught.
+    ("rm -rf /", "Recursive root"),
+    ("python -c 'x'", "re-execs"),
+)
 
-    Pipes a ``rm -rf /`` payload (always in ALWAYS_DENY) to the bash hook
-    entry point as a subprocess. Returns healthy=True iff the hook responds
-    with ``permissionDecision: deny`` within the timeout. Used by CI and
-    external monitoring as the front-line liveness probe.
-    """
+
+def _run_healthcheck_probe(
+    hook_path: Path, command: str, expected_rule: str, timeout_s: float = 2.0
+) -> dict[str, Any]:
     payload = {
         "session_id": "guard-healthcheck",
         "tool_name": "Bash",
-        "tool_input": {"command": "rm -rf /"},
+        "tool_input": {"command": command},
         "hook_event_name": "PreToolUse",
         "cwd": str(Path.home()),
         "permission_mode": "default",
     }
-    hook_path = Path(__file__).parent / "hooks" / "bash_command_validator.py"
     start = time.monotonic()
     try:
         proc = subprocess.run(  # noqa: S603  # nosec B603 -- fixed argv (sys.executable + bundled hook script), no shell
@@ -384,34 +400,61 @@ def cmd_healthcheck() -> tuple[dict[str, Any], str]:
             input=json.dumps(payload),
             capture_output=True,
             text=True,
-            timeout=2.0,
+            timeout=timeout_s,
             check=False,
         )
     except subprocess.TimeoutExpired:
-        result = {
-            "healthy": False,
-            "reason": "hook timed out (>2s)",
+        return {
+            "command": command,
+            "expected_rule": expected_rule,
+            "passed": False,
             "elapsed_ms": int((time.monotonic() - start) * 1000),
         }
-        return result, f"guard healthcheck: UNHEALTHY ({result['reason']})\n"
     elapsed_ms = int((time.monotonic() - start) * 1000)
     decision = None
+    rule_seen = False
     if proc.stdout.strip():
         try:
             envelope = json.loads(proc.stdout)
             hso = envelope.get("hookSpecificOutput", {}) if isinstance(envelope, dict) else {}
             decision = hso.get("permissionDecision") or envelope.get("permissionDecision")
+            reason = hso.get("permissionDecisionReason") or envelope.get(
+                "permissionDecisionReason", ""
+            )
+            rule_seen = expected_rule in reason
         except (json.JSONDecodeError, ValueError):
             decision = None
-    healthy = decision == "deny"
-    result = {
-        "healthy": healthy,
-        "decision": decision,
+    return {
+        "command": command,
+        "expected_rule": expected_rule,
+        "passed": decision == "deny" and rule_seen,
         "elapsed_ms": elapsed_ms,
-        "exit_code": proc.returncode,
+    }
+
+
+def cmd_healthcheck() -> tuple[dict[str, Any], str]:
+    """Synthesize known-deny PreToolUse payloads and assert guard denies.
+
+    Pipes two independent always-deny commands to the bundled bash hook
+    and asserts each one comes back with ``permissionDecision: deny`` AND
+    the expected rule_id substring in the reason. Requiring two probes
+    plus rule_id matching defeats a single-rule weakening that would
+    leave a one-probe healthcheck falsely green.
+
+    When a probe fails, the full deny envelope is in
+    ``~/.claude/guard-decisions.jsonl`` -- this output stays minimal.
+    """
+    hook_path = Path(__file__).parent / "hooks" / "bash_command_validator.py"
+    probes = [_run_healthcheck_probe(hook_path, cmd, rule) for cmd, rule in _HEALTHCHECK_PROBES]
+    healthy = all(p["passed"] for p in probes)
+    result: dict[str, Any] = {
+        "healthy": healthy,
+        "elapsed_ms": sum(p["elapsed_ms"] for p in probes),
+        "probes": probes,
     }
     status_label = "OK" if healthy else "UNHEALTHY"
-    return result, f"guard healthcheck: {status_label} (decision={decision} {elapsed_ms}ms)\n"
+    summary = " ".join(f"{p['command']!r}={'ok' if p['passed'] else 'FAIL'}" for p in probes)
+    return result, f"guard healthcheck: {status_label} ({summary})\n"
 
 
 def cmd_noisy(

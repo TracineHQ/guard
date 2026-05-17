@@ -6,20 +6,77 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `guard healthcheck` CLI subcommand: synthesises two independent
+  always-deny PreToolUse payloads, asserts each comes back with the
+  expected `permissionDecision: deny` + rule_id substring in the reason.
+  Exit 0 = healthy. Suitable for CI gates and external monitoring.
+- `internal_error` JSONL records emitted from `safe_main` before fail-open,
+  so hook crashes become observable. Carries `exc_class`, redacted
+  `exc_msg` (passed through the secret-redaction catalog), and a
+  SHA256-truncated `traceback_hash` for bucketing repeat failures
+  without leaking file paths or payload contents.
+- `type` discriminator on every JSONL record (`"decision"` for existing
+  rows, `"internal_error"` for the new shape). Backward-compatible:
+  consumers reading older records (no `type` field) are treated as
+  `decision`.
+- `permission_mode` field on every decision record so operators can
+  `jq '.permission_mode'` from the audit log.
+- `guard status --json` now includes a `counters` object
+  (`decisions_total`, `denies_total`, `internal_errors_total`,
+  `last_activity_ts`) for Prometheus-style monitoring.
+
 ### Changed
 
-- Strict default-deny now activates from Claude Code's documented
-  `permission_mode` field in PreToolUse hook input (`dontAsk` or
-  `bypassPermissions`). The userland `CLAUDE_AUTONOMOUS` env var is no
-  longer read; the rename touches the hook contract, registry field name
-  (`autonomous_feedback` → `strict_feedback`), public API
-  (`STRICT_FEEDBACK`, `get_strict_deny`, `_evaluate_strict`), env var
-  (`GUARD_STRICT_DENY_QUEUE_PATH`), queue file path
-  (`~/.claude/guard-strict-deny-queue.jsonl`), and matcher rule_id
-  (`bash.admin_unknown_flag_strict`).
-- Deny messages now lead with a `guard [permission_mode=<mode>] denied:
-  <rule_id>` annunciator line so the active mode is visible to operators
-  reviewing transcripts.
+- **Strict default-deny now reads Claude Code's documented `permission_mode`
+  field** from PreToolUse hook input instead of the userland
+  `CLAUDE_AUTONOMOUS` env var. The strict modes are `auto`, `dontAsk`,
+  and `bypassPermissions` -- all three imply "no human at the prompt."
+- **Deny-message wire format changed.** Every deny now leads with
+  `guard [permission_mode=<mode>] denied: <rule_id>. ...`. Transcript
+  scrapers / log indexers keying on the previous "Rule: ..." trailer
+  must update.
+- Renames across registry, public Python symbols, env vars, queue file,
+  and matcher rule_ids:
+  - `autonomous_feedback` -> `strict_feedback`
+  - `AUTONOMOUS_FEEDBACK` -> `STRICT_FEEDBACK`
+  - `get_autonomous_deny` -> `get_strict_deny`
+  - `_evaluate_autonomous` -> `_evaluate_strict`
+  - `GUARD_AUTONOMOUS_QUEUE_PATH` -> `GUARD_STRICT_DENY_QUEUE_PATH`
+  - `~/.claude/guard-autonomous-queue.jsonl` ->
+    `~/.claude/guard-strict-deny-queue.jsonl`
+  - rule_id `bash.admin_unknown_flag_autonomous` ->
+    `bash.admin_unknown_flag_strict`
+
+### Deprecated
+
+- `CLAUDE_AUTONOMOUS` env var. One-minor-cycle fallback: when the env is
+  set to a truthy value AND no explicit `permission_mode` is present (or
+  the mode is `default`), guard escalates to `dontAsk` and emits a single
+  stderr warning. Removed in the next minor release. Migrate to setting
+  Claude Code's `--permission-mode` flag (or the documented session
+  toggle) instead.
+
+### Removed
+
+- `STRICT_FEEDBACK` was previously `AUTONOMOUS_FEEDBACK`; the old name is
+  not aliased.
+- The old queue file `~/.claude/guard-autonomous-queue.jsonl` is no
+  longer read or written. Any pending entries in that file are orphaned;
+  migrate manually if needed. Pre-1.0 / pre-users.
+
+### Migration
+
+- Shells / CI exporting `CLAUDE_AUTONOMOUS=1`: switch to launching Claude
+  Code with `--permission-mode dontAsk` (or `auto` for the
+  classifier-mediated mode). The env-var fallback works for one minor
+  cycle but emits a stderr warning.
+- Monitoring pointing at `~/.claude/guard-autonomous-queue.jsonl`: update
+  to `~/.claude/guard-strict-deny-queue.jsonl`.
+- Log consumers parsing deny reasons: the prefix `guard [permission_mode=
+  <mode>] denied: <rule_id>` replaces the trailing `Rule: <rule_id>`. The
+  `rule_id` is still surfaced, now leading.
 
 ## [1.3.1] - 2026-05-13
 

@@ -21,13 +21,21 @@ def _isolate_guard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     the dev's real ``~/.claude/guard/allowlist.json`` and silently allow
     commands tests expect to deny.
 
-    Permission mode is now sourced from the PreToolUse payload, not env, so
-    no env-var stripping is needed for strict-mode isolation. Tests that
-    need strict mode pass ``permission_mode="dontAsk"`` directly.
+    Permission mode is sourced from the PreToolUse payload. Tests that need
+    strict mode pass ``permission_mode="dontAsk"`` directly. ``CLAUDE_AUTONOMOUS``
+    is the deprecated env-var fallback (one-cycle migration window); the dev
+    shell may have it set, so we strip it here to keep tests deterministic.
+    Reset ``_CLAUDE_AUTONOMOUS_WARNED`` so the one-time stderr warning gets
+    its first chance each test (otherwise the assertion-via-stderr tests
+    flake on test ordering).
     """
+    from guard import _utils
+
+    monkeypatch.delenv("CLAUDE_AUTONOMOUS", raising=False)
     monkeypatch.delenv("GUARD_STRICT_DENY_QUEUE_PATH", raising=False)
     monkeypatch.delenv("GUARD_DECISIONS_PATH", raising=False)
     monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "guard-home"))
+    _utils._CLAUDE_AUTONOMOUS_WARNED["once"] = False  # noqa: SLF001
 
 
 @pytest.fixture

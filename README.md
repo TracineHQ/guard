@@ -71,8 +71,19 @@ Then `guard status` shows the log location and last record, `guard noisy --since
 Guard reads a small set of environment variables. See [SKILL.md](SKILL.md) for the canonical descriptions and defaults.
 
 Strict default-deny activates from Claude Code's `permission_mode` field in
-PreToolUse hook input (no env var). The strict modes are `dontAsk` and
-`bypassPermissions`.
+PreToolUse hook input (no env var). The strict modes are `auto` (Anthropic's
+classifier-mediated unattended mode), `dontAsk`, and `bypassPermissions` --
+all three imply "no human at the prompt." Other modes (`default`, `plan`,
+`acceptEdits`) use advisory evaluation.
+
+**Requirements:** Claude Code that emits `permission_mode` on PreToolUse
+payloads (current Claude Code releases do; older builds default to advisory
+since the field is absent). For one minor cycle, a deprecated
+`CLAUDE_AUTONOMOUS=1` env var fallback escalates to `dontAsk` with a stderr
+warning -- remove the env var before the next minor release.
+
+**Healthcheck:** `guard healthcheck` exits 0 on healthy, non-zero on
+failure. Suitable for CI gates and cron-based monitors.
 
 | Variable | Purpose |
 |---|---|

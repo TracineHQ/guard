@@ -1650,7 +1650,7 @@ def test_deny_reason_includes_rule_id_and_override_path(command: str, expected_r
     assert result is not None
     assert result.get("permissionDecision") == "deny"
     reason = result.get("permissionDecisionReason", "")
-    assert f"Rule: {expected_rule}" in reason, f"missing rule_id in reason: {reason!r}"
+    assert f"denied: {expected_rule}" in reason, f"missing rule_id in reason: {reason!r}"
     assert f"guard allowlist allow-command {expected_rule}" in reason
     assert f"guard allowlist disable-rule {expected_rule}" in reason
 

@@ -47,10 +47,21 @@ authoritative references. Quick map:
 ## Strict mode
 
 Strict default-deny activates from Claude Code's `permission_mode` field in
-PreToolUse hook input. Modes `dontAsk` and `bypassPermissions` route the
-command through guard's default-deny path (anything not on the safe-prefix
-allowlist is denied with an `STRICT_FEEDBACK` message). All other modes
-(`default`, `plan`, `acceptEdits`, `auto`) use advisory evaluation.
+PreToolUse hook input. The strict modes are:
+
+- `auto` -- Claude Code's classifier-mediated unattended mode
+- `dontAsk` -- explicit unattended opt-in
+- `bypassPermissions` -- explicit unattended opt-in
+
+All three imply "no human at the prompt" and route the command through
+guard's default-deny path (anything not on the safe-prefix allowlist is
+denied with a `STRICT_FEEDBACK` message). Modes `default`, `plan`, and
+`acceptEdits` use advisory evaluation.
+
+Requires a Claude Code release that emits `permission_mode` on PreToolUse
+payloads. For one minor cycle, a deprecated `CLAUDE_AUTONOMOUS=1` env var
+fallback escalates missing/default modes to `dontAsk` with a stderr
+warning; remove before the next minor release.
 
 ## Environment variables
 

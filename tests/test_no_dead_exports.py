@@ -42,9 +42,6 @@ UTILS_INTERNAL_ALLOW: frozenset[str] = frozenset(
         "LOOP_DETECTION_WINDOW_MINUTES",
         "CONTEXT_BUDGET_WARN_BYTES",
         "CONTEXT_BUDGET_HARD_BYTES",
-        # Heartbeat cadence: read inside _utils.log_decision -> _maybe_emit_heartbeat
-        # (configurable via the GUARD_HEARTBEAT_EVERY env var).
-        "GUARD_HEARTBEAT_EVERY",
         # Re-exports / typing imports
         "TYPE_CHECKING",
         "UTC",

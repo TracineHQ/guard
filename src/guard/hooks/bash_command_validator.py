@@ -167,6 +167,7 @@ def _log_local(
         command_excerpt=command,
         session_id=session_id,
         cwd=_REQUEST_CONTEXT["cwd"],
+        permission_mode=_REQUEST_CONTEXT.get("permission_mode"),
         extra=extra,
     )
 
@@ -4203,16 +4204,16 @@ def _get_always_deny(segments: list[str]) -> tuple[dict[str, str], str] | None:
 
 
 # === Strict-mode safety net ===
-# When permission_mode is dontAsk or bypassPermissions, there is no human at
-# the prompt to answer a permission ask. Anything not on the safe-prefix
-# allowlist is denied with either a STRICT_FEEDBACK message (if the prefix is
-# registered) or a generic default-deny.
+# When permission_mode is auto / dontAsk / bypassPermissions, there is no
+# human at the prompt to answer a permission ask. Anything not on the
+# safe-prefix allowlist is denied with either a STRICT_FEEDBACK message (if
+# the prefix is registered) or a generic default-deny.
 
-DEFAULT_STRICT_DENY = (
-    "strict mode: command shape not on safe-prefix allowlist; not allowed "
-    "without explicit user approval. (permission_mode dontAsk/bypassPermissions "
-    "inverts the default to deny — if this command is genuinely safe, add a "
-    "rule to guard's registry; otherwise re-run interactively.)"
+DEFAULT_STRICT_DENY_BODY = (
+    "command shape not on safe-prefix allowlist; not allowed without explicit "
+    "user approval. permission_mode auto/dontAsk/bypassPermissions inverts the "
+    "default to deny — if this command is genuinely safe, add a rule to "
+    "guard's registry; otherwise re-run interactively"
 )
 
 
@@ -4221,13 +4222,16 @@ def get_strict_deny(segment: str) -> dict[str, str]:
 
     Matches the segment against ``STRICT_FEEDBACK`` (longest prefix wins).
     Normalizes via ``_normalize_segment`` so quoting/whitespace cannot bypass
-    a feedback rule. Falls back to ``DEFAULT_STRICT_DENY`` on no match.
+    a feedback rule. Falls back to the generic strict default-deny on no
+    match. Every branch routes through ``_format_deny_reason`` so the
+    ``guard [permission_mode=...] denied: <rule_id>`` annunciator appears
+    on every strict deny -- not just the rule-matched ones.
     """
     normalized = _normalize_segment(segment)
     for prefix, feedback in sorted(STRICT_FEEDBACK.items(), key=lambda kv: -len(kv[0])):
         if normalized == prefix or normalized.startswith(prefix + " "):
-            return _deny(feedback)
-    return _deny(DEFAULT_STRICT_DENY)
+            return _deny(_format_deny_reason("bash.strict_feedback", feedback))
+    return _deny(_format_deny_reason("bash.strict_default_deny", DEFAULT_STRICT_DENY_BODY))
 
 
 def queue_denied_command(command: str) -> None:
@@ -4302,7 +4306,7 @@ def _format_deny_reason(rule_id: str, body: str) -> str:
     is_strict = mode in STRICT_PERMISSION_MODES
     guidance = _AGENT_GUIDANCE_STRICT if is_strict else _AGENT_GUIDANCE_INTERACTIVE
     return (
-        f"guard [permission_mode={mode}] denied: {rule_id}. {body}. Rule: {rule_id}. "
+        f"guard [permission_mode={mode}] denied: {rule_id}. {body}. "
         f"Override: `guard allowlist allow-command {rule_id} '<command>' --reason '...'` "
         f"or `guard allowlist disable-rule {rule_id}`. {guidance}"
     )
@@ -4484,10 +4488,11 @@ def decide(
         return pre_deny
 
     # === Strict mode: default-deny ===
-    # ``dontAsk`` and ``bypassPermissions`` are explicit unattended-operation
-    # modes; anything not on the safe-prefix allowlist is denied here so the
-    # agent gets a structured rejection (with feedback) instead of a silent
-    # passthrough that would otherwise hang waiting for permission.
+    # ``auto`` (Claude Code's classifier-mediated unattended mode), ``dontAsk``
+    # and ``bypassPermissions`` all imply no human at the prompt; anything not
+    # on the safe-prefix allowlist is denied here so the agent gets a
+    # structured rejection (with feedback) instead of a silent passthrough
+    # that would otherwise hang waiting for permission.
     if permission_mode in STRICT_PERMISSION_MODES:
         return _evaluate_strict(command, segments)
 

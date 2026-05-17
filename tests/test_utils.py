@@ -314,13 +314,15 @@ def test_read_permission_mode_ignores_non_string() -> None:
     assert read_permission_mode({"permission_mode": ""}) == "default"
 
 
-def test_is_strict_mode_true_for_dontAsk_and_bypass() -> None:
+def test_is_strict_mode_true_for_unattended_modes() -> None:
+    """auto, dontAsk, bypassPermissions all imply no human at the prompt."""
+    assert is_strict_mode({"permission_mode": "auto"}) is True
     assert is_strict_mode({"permission_mode": "dontAsk"}) is True
     assert is_strict_mode({"permission_mode": "bypassPermissions"}) is True
 
 
-def test_is_strict_mode_false_for_other_modes() -> None:
-    for mode in ("default", "plan", "acceptEdits", "auto"):
+def test_is_strict_mode_false_for_attended_modes() -> None:
+    for mode in ("default", "plan", "acceptEdits"):
         assert is_strict_mode({"permission_mode": mode}) is False
 
 

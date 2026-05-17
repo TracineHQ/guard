@@ -420,7 +420,11 @@ class TestStrictMode:
         result = decide("rm somefile", permission_mode="dontAsk")
         assert result is not None
         assert result["permissionDecision"] == "deny"
-        assert result["permissionDecisionReason"] == STRICT_FEEDBACK["rm"]
+        # Annunciator-wrapped: full STRICT_FEEDBACK text appears within
+        # the reason, prefixed by the mode/rule_id annunciator.
+        assert STRICT_FEEDBACK["rm"] in result["permissionDecisionReason"]
+        assert "permission_mode=dontAsk" in result["permissionDecisionReason"]
+        assert "bash.strict_feedback" in result["permissionDecisionReason"]
 
     def test_default_deny_for_unregistered(self, strict_env):
         result = decide("noexist --flag", permission_mode="dontAsk")

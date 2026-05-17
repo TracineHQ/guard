@@ -11,7 +11,7 @@ Provides:
 - ``read_permission_mode(hook_input)`` — extract the documented Claude Code
   ``permission_mode`` from a PreToolUse payload
 - ``is_strict_mode(hook_input)`` — convenience predicate for
-  ``permission_mode in {dontAsk, bypassPermissions}``
+  ``permission_mode in {auto, dontAsk, bypassPermissions}``
 - ``sanitize_for_stderr()`` — strip control chars before writing user input
   to stderr
 
@@ -89,8 +89,15 @@ def _log_debug(msg: str) -> None:
 
 # Strict modes route through guard's default-deny path; the rest pass through
 # advisory-mode evaluation. The documented Claude Code permission_mode values
-# are default / plan / acceptEdits / auto / dontAsk / bypassPermissions.
-STRICT_PERMISSION_MODES: frozenset[str] = frozenset({"dontAsk", "bypassPermissions"})
+# are default / plan / acceptEdits / auto / dontAsk / bypassPermissions. ``auto``
+# is Anthropic's classifier-mediated unattended-operation mode (no human at the
+# keyboard) — same threat model as ``dontAsk``/``bypassPermissions``, so it
+# routes through default-deny too.
+STRICT_PERMISSION_MODES: frozenset[str] = frozenset({"auto", "dontAsk", "bypassPermissions"})
+
+
+_CLAUDE_AUTONOMOUS_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_CLAUDE_AUTONOMOUS_WARNED: dict[str, bool] = {"once": False}
 
 
 def read_permission_mode(hook_input: dict[str, Any] | None) -> str:
@@ -99,22 +106,42 @@ def read_permission_mode(hook_input: dict[str, Any] | None) -> str:
     Defaults to ``"default"`` when the field is absent or non-string.
     Unknown literal values are returned as-is so downstream callers can
     emit a one-line warning and treat them as advisory.
+
+    Backwards compatibility for one minor cycle: if the legacy
+    ``CLAUDE_AUTONOMOUS`` env var is set to a truthy value AND the payload
+    carries no explicit ``permission_mode`` (or the literal ``"default"``),
+    escalate to ``"dontAsk"`` and emit a single stderr deprecation warning
+    so existing shells / CI configs don't silently downgrade to advisory.
+    The env-var path will be removed in the next minor release.
     """
-    if hook_input is None:
-        return "default"
-    raw = hook_input.get("permission_mode")
-    if isinstance(raw, str) and raw.strip():
-        return raw.strip()
-    return "default"
+    explicit_mode: str | None = None
+    if hook_input is not None:
+        raw = hook_input.get("permission_mode")
+        if isinstance(raw, str) and raw.strip():
+            explicit_mode = raw.strip()
+    if explicit_mode is not None and explicit_mode != "default":
+        return explicit_mode
+    env = os.environ.get("CLAUDE_AUTONOMOUS", "").strip().lower()
+    if env in _CLAUDE_AUTONOMOUS_TRUTHY:
+        if not _CLAUDE_AUTONOMOUS_WARNED["once"]:
+            _CLAUDE_AUTONOMOUS_WARNED["once"] = True
+            sys.stderr.write(
+                "guard: CLAUDE_AUTONOMOUS is deprecated; set Claude Code's "
+                "permission_mode (dontAsk/bypassPermissions/auto) instead. "
+                "The env-var fallback will be removed in the next minor release.\n"
+            )
+        return "dontAsk"
+    return explicit_mode or "default"
 
 
 def is_strict_mode(hook_input: dict[str, Any] | None) -> bool:
     """Return True when ``permission_mode`` is a strict (default-deny) mode.
 
-    Strict modes (``dontAsk``, ``bypassPermissions``) indicate the user has
-    explicitly opted into unattended operation; guard escalates from
-    advisory to default-deny. All other modes (including the documented
-    ``auto`` classifier-mediated mode) stay in advisory evaluation.
+    Strict modes (``auto``, ``dontAsk``, ``bypassPermissions``) all indicate
+    unattended operation: ``auto`` is Claude Code's classifier-mediated
+    unattended mode; the other two are explicit opt-ins. All three trigger
+    guard's default-deny path. Other modes (``default``, ``plan``,
+    ``acceptEdits``) stay in advisory evaluation.
     """
     return read_permission_mode(hook_input) in STRICT_PERMISSION_MODES
 
@@ -359,6 +386,7 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
     command_excerpt: str | None = None,
     session_id: str = "",
     cwd: str | None = None,
+    permission_mode: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> None:
     """Append a spec-compliant decision record to the JSONL log.
@@ -384,6 +412,10 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
         command_excerpt: Optional bash-command excerpt (truncated to 4096).
         session_id: Claude Code session id.
         cwd: Optional working directory string.
+        permission_mode: Optional Claude Code permission_mode string from the
+            PreToolUse payload (``default``/``plan``/``acceptEdits``/``auto``/
+            ``dontAsk``/``bypassPermissions``). Written verbatim onto the
+            record so consumers can ``jq '.permission_mode'``.
         extra: Optional dict of additional fields merged into the record
             (e.g. ``{"unknown_flags": ["--foo", "--bar"]}``). Values are
             written verbatim; callers are responsible for not including
@@ -409,41 +441,11 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
         record["command_excerpt"] = redacted_excerpt[:_COMMAND_EXCERPT_MAX_CHARS]
     if cwd is not None:
         record["cwd"] = cwd
+    if permission_mode is not None:
+        record["permission_mode"] = permission_mode
     if extra:
         record.update(extra)
     append_jsonl(GUARD_DECISIONS_PATH, record)
-    _maybe_emit_heartbeat(session_id)
-
-
-GUARD_HEARTBEAT_EVERY = _env_int("GUARD_HEARTBEAT_EVERY", 100)
-_HEARTBEAT_COUNTER: dict[str, int] = {"n": 0}
-
-
-def _maybe_emit_heartbeat(session_id: str) -> None:
-    """Emit a heartbeat JSONL record every N decisions.
-
-    Cheap idempotent liveness signal so ``guard status`` can answer
-    "is guard actually running?" instead of inferring from log freshness
-    alone. Counter is process-local; cross-process aggregation is by
-    timestamp on the consumer side.
-    """
-    if GUARD_HEARTBEAT_EVERY <= 0:
-        return
-    _HEARTBEAT_COUNTER["n"] += 1
-    if _HEARTBEAT_COUNTER["n"] % GUARD_HEARTBEAT_EVERY != 0:
-        return
-    from guard import __version__ as _guard_version  # noqa: PLC0415
-
-    append_jsonl(
-        GUARD_DECISIONS_PATH,
-        {
-            "type": "heartbeat",
-            "schema_version": _SCHEMA_V,
-            "guard_version": _guard_version,
-            "timestamp": _utc_now_iso(),
-            "session_id": session_id,
-        },
-    )
 
 
 def _utc_now_iso() -> str:
@@ -456,19 +458,23 @@ def log_internal_error(exc: BaseException, *, session_id: str = "") -> None:
     Called from ``safe_main`` before fail-open so a silent crash becomes an
     observable event. The traceback is hashed (not stored) to avoid leaking
     file paths or payload contents; operators bucket repeat failures by hash.
+    ``exc_msg`` is passed through ``_redact_secrets`` because a hook that
+    crashes mid-credential-handling may surface the value in its exception
+    message — and this log is the exact channel the redactor catalog seals.
     """
     import hashlib  # noqa: PLC0415
     import traceback  # noqa: PLC0415
 
     tb_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     tb_hash = "sha256:" + hashlib.sha256(tb_text.encode("utf-8")).hexdigest()[:16]
+    redacted_msg = _redact_secrets(str(exc))[:_REASON_MAX_CHARS]
     append_jsonl(
         GUARD_DECISIONS_PATH,
         {
             "type": "internal_error",
             "schema_version": _SCHEMA_V,
             "exc_class": type(exc).__name__,
-            "exc_msg": str(exc)[:_REASON_MAX_CHARS],
+            "exc_msg": redacted_msg,
             "traceback_hash": tb_hash,
             "session_id": session_id,
             "timestamp": _utc_now_iso(),
