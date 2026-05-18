@@ -371,20 +371,25 @@ def cmd_status() -> tuple[dict[str, Any], str]:
     return payload, "\n".join(lines) + "\n"
 
 
-_HEALTHCHECK_PROBES: tuple[tuple[str, str], ...] = (
-    # (command, expected rule_id substring in deny reason). Two independent
-    # probes so a single registry change cannot turn the healthcheck into a
-    # false-positive: both must deny AND the deny reason must carry the
-    # expected rule_id (emitted by the ``_format_deny_reason`` annunciator).
-    # We pin to rule_id, not body text, because body wording is operational
-    # copy and gets rephrased; rule_id is the stable contract.
-    ("rm -rf /", "bash.always_deny"),
-    ("python -c 'x'", "bash.always_deny"),
+_HEALTHCHECK_PROBES: tuple[tuple[str, str, str], ...] = (
+    # (command, permission_mode, expected rule_id substring). Three probes:
+    # two interactive-mode always-deny commands plus one strict-mode probe
+    # that exercises the strict_default_deny path. A registry-only weakening
+    # cannot turn the healthcheck green; a permission-mode plumbing
+    # regression cannot either. Rule_id is the stable contract, not body
+    # wording.
+    ("rm -rf /", "default", "bash.always_deny"),
+    ("python -c 'x'", "default", "bash.always_deny"),
+    ("flarbnoz --gronk", "dontAsk", "bash.strict_default_deny"),
 )
 
 
 def _run_healthcheck_probe(
-    hook_path: Path, command: str, expected_rule: str, timeout_s: float = 2.0
+    hook_path: Path,
+    command: str,
+    permission_mode: str,
+    expected_rule: str,
+    timeout_s: float = 2.0,
 ) -> dict[str, Any]:
     payload = {
         "session_id": "guard-healthcheck",
@@ -392,7 +397,7 @@ def _run_healthcheck_probe(
         "tool_input": {"command": command},
         "hook_event_name": "PreToolUse",
         "cwd": str(Path.home()),
-        "permission_mode": "default",
+        "permission_mode": permission_mode,
     }
     start = time.monotonic()
     try:
@@ -407,6 +412,7 @@ def _run_healthcheck_probe(
     except subprocess.TimeoutExpired:
         return {
             "command": command,
+            "permission_mode": permission_mode,
             "expected_rule": expected_rule,
             "passed": False,
             "elapsed_ms": int((time.monotonic() - start) * 1000),
@@ -427,6 +433,7 @@ def _run_healthcheck_probe(
             decision = None
     return {
         "command": command,
+        "permission_mode": permission_mode,
         "expected_rule": expected_rule,
         "passed": decision == "deny" and rule_seen,
         "elapsed_ms": elapsed_ms,
@@ -436,17 +443,22 @@ def _run_healthcheck_probe(
 def cmd_healthcheck() -> tuple[dict[str, Any], str]:
     """Synthesize known-deny PreToolUse payloads and assert guard denies.
 
-    Pipes two independent always-deny commands to the bundled bash hook
-    and asserts each one comes back with ``permissionDecision: deny`` AND
-    the expected rule_id substring in the reason. Requiring two probes
-    plus rule_id matching defeats a single-rule weakening that would
-    leave a one-probe healthcheck falsely green.
+    Three probes: two interactive-mode (``default``) always-deny commands
+    plus one strict-mode (``dontAsk``) probe that exercises the
+    strict_default_deny path. Each must come back with
+    ``permissionDecision: deny`` AND the expected rule_id substring in
+    the reason. Requiring distinct probes plus rule_id matching defeats
+    both single-rule registry weakening and permission_mode plumbing
+    regressions.
 
     When a probe fails, the full deny envelope is in
     ``~/.claude/guard-decisions.jsonl`` -- this output stays minimal.
     """
     hook_path = Path(__file__).parent / "hooks" / "bash_command_validator.py"
-    probes = [_run_healthcheck_probe(hook_path, cmd, rule) for cmd, rule in _HEALTHCHECK_PROBES]
+    probes = [
+        _run_healthcheck_probe(hook_path, cmd, mode, rule)
+        for cmd, mode, rule in _HEALTHCHECK_PROBES
+    ]
     healthy = all(p["passed"] for p in probes)
     result: dict[str, Any] = {
         "healthy": healthy,

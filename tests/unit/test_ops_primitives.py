@@ -115,7 +115,12 @@ def test_healthcheck_returns_healthy(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert "OK" in pretty
     probes = payload["probes"]
     assert len(probes) >= 2, "healthcheck should run multiple probes"
+    modes_seen = {probe["permission_mode"] for probe in probes}
+    assert {"default", "dontAsk"} <= modes_seen, (
+        f"healthcheck must cover both interactive and strict modes; saw {modes_seen}"
+    )
     for probe in probes:
         assert probe["passed"] is True, f"probe failed: {probe}"
         assert probe["command"]
         assert probe["expected_rule"]
+        assert probe["permission_mode"] in {"default", "dontAsk"}

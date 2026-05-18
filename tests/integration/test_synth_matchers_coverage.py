@@ -1831,7 +1831,7 @@ def test_brace_blowup_denied_by_length_cap() -> None:
     n_alts=st.integers(min_value=1, max_value=30),
     n_groups=st.integers(min_value=1, max_value=6),
 )
-@settings(max_examples=30, deadline=None)
+@settings(max_examples=100, deadline=None)
 def test_expand_braces_bound_holds_for_any_blowup_shape(n_alts: int, n_groups: int) -> None:
     """Property: for any (n_alts, n_groups) in range, output stays bounded.
 
