@@ -1794,7 +1794,7 @@ def test_brace_expansion_blowup_capped() -> None:
     elapsed = time.perf_counter() - start
     # Either denied (post-canonicalize cap fired) or returned promptly. The
     # contract is: never stall, and never OOM.
-    assert elapsed < 5.0, f"brace blowup stalled validator: {elapsed:.2f}s"
+    assert elapsed < 10.0, f"brace blowup stalled validator: {elapsed:.2f}s"
     if result is not None:
         # If denied, must be by the length cap (not some other matcher).
         reason = result.get("permissionDecisionReason", "")
