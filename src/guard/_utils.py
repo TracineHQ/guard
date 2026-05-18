@@ -506,8 +506,9 @@ def log_internal_error(exc: BaseException, *, session_id: str = "") -> None:
     append_jsonl(
         GUARD_DECISIONS_PATH,
         {
-            "type": "internal_error",
+            "v": _SCHEMA_V,
             "schema_version": _SCHEMA_V,
+            "type": "internal_error",
             "exc_class": type(exc).__name__,
             "exc_msg": redacted_msg,
             "traceback_hash": tb_hash,

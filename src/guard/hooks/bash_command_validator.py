@@ -4443,7 +4443,10 @@ def decide(
         bypass = _maybe_allow_via_allowlist(
             allowlist, "bash.command_too_long", original_command, deny
         )
-        return bypass if bypass is not None else deny
+        if bypass is not None:
+            return bypass
+        _log_local(command, "deny", "command-too-long")
+        return deny
     # Fold POSIX line continuations and unicode whitespace before any other
     # processing so downstream pipeline split / normalization sees a canonical
     # ASCII form.
@@ -4467,7 +4470,10 @@ def decide(
         bypass = _maybe_allow_via_allowlist(
             allowlist, "bash.command_too_long", original_command, deny
         )
-        return bypass if bypass is not None else deny
+        if bypass is not None:
+            return bypass
+        _log_local(command, "deny", "command-too-long-post-canon")
+        return deny
 
     leak = get_credential_leak_deny(command)
     if leak is not None:
