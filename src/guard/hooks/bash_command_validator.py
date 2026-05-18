@@ -770,8 +770,22 @@ def _expand_braces_once(token: str) -> list[str] | None:
     return None
 
 
+_BRACE_EXPANSION_TOKEN_CAP = 4096
+
+
 def _expand_braces_in_line(line: str) -> str:
-    """Apply brace expansion to a single newline-free line."""
+    """Apply brace expansion to a single newline-free line.
+
+    Bails out of the fixpoint loop once the accumulated token count exceeds
+    ``_BRACE_EXPANSION_TOKEN_CAP``. The per-group 32-alternative cap in
+    ``_expand_braces_once`` bounds each group, but the cartesian product
+    across chained groups (``{...}{...}{...}{...}``) still multiplies
+    multiplicatively. 4 chained groups with 30 alternatives each = 810k
+    tokens, ~100 MB after rejoin — enough to stall the validator before
+    any matcher runs. The aggregate cap keeps the partial expansion well
+    above the post-canonicalize ``_COMMAND_LENGTH_CAP`` so the downstream
+    length check still trips, just much sooner.
+    """
     if "{" not in line:
         return line
     tokens = line.split()
@@ -785,6 +799,8 @@ def _expand_braces_in_line(line: str) -> str:
             else:
                 out.extend(expanded)
                 changed = True
+            if len(out) > _BRACE_EXPANSION_TOKEN_CAP:
+                return " ".join(out)
         tokens = out
         if not changed:
             break
