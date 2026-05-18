@@ -13,29 +13,29 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_autonomous_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Strip CLAUDE_AUTONOMOUS from the environment + isolate ``GUARD_DATA_DIR``.
-
-    The bash_command_validator (and several other hooks) branch on
-    ``CLAUDE_AUTONOMOUS=1`` and return an explicit ``allow`` envelope rather
-    than passthrough. Many tests assert ``decide(...)`` returns ``None`` for
-    safe commands, so a leaked env var from the dev shell causes spurious
-    failures.
+def _isolate_guard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Isolate ``GUARD_DATA_DIR`` + clear queue/decisions env overrides.
 
     ``GUARD_DATA_DIR`` is pointed at a per-test empty tmp dir so the
     allowlist loader (``guard.allowlist.load_allowlist``) doesn't pick up
     the dev's real ``~/.claude/guard/allowlist.json`` and silently allow
     commands tests expect to deny.
 
-    Tests that exercise autonomous-mode behavior set the var explicitly via
-    ``monkeypatch.setenv`` or pass it through ``env=`` to subprocess; this
-    fixture's ``monkeypatch.delenv`` is reverted after each test, so those
-    tests are unaffected.
+    Permission mode is sourced from the PreToolUse payload. Tests that need
+    strict mode pass ``permission_mode="dontAsk"`` directly. ``CLAUDE_AUTONOMOUS``
+    is the deprecated env-var fallback (one-cycle migration window); the dev
+    shell may have it set, so we strip it here to keep tests deterministic.
+    Reset ``_CLAUDE_AUTONOMOUS_WARNED`` so the one-time stderr warning gets
+    its first chance each test (otherwise the assertion-via-stderr tests
+    flake on test ordering).
     """
+    from guard import _utils
+
     monkeypatch.delenv("CLAUDE_AUTONOMOUS", raising=False)
-    monkeypatch.delenv("GUARD_AUTONOMOUS_QUEUE_PATH", raising=False)
+    monkeypatch.delenv("GUARD_STRICT_DENY_QUEUE_PATH", raising=False)
     monkeypatch.delenv("GUARD_DECISIONS_PATH", raising=False)
     monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "guard-home"))
+    _utils._CLAUDE_AUTONOMOUS_WARNED["once"] = False  # noqa: SLF001
 
 
 @pytest.fixture
@@ -56,13 +56,16 @@ def decision_log_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def autonomous_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, decision_log_env: Path) -> Path:
-    """Activate strict autonomous mode with isolated decision log + queue.
+def strict_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, decision_log_env: Path) -> Path:
+    """Isolate the strict-deny queue path + decision log.
 
-    Sets ``CLAUDE_AUTONOMOUS=1``, an isolated ``GUARD_DECISIONS_PATH`` (via
-    ``decision_log_env``), and ``GUARD_AUTONOMOUS_QUEUE_PATH``. Returns
-    ``tmp_path`` for tests that need to inspect both files.
+    Sets ``GUARD_STRICT_DENY_QUEUE_PATH`` and inherits the isolated
+    ``GUARD_DECISIONS_PATH`` from ``decision_log_env``. Returns ``tmp_path``
+    so tests can inspect both files.
+
+    NOTE: this fixture no longer activates strict mode — pass
+    ``permission_mode="dontAsk"`` to ``decide()`` (or set it in the
+    PreToolUse payload for subprocess tests).
     """
-    monkeypatch.setenv("CLAUDE_AUTONOMOUS", "1")
-    monkeypatch.setenv("GUARD_AUTONOMOUS_QUEUE_PATH", str(tmp_path / "queue.jsonl"))
+    monkeypatch.setenv("GUARD_STRICT_DENY_QUEUE_PATH", str(tmp_path / "queue.jsonl"))
     return tmp_path

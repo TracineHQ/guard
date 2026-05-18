@@ -6,9 +6,9 @@ from __future__ import annotations
 
 from guard.registry import (
     ALWAYS_DENY,
-    AUTONOMOUS_FEEDBACK,
     COMMANDS,
     SAFE_PREFIXES,
+    STRICT_FEEDBACK,
     CommandRule,
     Safety,
     get_rules_by_category,
@@ -71,8 +71,8 @@ def test_safe_prefixes_contains_git_read() -> None:
     assert "git log" in SAFE_PREFIXES
 
 
-def test_autonomous_feedback_only_for_ask_rules() -> None:
-    for prefix, msg in AUTONOMOUS_FEEDBACK.items():
+def test_strict_feedback_only_for_ask_rules() -> None:
+    for prefix, msg in STRICT_FEEDBACK.items():
         rule = next(r for r in COMMANDS if r.prefix == prefix)
         assert rule.safety is Safety.ASK
         assert msg, f"feedback for {prefix!r} must be non-empty"

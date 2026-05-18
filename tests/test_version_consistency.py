@@ -16,11 +16,9 @@ from __future__ import annotations
 
 import json
 import tomllib
-from pathlib import Path
 
 import guard
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from tests._helpers import REPO_ROOT
 
 
 def test_pyproject_version_matches_package() -> None:

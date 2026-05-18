@@ -10,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).parents[2]
+from tests._helpers import REPO_ROOT
+
 RULES_DIR = REPO_ROOT / ".semgrep" / "rules"
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 HOOKS_DIR = REPO_ROOT / "src" / "guard" / "hooks"

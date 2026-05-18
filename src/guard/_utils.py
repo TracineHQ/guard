@@ -8,7 +8,10 @@ Provides:
   ``docs/output-format.md``)
 - ``log_decision()`` — the single canonical writer hooks call when they
   emit an allow/deny/ask decision
-- ``is_autonomous_mode()`` — driven-agent context detection
+- ``read_permission_mode(hook_input)`` — extract the documented Claude Code
+  ``permission_mode`` from a PreToolUse payload
+- ``is_strict_mode(hook_input)`` — convenience predicate for
+  ``permission_mode in {auto, dontAsk, bypassPermissions}``
 - ``sanitize_for_stderr()`` — strip control chars before writing user input
   to stderr
 
@@ -38,6 +41,7 @@ Usage in hooks::
 # Copyright 2026 TracineHQ contributors
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -60,9 +64,9 @@ GUARD_DECISIONS_PATH = os.environ.get(
 # Autonomous-mode denial queue (env-overridable for tests). Mirrors the
 # GUARD_DECISIONS_PATH pattern — driven-agent contexts append denied commands
 # here so a human can review them after the session ends.
-GUARD_AUTONOMOUS_QUEUE_PATH: str = os.environ.get(
-    "GUARD_AUTONOMOUS_QUEUE_PATH",
-    str(Path("~/.claude/guard-autonomous-queue.jsonl").expanduser()),
+GUARD_STRICT_DENY_QUEUE_PATH: str = os.environ.get(
+    "GUARD_STRICT_DENY_QUEUE_PATH",
+    str(Path("~/.claude/guard-strict-deny-queue.jsonl").expanduser()),
 )
 
 
@@ -83,19 +87,98 @@ def _log_debug(msg: str) -> None:
         sys.stderr.write(f"[guard] {msg}\n")
 
 
-_AUTONOMOUS_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "on"})
+# Strict modes route through guard's default-deny path; the rest pass through
+# advisory-mode evaluation. The documented Claude Code permission_mode values
+# are default / plan / acceptEdits / auto / dontAsk / bypassPermissions. ``auto``
+# is Anthropic's classifier-mediated unattended-operation mode (no human at the
+# keyboard) — same threat model as ``dontAsk``/``bypassPermissions``, so it
+# routes through default-deny too.
+STRICT_PERMISSION_MODES: frozenset[str] = frozenset({"auto", "dontAsk", "bypassPermissions"})
 
 
-def is_autonomous_mode() -> bool:
-    """Return True when running in non-interactive / driven-agent context.
+_CLAUDE_AUTONOMOUS_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_CLAUDE_AUTONOMOUS_WARNED: dict[str, bool] = {"once": False}
 
-    Triggered by ``CLAUDE_AUTONOMOUS`` set to any of ``1``, ``true``, ``yes``,
-    or ``on`` (case-insensitive). Set automatically by Claude Code when
-    running subagents or any context where there's no human at the prompt to
-    answer a permission ask. Hooks consult this to decide between strict
-    default-deny mode and pass-through-to-user mode.
+
+def _autonomous_deprecation_sentinel_path() -> Path:
+    """Resolve the sentinel path against the current ``GUARD_DATA_DIR``.
+
+    Computed lazily (not at module import) so test fixtures that point
+    ``GUARD_DATA_DIR`` at a per-test tmpdir get an isolated sentinel.
     """
-    return os.environ.get("CLAUDE_AUTONOMOUS", "").strip().lower() in _AUTONOMOUS_TRUTHY
+    return (
+        Path(os.environ.get("GUARD_DATA_DIR", str(Path.home() / ".claude" / "guard")))
+        / ".autonomous-warned"
+    )
+
+
+def _emit_autonomous_deprecation_warning() -> None:
+    """Emit the CLAUDE_AUTONOMOUS deprecation warning at most once per machine.
+
+    Each PreToolUse hook is a fresh Python subprocess, so a module-level
+    "warned" flag fires the warning on every invocation. A sentinel file in
+    ``GUARD_HOME`` survives subprocesses; once it exists, subsequent
+    invocations skip the stderr write. Failure to create the sentinel falls
+    back to the in-process flag so warnings still appear.
+    """
+    if _CLAUDE_AUTONOMOUS_WARNED["once"]:
+        return
+    sentinel = _autonomous_deprecation_sentinel_path()
+    try:
+        if sentinel.exists():
+            _CLAUDE_AUTONOMOUS_WARNED["once"] = True
+            return
+    except OSError:
+        pass
+    sys.stderr.write(
+        "guard: CLAUDE_AUTONOMOUS is deprecated; set Claude Code's "
+        "permission_mode (dontAsk/bypassPermissions/auto) instead. "
+        "The env-var fallback will be removed in v1.5.0.\n"
+    )
+    _CLAUDE_AUTONOMOUS_WARNED["once"] = True
+    with contextlib.suppress(OSError):
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.touch()
+
+
+def read_permission_mode(hook_input: dict[str, Any] | None) -> str:
+    """Return ``permission_mode`` from a PreToolUse hook-input payload.
+
+    Defaults to ``"default"`` when the field is absent or non-string.
+    Unknown literal values are returned as-is so downstream callers can
+    emit a one-line warning and treat them as advisory.
+
+    Backwards compatibility for one minor cycle: if the payload carries no
+    ``permission_mode`` field at all AND the legacy ``CLAUDE_AUTONOMOUS``
+    env var is set to a truthy value, escalate to ``"dontAsk"`` and emit a
+    one-time stderr deprecation warning. An explicit ``"default"`` from
+    Claude Code is honored as-is — the env var no longer overrides an
+    explicit payload value. The env-var path will be removed in v1.5.0.
+    """
+    explicit_mode: str | None = None
+    if hook_input is not None:
+        raw = hook_input.get("permission_mode")
+        if isinstance(raw, str) and raw.strip():
+            explicit_mode = raw.strip()
+    if explicit_mode is not None:
+        return explicit_mode
+    env = os.environ.get("CLAUDE_AUTONOMOUS", "").strip().lower()
+    if env in _CLAUDE_AUTONOMOUS_TRUTHY:
+        _emit_autonomous_deprecation_warning()
+        return "dontAsk"
+    return "default"
+
+
+def is_strict_mode(hook_input: dict[str, Any] | None) -> bool:
+    """Return True when ``permission_mode`` is a strict (default-deny) mode.
+
+    Strict modes (``auto``, ``dontAsk``, ``bypassPermissions``) all indicate
+    unattended operation: ``auto`` is Claude Code's classifier-mediated
+    unattended mode; the other two are explicit opt-ins. All three trigger
+    guard's default-deny path. Other modes (``default``, ``plan``,
+    ``acceptEdits``) stay in advisory evaluation.
+    """
+    return read_permission_mode(hook_input) in STRICT_PERMISSION_MODES
 
 
 # Loop detection settings
@@ -338,6 +421,7 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
     command_excerpt: str | None = None,
     session_id: str = "",
     cwd: str | None = None,
+    permission_mode: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> None:
     """Append a spec-compliant decision record to the JSONL log.
@@ -363,6 +447,10 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
         command_excerpt: Optional bash-command excerpt (truncated to 4096).
         session_id: Claude Code session id.
         cwd: Optional working directory string.
+        permission_mode: Optional Claude Code permission_mode string from the
+            PreToolUse payload (``default``/``plan``/``acceptEdits``/``auto``/
+            ``dontAsk``/``bypassPermissions``). Written verbatim onto the
+            record so consumers can ``jq '.permission_mode'``.
         extra: Optional dict of additional fields merged into the record
             (e.g. ``{"unknown_flags": ["--foo", "--bar"]}``). Values are
             written verbatim; callers are responsible for not including
@@ -371,6 +459,7 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
     timestamp = datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
     redacted_reason = _redact_secrets(reason)
     record: dict[str, Any] = {
+        "type": "decision",
         "v": _SCHEMA_V,
         "schema_version": _SCHEMA_V,
         "mode": _DEFAULT_MODE,
@@ -387,9 +476,46 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
         record["command_excerpt"] = redacted_excerpt[:_COMMAND_EXCERPT_MAX_CHARS]
     if cwd is not None:
         record["cwd"] = cwd
+    if permission_mode is not None:
+        record["permission_mode"] = permission_mode
     if extra:
         record.update(extra)
     append_jsonl(GUARD_DECISIONS_PATH, record)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def log_internal_error(exc: BaseException, *, session_id: str = "") -> None:
+    """Append a structured ``internal_error`` JSONL record.
+
+    Called from ``safe_main`` before fail-open so a silent crash becomes an
+    observable event. The traceback is hashed (not stored) to avoid leaking
+    file paths or payload contents; operators bucket repeat failures by hash.
+    ``exc_msg`` is passed through ``_redact_secrets`` because a hook that
+    crashes mid-credential-handling may surface the value in its exception
+    message — and this log is the exact channel the redactor catalog seals.
+    """
+    import hashlib  # noqa: PLC0415
+    import traceback  # noqa: PLC0415
+
+    tb_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    tb_hash = "sha256:" + hashlib.sha256(tb_text.encode("utf-8")).hexdigest()[:16]
+    redacted_msg = _redact_secrets(str(exc))[:_REASON_MAX_CHARS]
+    append_jsonl(
+        GUARD_DECISIONS_PATH,
+        {
+            "v": _SCHEMA_V,
+            "schema_version": _SCHEMA_V,
+            "type": "internal_error",
+            "exc_class": type(exc).__name__,
+            "exc_msg": redacted_msg,
+            "traceback_hash": tb_hash,
+            "session_id": session_id,
+            "timestamp": _utc_now_iso(),
+        },
+    )
 
 
 def make_decision(decision: str, reason: str) -> str:
@@ -565,6 +691,7 @@ def safe_main(hook_fn: Callable[[dict[str, Any]], None]) -> None:
             ``sys.exit(2)`` for hard deny, or ``print(make_decision(...))``
             for decisions. No return value is required for passthrough.
     """
+    payload: dict[str, Any] | None = None
     try:
         payload = parse_hook_input()
         if payload is None:
@@ -572,7 +699,14 @@ def safe_main(hook_fn: Callable[[dict[str, Any]], None]) -> None:
         hook_fn(payload)
     except SystemExit:
         raise  # Allow sys.exit() from hook_fn
-    except Exception:  # noqa: BLE001 -- silent passthrough is the design contract
+    except Exception as exc:  # noqa: BLE001 -- silent passthrough is the design contract
+        session_id = ""
+        if isinstance(payload, dict):
+            sid = payload.get("session_id")
+            if isinstance(sid, str):
+                session_id = sid
+        with contextlib.suppress(Exception):
+            log_internal_error(exc, session_id=session_id)
         if os.environ.get("GUARD_DEBUG") == "1":
             import traceback  # noqa: PLC0415 -- deferred import, only loaded on debug path
 

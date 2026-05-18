@@ -5,7 +5,7 @@
 Each command below has no legitimate single-step dev variant; the matching
 ``CommandRule`` entry in ``registry.py`` routes them through ``ALWAYS_DENY``.
 Tests assert the deny fires regardless of trailing flags / args (prefix
-matching) and across both interactive and autonomous mode.
+matching) and across both interactive and strict mode.
 """
 
 from __future__ import annotations

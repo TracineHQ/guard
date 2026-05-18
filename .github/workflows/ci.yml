@@ -212,8 +212,8 @@ jobs:
           #   #deny            — at least one hook must return deny
           #   #override <env>  — set GUARD_ADMIN_ALLOW_VERBS=<env>, assert allow
           #
-          # CLAUDE_AUTONOMOUS=0: override blocks must be tested in interactive
-          # mode so GUARD_ADMIN_ALLOW_VERBS takes effect before autonomous-deny.
+          # permission_mode=default: override blocks must be tested in interactive
+          # mode so GUARD_ADMIN_ALLOW_VERBS takes effect before strict-deny.
           CORPUS="tests/integration/aws_catalog_smoke_corpus.txt"
           GUARD_BIN="/tmp/guard-smoke/bin/guard"
           /tmp/guard-smoke/bin/python - "$CORPUS" "$GUARD_BIN" <<'PYEOF'
@@ -252,7 +252,6 @@ jobs:
 
               cmd = line
               env = os.environ.copy()
-              env["CLAUDE_AUTONOMOUS"] = "0"
               if current_marker == "override" and current_override_env:
                   env["GUARD_ADMIN_ALLOW_VERBS"] = current_override_env
 
@@ -303,7 +302,9 @@ jobs:
           set -eux
           # Install test deps into the same venv. Only what tests import —
           # ruff/mypy/vulture have their own jobs and aren't needed here.
-          /tmp/guard-smoke/bin/pip install pytest pytest-cov pytest-xdist
+          # hypothesis + pytest-timeout are imported by the DoS-bound tests
+          # in tests/integration/test_synth_matchers_coverage.py.
+          /tmp/guard-smoke/bin/pip install pytest pytest-cov pytest-xdist pytest-timeout hypothesis
 
           # Confirm `import guard` resolves to the wheel-installed package,
           # not the in-tree src/. pytest's rootdir gets prepended to sys.path
@@ -360,8 +361,14 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
-      - name: Run semgrep
-        run: uv run --with semgrep semgrep scan --error --config .semgrep/rules/ src/guard/hooks/
+      - name: Run semgrep (hook rules, block on error)
+        run: |
+          uv run --with semgrep semgrep scan --error \
+            --config .semgrep/rules/no-prefix-predicate-in-readonly.yml \
+            --config .semgrep/rules/no-startswith-in-predicate-field.yml \
+            src/guard/hooks/
+      - name: Run semgrep (test-hygiene rules, block on ERROR-severity only)
+        run: uv run --with semgrep semgrep scan --error --severity ERROR --config .semgrep/rules/test-hygiene.yml tests/
 
   vulture:
     name: Dead-code sweep

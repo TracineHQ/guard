@@ -39,11 +39,12 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 from guard._utils import (
-    GUARD_AUTONOMOUS_QUEUE_PATH,
+    GUARD_STRICT_DENY_QUEUE_PATH,
+    STRICT_PERMISSION_MODES,
     _log_debug,
     append_jsonl,
-    is_autonomous_mode,
     log_decision,
+    read_permission_mode,
     safe_main,
     sanitize_for_stderr,
 )
@@ -63,7 +64,6 @@ from guard.hooks._admin_specs import (
 )
 from guard.registry import (
     ALWAYS_DENY,
-    AUTONOMOUS_FEEDBACK,
     COMMANDS,
     DANGEROUS_ENV_SINKS,
     DANGEROUS_INTERPRETERS,
@@ -77,6 +77,7 @@ from guard.registry import (
     PLAIN_RUNNER_PREFIXES,
     SAFE_PIPE_COMMANDS,
     SAFE_PREFIXES,
+    STRICT_FEEDBACK,
     Safety,
 )
 
@@ -120,7 +121,7 @@ _SPEC_DECISION_MAP: dict[str, Literal["allow", "deny", "ask", "pass"]] = {
 # this at entry; ``_log_local`` (called from ``decide`` and helpers) reads
 # from it. Falls back to ``CLAUDE_SESSION_ID`` env when called outside a
 # ``hook()`` context (e.g. unit tests that drive ``decide`` directly).
-_REQUEST_CONTEXT: dict[str, Any] = {"session_id": "", "cwd": None}
+_REQUEST_CONTEXT: dict[str, Any] = {"session_id": "", "cwd": None, "permission_mode": "default"}
 
 # Parsed once from GUARD_ADMIN_ALLOW_VERBS on first call to _get_admin_allow_verbs().
 _ADMIN_ALLOW_VERBS_CACHE: dict[str, frozenset[tuple[str, ...]]] | None = None
@@ -166,6 +167,7 @@ def _log_local(
         command_excerpt=command,
         session_id=session_id,
         cwd=_REQUEST_CONTEXT["cwd"],
+        permission_mode=_REQUEST_CONTEXT.get("permission_mode"),
         extra=extra,
     )
 
@@ -536,7 +538,7 @@ def _is_safe_env_inner(inner_tokens: list[str]) -> bool:
     return False
 
 
-def is_safe_command(segment: str, *, is_piped: bool = False, autonomous: bool = False) -> bool:
+def is_safe_command(segment: str, *, is_piped: bool = False, strict: bool = False) -> bool:
     """Return ``True`` if a segment matches a known-safe prefix.
 
     Public entry point — safe to call from outside ``decide()``. Applies the
@@ -544,7 +546,7 @@ def is_safe_command(segment: str, *, is_piped: bool = False, autonomous: bool = 
     not need to know about ``_canonicalize`` / ``_match_always_deny`` /
     ``_match_synthetic_deny`` themselves.
 
-    In autonomous mode, git segments are NOT deferred to git_c_validator —
+    In strict mode, git segments are NOT deferred to git_c_validator —
     we must evaluate them here so the strict default-deny path can fire.
     """
     if not segment:
@@ -565,10 +567,10 @@ def is_safe_command(segment: str, *, is_piped: bool = False, autonomous: bool = 
         return False
     if is_piped:
         return _matches_prefix(segment, SAFE_PIPE_COMMANDS)
-    # In interactive mode, defer git segments to git_c_validator. In autonomous
+    # In interactive mode, defer git segments to git_c_validator. In strict
     # mode, fall through so SAFE_PREFIXES (e.g. `git status`, `git log`) is
     # consulted directly — anything not on the read-only allowlist is denied.
-    if not autonomous and (segment.startswith("git ") or segment == "git"):
+    if not strict and (segment.startswith("git ") or segment == "git"):
         return True
     if _matches_prefix(segment, SAFE_PREFIXES):
         return True
@@ -768,8 +770,22 @@ def _expand_braces_once(token: str) -> list[str] | None:
     return None
 
 
+_BRACE_EXPANSION_TOKEN_CAP = 4096
+
+
 def _expand_braces_in_line(line: str) -> str:
-    """Apply brace expansion to a single newline-free line."""
+    """Apply brace expansion to a single newline-free line.
+
+    Bails out of the fixpoint loop once the accumulated token count exceeds
+    ``_BRACE_EXPANSION_TOKEN_CAP``. The per-group 32-alternative cap in
+    ``_expand_braces_once`` bounds each group, but the cartesian product
+    across chained groups (``{...}{...}{...}{...}``) still multiplies
+    multiplicatively. 4 chained groups with 30 alternatives each = 810k
+    tokens, ~100 MB after rejoin — enough to stall the validator before
+    any matcher runs. The aggregate cap keeps the partial expansion well
+    above the post-canonicalize ``_COMMAND_LENGTH_CAP`` so the downstream
+    length check still trips, just much sooner.
+    """
     if "{" not in line:
         return line
     tokens = line.split()
@@ -783,6 +799,8 @@ def _expand_braces_in_line(line: str) -> str:
             else:
                 out.extend(expanded)
                 changed = True
+            if len(out) > _BRACE_EXPANSION_TOKEN_CAP:
+                return " ".join(out)
         tokens = out
         if not changed:
             break
@@ -1674,7 +1692,7 @@ _SYNTH_ADMIN_DEFAULT_DENY = "admin-default-deny"
 _SYNTH_ADMIN_SENSITIVE_ENV = "admin-sensitive-env"
 _SYNTH_ADMIN_FORBIDDEN_SUBCOMMAND = "admin-forbidden-subcommand"
 _SYNTH_ADMIN_FORBIDDEN_FLAG = "admin-forbidden-flag"
-_SYNTH_ADMIN_UNKNOWN_FLAG_AUTONOMOUS = "admin-unknown-flag-autonomous"
+_SYNTH_ADMIN_UNKNOWN_FLAG_STRICT = "admin-unknown-flag-strict"
 
 _SYNTH_DENY_REASONS: dict[str, str] = {
     _SYNTH_INTERPRETER_DENY: (
@@ -1936,8 +1954,8 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         " use on an allowlisted read verb in an agent context. Remove the"
         " flag."
     ),
-    _SYNTH_ADMIN_UNKNOWN_FLAG_AUTONOMOUS: (
-        "Unknown flag on admin CLI in autonomous mode. Unrecognized flags may"
+    _SYNTH_ADMIN_UNKNOWN_FLAG_STRICT: (
+        "Unknown flag on admin CLI in strict mode. Unrecognized flags may"
         " alter request destination, credentials, or output format in ways"
         " guard cannot statically verify. Remove unknown flags or run"
         " interactively."
@@ -2523,13 +2541,13 @@ _SENSITIVE_DEST_HOME_PATTERNS = (
     "Library/LaunchAgents/",
     "Library/LaunchDaemons/",
     ".local/bin/",
-    # Guard's own audit log + autonomous-mode queue. Without this, an agent
+    # Guard's own audit log + strict-deny queue. Without this, an agent
     # can ``> ~/.claude/guard-decisions.jsonl`` to truncate the audit trail
-    # or ``echo > ~/.claude/guard-autonomous-queue.jsonl`` to forge entries.
+    # or ``echo > ~/.claude/guard-strict-deny-queue.jsonl`` to forge entries.
     # The append-side writer already uses O_NOFOLLOW + O_APPEND for symlink
     # safety; this closes the truncate/overwrite vector via WRITE_HEAD verbs.
     ".claude/guard-decisions.jsonl",
-    ".claude/guard-autonomous-queue.jsonl",
+    ".claude/guard-strict-deny-queue.jsonl",
     ".claude/guard/",
 )
 _WRITE_HEAD_VERBS = {
@@ -4201,38 +4219,49 @@ def _get_always_deny(segments: list[str]) -> tuple[dict[str, str], str] | None:
     return None
 
 
-# === Autonomous-mode strict safety net ===
-# When CLAUDE_AUTONOMOUS=1, there is no human at the prompt to answer a
-# permission ask. Anything not on the safe-prefix allowlist is denied with
-# either an AUTONOMOUS_FEEDBACK message (if the prefix is registered) or a
-# generic default-deny.
+# === Strict-mode safety net ===
+# When permission_mode is auto / dontAsk / bypassPermissions, there is no
+# human at the prompt to answer a permission ask. Anything not on the
+# safe-prefix allowlist is denied with either a STRICT_FEEDBACK message (if
+# the prefix is registered) or a generic default-deny.
 
-DEFAULT_AUTONOMOUS_DENY = (
-    "autonomous mode: command shape not on safe-prefix allowlist; not allowed "
-    "without explicit user approval. (CLAUDE_AUTONOMOUS=1 inverts the default "
-    "to deny — if this command is genuinely safe, add a rule to guard's "
-    "registry; otherwise re-run interactively.)"
+DEFAULT_STRICT_DENY_BODY = (
+    "command shape not on safe-prefix allowlist; not allowed without explicit "
+    "user approval. permission_mode auto/dontAsk/bypassPermissions inverts the "
+    "default to deny — if this command is genuinely safe, add a rule to "
+    "guard's registry; otherwise re-run interactively"
 )
 
 
-def get_autonomous_deny(segment: str) -> dict[str, str]:
-    """Return a deny envelope for an autonomous-mode segment.
+def get_strict_deny(segment: str) -> tuple[dict[str, str], str]:
+    """Return ``(deny envelope, rule_id)`` for a strict-mode segment.
 
-    Matches the segment against ``AUTONOMOUS_FEEDBACK`` (longest prefix wins).
+    Matches the segment against ``STRICT_FEEDBACK`` (longest prefix wins).
     Normalizes via ``_normalize_segment`` so quoting/whitespace cannot bypass
-    a feedback rule. Falls back to ``DEFAULT_AUTONOMOUS_DENY`` on no match.
+    a feedback rule. Falls back to the generic strict default-deny on no
+    match. Every branch routes through ``_format_deny_reason`` so the
+    ``guard [permission_mode=...] denied: <rule_id>`` annunciator appears
+    on every strict deny -- not just the rule-matched ones. The rule_id is
+    returned alongside so callers can route the deny through
+    ``_maybe_allow_via_allowlist`` (the annunciator advertises an override
+    path; that path has to actually fire).
     """
     normalized = _normalize_segment(segment)
-    for prefix, feedback in sorted(AUTONOMOUS_FEEDBACK.items(), key=lambda kv: -len(kv[0])):
+    for prefix, feedback in sorted(STRICT_FEEDBACK.items(), key=lambda kv: -len(kv[0])):
         if normalized == prefix or normalized.startswith(prefix + " "):
-            return _deny(feedback)
-    return _deny(DEFAULT_AUTONOMOUS_DENY)
+            return _deny(
+                _format_deny_reason("bash.strict_feedback", feedback)
+            ), "bash.strict_feedback"
+    return (
+        _deny(_format_deny_reason("bash.strict_default_deny", DEFAULT_STRICT_DENY_BODY)),
+        "bash.strict_default_deny",
+    )
 
 
 def queue_denied_command(command: str) -> None:
-    """Best-effort append a denied command to the autonomous review queue.
+    """Best-effort append a denied command to the strict-mode review queue.
 
-    The queue is a JSONL file at ``GUARD_AUTONOMOUS_QUEUE_PATH``; a human can
+    The queue is a JSONL file at ``GUARD_STRICT_DENY_QUEUE_PATH``; a human can
     review it after the session ends. I/O failures are swallowed by
     ``append_jsonl`` — the hook must never block on logging.
     """
@@ -4241,8 +4270,8 @@ def queue_denied_command(command: str) -> None:
         "command": command[:500],
         "session_id": os.environ.get("CLAUDE_SESSION_ID", ""),
     }
-    append_jsonl(GUARD_AUTONOMOUS_QUEUE_PATH, entry)
-    _log_debug(f"queue_denied_command: appended to {GUARD_AUTONOMOUS_QUEUE_PATH}")
+    append_jsonl(GUARD_STRICT_DENY_QUEUE_PATH, entry)
+    _log_debug(f"queue_denied_command: appended to {GUARD_STRICT_DENY_QUEUE_PATH}")
 
 
 def get_credential_leak_deny(command: str) -> dict[str, str] | None:
@@ -4274,8 +4303,8 @@ _AGENT_GUIDANCE_INTERACTIVE = (
     "that fits the user's intent → wait for explicit user approval → apply."
 )
 
-_AGENT_GUIDANCE_AUTONOMOUS = (
-    "Agents: this is a hard fence in autonomous mode. Do not retry, "
+_AGENT_GUIDANCE_STRICT = (
+    "Agents: this is a hard fence in strict mode. Do not retry, "
     "do not invoke an override. Surface this deny in your output for the "
     "operator's later review."
 )
@@ -4292,12 +4321,16 @@ def _format_deny_reason(rule_id: str, body: str) -> str:
     user supplies the exact form they want when they invoke the CLI.
 
     A mode-aware agent-guidance sentence is appended so agents know whether
-    to ask the user (interactive) or surface and stop (autonomous).
+    to ask the user (interactive) or surface and stop (strict). The body is
+    prefixed with a ``guard [permission_mode=<mode>] denied: <rule_id>``
+    annunciator so reviewers can identify the active mode at a glance.
     """
     body = body.rstrip(" .")
-    guidance = _AGENT_GUIDANCE_AUTONOMOUS if is_autonomous_mode() else _AGENT_GUIDANCE_INTERACTIVE
+    mode = _REQUEST_CONTEXT.get("permission_mode") or "default"
+    is_strict = mode in STRICT_PERMISSION_MODES
+    guidance = _AGENT_GUIDANCE_STRICT if is_strict else _AGENT_GUIDANCE_INTERACTIVE
     return (
-        f"{body}. Rule: {rule_id}. "
+        f"guard [permission_mode={mode}] denied: {rule_id}. {body}. "
         f"Override: `guard allowlist allow-command {rule_id} '<command>' --reason '...'` "
         f"or `guard allowlist disable-rule {rule_id}`. {guidance}"
     )
@@ -4384,21 +4417,36 @@ def _evaluate_segments(
 _COMMAND_LENGTH_CAP = 8192
 
 
-def decide(command: str, original_command: str | None = None) -> dict[str, str] | None:
+def decide(
+    command: str,
+    original_command: str | None = None,
+    permission_mode: str = "default",
+) -> dict[str, str] | None:
     """Decide whether to allow a bash command. ``None`` means passthrough.
 
     ``original_command`` is the unmodified user-typed command string used for
     allowlist exact-match lookups. When ``None``, defaults to ``command``.
+
+    ``permission_mode`` is the documented Claude Code permission mode
+    (``default`` / ``plan`` / ``acceptEdits`` / ``auto`` / ``dontAsk`` /
+    ``bypassPermissions``). Strict modes (``dontAsk``,
+    ``bypassPermissions``) route through default-deny evaluation; all
+    other modes use the advisory evaluator. The value is stamped onto
+    ``_REQUEST_CONTEXT`` so downstream helpers (deny annunciator,
+    agent-guidance selector) can read it without an extra parameter
+    through the call graph.
     """
     if original_command is None:
         original_command = command
+    _REQUEST_CONTEXT["permission_mode"] = permission_mode
     # Adversarial-length inputs (200 KB single-token ``echo aaaa...``) drive
     # the candidate-forms / fixpoint pipeline into ~10 s of redundant
     # ``shlex.split`` work. Real bash command lines sit far below 8 KiB; deny
     # outright before any scan so the validator can't be DoS'd by an agent
     # emitting (or being tricked into emitting) a giant payload.
+    allowlist = load_allowlist()
     if len(command) > _COMMAND_LENGTH_CAP:
-        return _deny(
+        deny = _deny(
             _format_deny_reason(
                 "bash.command_too_long",
                 (
@@ -4408,6 +4456,13 @@ def decide(command: str, original_command: str | None = None) -> dict[str, str] 
                 ),
             )
         )
+        bypass = _maybe_allow_via_allowlist(
+            allowlist, "bash.command_too_long", original_command, deny
+        )
+        if bypass is not None:
+            return bypass
+        _log_local(command, "deny", "command-too-long")
+        return deny
     # Fold POSIX line continuations and unicode whitespace before any other
     # processing so downstream pipeline split / normalization sees a canonical
     # ASCII form.
@@ -4418,7 +4473,7 @@ def decide(command: str, original_command: str | None = None) -> dict[str, str] 
     # process before any matcher runs. Re-apply the cap post-canonicalize
     # so the budget covers expansion blowup as well as raw input length.
     if len(command) > _COMMAND_LENGTH_CAP:
-        return _deny(
+        deny = _deny(
             _format_deny_reason(
                 "bash.command_too_long",
                 (
@@ -4428,7 +4483,13 @@ def decide(command: str, original_command: str | None = None) -> dict[str, str] 
                 ),
             )
         )
-    allowlist = load_allowlist()
+        bypass = _maybe_allow_via_allowlist(
+            allowlist, "bash.command_too_long", original_command, deny
+        )
+        if bypass is not None:
+            return bypass
+        _log_local(command, "deny", "command-too-long-post-canon")
+        return deny
 
     leak = get_credential_leak_deny(command)
     if leak is not None:
@@ -4456,7 +4517,7 @@ def decide(command: str, original_command: str | None = None) -> dict[str, str] 
 
     # === Pre-evaluation: dangerous-construct deny in BOTH modes ===
     # ``$(...)``, backticks, and process substitution are exfil/RCE primitives
-    # regardless of pipeline depth or interactive/autonomous context. Likewise,
+    # regardless of pipeline depth or interactive/strict context. Likewise,
     # CONDITIONAL_SAFE base commands with denied flags (``find -exec``, etc.)
     # must deny even for single-segment commands where the segment-walk would
     # otherwise short-circuit to passthrough.
@@ -4464,13 +4525,16 @@ def decide(command: str, original_command: str | None = None) -> dict[str, str] 
     if pre_deny is not None:
         return pre_deny
 
-    # === Autonomous mode: strict default-deny ===
-    # Subagents and other driven-agent contexts have no human at the prompt.
-    # Anything not explicitly on the safe-prefix allowlist is denied here so
-    # the agent gets a structured rejection (with feedback) instead of a
-    # silent passthrough that would otherwise hang waiting for permission.
-    if is_autonomous_mode():
-        return _evaluate_autonomous(command, segments)
+    # === Strict mode: default-deny ===
+    # ``auto`` (Claude Code's classifier-mediated unattended mode), ``dontAsk``
+    # and ``bypassPermissions`` all imply no human at the prompt; anything not
+    # on the safe-prefix allowlist is denied here so the agent gets a
+    # structured rejection (with feedback) instead of a silent passthrough
+    # that would otherwise hang waiting for permission.
+    if permission_mode in STRICT_PERMISSION_MODES:
+        return _evaluate_strict(
+            command, segments, allowlist=allowlist, original_command=original_command
+        )
 
     has_comments = command.strip() != cleaned
     has_pipes = len(segments) > 1
@@ -4515,9 +4579,9 @@ _PIPE_TO_SHELL_REASON = (
 
 
 def _pre_evaluate_dangerous(command: str, segments: list[str]) -> dict[str, str] | None:
-    r"""Pre-deny passes that fire in both interactive and autonomous mode.
+    r"""Pre-deny passes that fire in both interactive and strict mode.
 
-    These checks run BEFORE the autonomous strict-mode path and BEFORE the
+    These checks run BEFORE the strict-mode path and BEFORE the
     interactive ``no comments / no pipes -> passthrough`` short-circuit. They
     catch bypasses that the segment walk used to miss for bare commands:
     ``find . -exec rm {} \;`` and ``cat $(rm -rf /)`` would otherwise return
@@ -4536,7 +4600,7 @@ def _pre_evaluate_dangerous(command: str, segments: list[str]) -> dict[str, str]
                 f"Blocked: `{segment[:80]}` contains a dangerous shell "
                 "construct ($(...), backticks, or process substitution). "
                 "These are exfil/RCE primitives and are denied in both "
-                "interactive and autonomous mode."
+                "interactive and strict mode."
             )
             _log_local(command, "deny", "dangerous-construct")
             return _deny(reason)
@@ -4554,10 +4618,10 @@ def _pre_evaluate_dangerous(command: str, segments: list[str]) -> dict[str, str]
     return None
 
 
-def _matches_autonomous_feedback(segment: str) -> bool:
-    """Return True if the segment matches an AUTONOMOUS_FEEDBACK prefix.
+def _matches_strict_feedback(segment: str) -> bool:
+    """Return True if the segment matches an STRICT_FEEDBACK prefix.
 
-    AUTONOMOUS_FEEDBACK entries are commands that need explicit human approval
+    STRICT_FEEDBACK entries are commands that need explicit human approval
     in driven-agent contexts, so they must NOT be allowed by SAFE_PREFIXES
     coverage (e.g. `git branch -d` falls under the broader `git branch` safe
     prefix, but is registered separately as feedback-required).
@@ -4566,31 +4630,41 @@ def _matches_autonomous_feedback(segment: str) -> bool:
     closed (``"git" add -A`` matches the ``git add`` ASK rule).
     """
     normalized = _normalize_segment(segment)
-    for prefix in AUTONOMOUS_FEEDBACK:
+    for prefix in STRICT_FEEDBACK:
         if normalized == prefix or normalized.startswith(prefix + " "):
             return True
     return False
 
 
-def _evaluate_autonomous(command: str, segments: list[str]) -> dict[str, str]:
-    """Walk every segment under autonomous strict-mode rules.
+def _evaluate_strict(
+    command: str,
+    segments: list[str],
+    *,
+    allowlist: Allowlist,
+    original_command: str,
+) -> dict[str, str]:
+    """Walk every segment under strict-mode rules.
 
-    Returns deny on first non-safe segment (with optional AUTONOMOUS_FEEDBACK
+    Returns deny on first non-safe segment (with optional STRICT_FEEDBACK
     message), or allow if every segment is on the safe-prefix allowlist.
 
-    AUTONOMOUS_FEEDBACK matches take priority over SAFE_PREFIXES — a command
+    STRICT_FEEDBACK matches take priority over SAFE_PREFIXES — a command
     explicitly registered as feedback-required is denied even if a broader
     safe prefix would otherwise cover it.
 
     Unknown-flag escalation: if an allowed admin CLI segment has unknown long
     flags (not in spec.known_flags or spec.forbidden_flags), deny with
-    bash.admin_unknown_flag_autonomous in autonomous mode.
+    bash.admin_unknown_flag_strict in strict mode.
+
+    Every strict-mode deny is routed through ``_maybe_allow_via_allowlist``
+    so the override path that ``_format_deny_reason`` advertises (`guard
+    allowlist allow-command ...` / `disable-rule ...`) actually fires.
     """
     for i, segment in enumerate(segments):
-        if not _matches_autonomous_feedback(segment) and is_safe_command(
-            segment, is_piped=(i > 0), autonomous=True
+        if not _matches_strict_feedback(segment) and is_safe_command(
+            segment, is_piped=(i > 0), strict=True
         ):
-            # Unknown-flag autonomous escalation for admin CLIs.
+            # Unknown-flag strict escalation for admin CLIs.
             raw = segment.split()
             if raw:
                 head = _basename(raw[0])
@@ -4599,24 +4673,34 @@ def _evaluate_autonomous(command: str, segments: list[str]) -> dict[str, str]:
                         unknown = _collect_unknown_flags(spec, raw[1:])
                         if unknown:
                             body = (
-                                f"Unknown flags on admin CLI `{head}` in autonomous mode:"
+                                f"Unknown flags on admin CLI `{head}` in strict mode:"
                                 f" {', '.join(unknown)}. "
-                                f"{_SYNTH_DENY_REASONS[_SYNTH_ADMIN_UNKNOWN_FLAG_AUTONOMOUS]}"
+                                f"{_SYNTH_DENY_REASONS[_SYNTH_ADMIN_UNKNOWN_FLAG_STRICT]}"
                             )
-                            deny_body = _format_deny_reason(
-                                "bash.admin_unknown_flag_autonomous", body
+                            deny_body = _format_deny_reason("bash.admin_unknown_flag_strict", body)
+                            deny = _deny(deny_body)
+                            bypass = _maybe_allow_via_allowlist(
+                                allowlist,
+                                "bash.admin_unknown_flag_strict",
+                                original_command,
+                                deny,
                             )
-                            _log_local(command, "deny", "admin-unknown-flag-autonomous")
+                            if bypass is not None:
+                                return bypass
+                            _log_local(command, "deny", "admin-unknown-flag-strict")
                             queue_denied_command(command)
-                            return _deny(deny_body)
+                            return deny
                         break
             continue
-        result = get_autonomous_deny(segment)
+        result, rule_id = get_strict_deny(segment)
+        bypass = _maybe_allow_via_allowlist(allowlist, rule_id, original_command, result)
+        if bypass is not None:
+            return bypass
         reason = result["permissionDecisionReason"]
         _log_local(command, "deny", reason)
         queue_denied_command(command)
         return result
-    reason = "All command segments are safe (autonomous mode)"
+    reason = "All command segments are safe (strict mode)"
     extra = _admin_unknown_flags_extra(segments)
     _log_local(command, "allow", reason, extra=extra)
     return _allow(reason)
@@ -4661,10 +4745,12 @@ def hook(payload: dict[str, Any]) -> None:
     _REQUEST_CONTEXT["session_id"] = str(payload.get("session_id") or "")
     cwd = payload.get("cwd")
     _REQUEST_CONTEXT["cwd"] = cwd if isinstance(cwd, str) else None
+    permission_mode = read_permission_mode(payload)
+    _REQUEST_CONTEXT["permission_mode"] = permission_mode
 
     _hard_deny_check(command)
 
-    decision = decide(command)
+    decision = decide(command, permission_mode=permission_mode)
     if decision is None:
         return
 

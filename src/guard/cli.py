@@ -26,7 +26,9 @@ import argparse
 import json
 import os
 import re
+import subprocess  # nosec B404 -- used for guard healthcheck to invoke the bundled hook
 import sys
+import time
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -100,7 +102,7 @@ class JsonlReader:
         """Return True if the log file exists."""
         return self.path.exists()
 
-    def iter_records(  # noqa: C901 -- linear filter ladder; one branch per filter.
+    def iter_records(  # noqa: C901, PLR0912, PLR0913 -- linear filter ladder; one branch per filter.
         self,
         *,
         since: datetime | None = None,
@@ -108,8 +110,17 @@ class JsonlReader:
         decision: str | None = None,
         tool_name: str | None = None,
         session_id: str | None = None,
+        include_all_types: bool = False,
     ) -> Iterator[dict[str, Any]]:
-        """Yield records matching the supplied filters."""
+        """Yield records matching the supplied filters.
+
+        Default behaviour: only ``type == "decision"`` records (or pre-PR
+        records without a ``type`` discriminator, which are inferred as
+        decisions). Operational records (``internal_error``) are skipped so
+        ``noisy`` / ``silent`` / ``trace`` views don't surface a ``? ?``
+        pollution row. Pass ``include_all_types=True`` for raw scans
+        (counters, debugging).
+        """
         if not self.path.exists():
             return
         with self.path.open(encoding="utf-8", errors="replace") as fh:
@@ -126,6 +137,10 @@ class JsonlReader:
                 # Skip a redirect pointer (single-line marker, see JSONL_FORMAT.md §1.1).
                 if "redirect" in rec and len(rec) == 1:
                     continue
+                if not include_all_types:
+                    kind = rec.get("type") or ("decision" if "decision" in rec else None)
+                    if kind != "decision":
+                        continue
                 if hook_id is not None and rec.get("hook_id") != hook_id:
                     continue
                 if decision is not None and rec.get("decision") != decision:
@@ -156,6 +171,57 @@ class JsonlReader:
         for rec in self.iter_records():
             last = rec
         return last
+
+    def counters(self, *, since: datetime | None = None) -> dict[str, Any]:
+        """Aggregate record counts by ``type`` (default → "decision").
+
+        Returns Prometheus-style totals (counters named with the ``_total``
+        suffix per Prometheus naming conventions) so external monitoring can
+        scrape via ``guard status --json | jq``.
+        """
+        totals: dict[str, Any] = {
+            "decisions_total": 0,
+            "denies_total": 0,
+            "internal_errors_total": 0,
+            "last_activity_ts": None,
+        }
+        if not self.path.exists():
+            return totals
+        with self.path.open(encoding="utf-8", errors="replace") as fh:
+            for raw in fh:
+                rec = _parse_record(raw)
+                if rec is None:
+                    continue
+                if since is not None:
+                    ts_val = _parse_ts(rec)
+                    if ts_val is None or ts_val < since:
+                        continue
+                _bump_counter(totals, rec)
+        return totals
+
+
+def _parse_record(raw: str) -> dict[str, Any] | None:
+    line = raw.strip()
+    if not line:
+        return None
+    try:
+        rec = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def _bump_counter(totals: dict[str, Any], rec: dict[str, Any]) -> None:
+    kind = rec.get("type") or ("decision" if "decision" in rec else None)
+    if kind == "decision":
+        totals["decisions_total"] += 1
+        if rec.get("decision") == "deny":
+            totals["denies_total"] += 1
+    elif kind == "internal_error":
+        totals["internal_errors_total"] += 1
+    ts = rec.get("timestamp")
+    if isinstance(ts, str):
+        totals["last_activity_ts"] = ts
 
 
 # === Effective log path ===
@@ -263,6 +329,7 @@ def cmd_status() -> tuple[dict[str, Any], str]:
     last_ts = (last or {}).get("timestamp") if last else None
     wiring = _check_wiring()
 
+    counters = reader.counters()
     payload: dict[str, Any] = {
         "version": __version__,
         "active": wiring["active"],
@@ -273,6 +340,7 @@ def cmd_status() -> tuple[dict[str, Any], str]:
         "last_record_timestamp": last_ts,
         "mode": "enforce",
         "schema_version": 1,
+        "counters": counters,
     }
 
     def tick(*, ok: bool) -> str:
@@ -301,6 +369,93 @@ def cmd_status() -> tuple[dict[str, Any], str]:
             ]
         )
     return payload, "\n".join(lines) + "\n"
+
+
+_HEALTHCHECK_PROBES: tuple[tuple[str, str], ...] = (
+    # (command, expected rule_id substring in deny reason). Two independent
+    # probes so a single registry change cannot turn the healthcheck into a
+    # false-positive: both must deny AND the deny reason must carry the
+    # expected rule_id (emitted by the ``_format_deny_reason`` annunciator).
+    # We pin to rule_id, not body text, because body wording is operational
+    # copy and gets rephrased; rule_id is the stable contract.
+    ("rm -rf /", "bash.always_deny"),
+    ("python -c 'x'", "bash.always_deny"),
+)
+
+
+def _run_healthcheck_probe(
+    hook_path: Path, command: str, expected_rule: str, timeout_s: float = 2.0
+) -> dict[str, Any]:
+    payload = {
+        "session_id": "guard-healthcheck",
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+        "hook_event_name": "PreToolUse",
+        "cwd": str(Path.home()),
+        "permission_mode": "default",
+    }
+    start = time.monotonic()
+    try:
+        proc = subprocess.run(  # noqa: S603  # nosec B603 -- fixed argv (sys.executable + bundled hook script), no shell
+            [sys.executable, str(hook_path)],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "command": command,
+            "expected_rule": expected_rule,
+            "passed": False,
+            "elapsed_ms": int((time.monotonic() - start) * 1000),
+        }
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    decision = None
+    rule_seen = False
+    if proc.stdout.strip():
+        try:
+            envelope = json.loads(proc.stdout)
+            hso = envelope.get("hookSpecificOutput", {}) if isinstance(envelope, dict) else {}
+            decision = hso.get("permissionDecision") or envelope.get("permissionDecision")
+            reason = hso.get("permissionDecisionReason") or envelope.get(
+                "permissionDecisionReason", ""
+            )
+            rule_seen = expected_rule in reason
+        except (json.JSONDecodeError, ValueError):
+            decision = None
+    return {
+        "command": command,
+        "expected_rule": expected_rule,
+        "passed": decision == "deny" and rule_seen,
+        "elapsed_ms": elapsed_ms,
+    }
+
+
+def cmd_healthcheck() -> tuple[dict[str, Any], str]:
+    """Synthesize known-deny PreToolUse payloads and assert guard denies.
+
+    Pipes two independent always-deny commands to the bundled bash hook
+    and asserts each one comes back with ``permissionDecision: deny`` AND
+    the expected rule_id substring in the reason. Requiring two probes
+    plus rule_id matching defeats a single-rule weakening that would
+    leave a one-probe healthcheck falsely green.
+
+    When a probe fails, the full deny envelope is in
+    ``~/.claude/guard-decisions.jsonl`` -- this output stays minimal.
+    """
+    hook_path = Path(__file__).parent / "hooks" / "bash_command_validator.py"
+    probes = [_run_healthcheck_probe(hook_path, cmd, rule) for cmd, rule in _HEALTHCHECK_PROBES]
+    healthy = all(p["passed"] for p in probes)
+    result: dict[str, Any] = {
+        "healthy": healthy,
+        "elapsed_ms": sum(p["elapsed_ms"] for p in probes),
+        "probes": probes,
+    }
+    status_label = "OK" if healthy else "UNHEALTHY"
+    summary = " ".join(f"{p['command']!r}={'ok' if p['passed'] else 'FAIL'}" for p in probes)
+    return result, f"guard healthcheck: {status_label} ({summary})\n"
 
 
 def cmd_noisy(
@@ -417,7 +572,11 @@ def cmd_trace(
     reader = JsonlReader(effective_log_path())
     records = list(
         reader.iter_records(
-            session_id=session_id, decision=decision, hook_id=hook_id, tool_name=tool_name
+            session_id=session_id,
+            decision=decision,
+            hook_id=hook_id,
+            tool_name=tool_name,
+            include_all_types=True,
         )
     )
     records.sort(key=lambda r: str(r.get("timestamp", "")))
@@ -432,10 +591,16 @@ def cmd_trace(
     else:
         for rec in records:
             ts = rec.get("timestamp", "?")
-            decision = rec.get("decision", "?")
-            hook_id = rec.get("hook_id", "?")
-            reason = str(rec.get("reason", ""))[:80]
-            lines.append(f"  {ts}  {decision:<5}  {hook_id}  {reason}")
+            rec_type = rec.get("type", "decision")
+            if rec_type == "internal_error":
+                exc_class = rec.get("exc_class", "?")
+                exc_msg = str(rec.get("exc_msg", ""))[:80]
+                lines.append(f"  {ts}  ERROR  {exc_class}  {exc_msg}")
+            else:
+                decision = rec.get("decision", "?")
+                hook_id = rec.get("hook_id", "?")
+                reason = str(rec.get("reason", ""))[:80]
+                lines.append(f"  {ts}  {decision:<5}  {hook_id}  {reason}")
     return payload, "\n".join(lines) + "\n"
 
 
@@ -854,6 +1019,17 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
+    sub.add_parser(
+        "healthcheck",
+        help="Liveness probe: synthesize a known-deny PreToolUse payload and assert deny.",
+        epilog=(
+            "Examples:\n"
+            "  guard healthcheck         # exit 0 if guard responds with deny\n"
+            "  guard --json healthcheck  # structured output for monitoring"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
     p_noisy = sub.add_parser(
         "noisy",
         help="Top N rules by hit count, grouped by (hook_id, decision).",
@@ -1006,7 +1182,7 @@ def _emit(payload: dict[str, Any], pretty: str, *, as_json: bool) -> None:
         sys.stdout.write(pretty)
 
 
-def main(argv: list[str] | None = None) -> int:  # noqa: C901 -- linear command-dispatch ladder, one branch per subcommand
+def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 -- linear command-dispatch ladder, one branch per subcommand
     """CLI entry point. Returns the exit code."""
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -1022,6 +1198,10 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 -- linear command-
     try:
         if cmd == "status":
             payload, pretty = cmd_status()
+        elif cmd == "healthcheck":
+            payload, pretty = cmd_healthcheck()
+            _emit(payload, pretty, as_json=as_json)
+            return 0 if payload.get("healthy") else 1
         elif cmd == "noisy":
             since = parse_since(args.since)
             payload, pretty = cmd_noisy(

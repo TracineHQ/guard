@@ -21,7 +21,8 @@ from typing import Any
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[2]
+from tests._helpers import REPO_ROOT as REPO
+
 HOOKS_DIR = REPO / "src" / "guard" / "hooks"
 
 # Required schema-v1 fields per docs/output-format.md §3.
@@ -48,7 +49,7 @@ def _run_hook(
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO / "src")
     env["GUARD_DECISIONS_PATH"] = str(decisions_path)
-    env["GUARD_AUTONOMOUS_QUEUE_PATH"] = str(decisions_path.parent / "queue.jsonl")
+    env["GUARD_STRICT_DENY_QUEUE_PATH"] = str(decisions_path.parent / "queue.jsonl")
     if env_overrides:
         env.update(env_overrides)
     proc = subprocess.run(

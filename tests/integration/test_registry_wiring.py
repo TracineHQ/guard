@@ -12,13 +12,12 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
 from guard.registry import ALWAYS_DENY  # type: ignore[import-not-found]
+from tests._helpers import REPO_ROOT as REPO
 
-REPO = Path(__file__).resolve().parents[2]
 HOOK = REPO / "src" / "guard" / "hooks" / "bash_command_validator.py"
 
 

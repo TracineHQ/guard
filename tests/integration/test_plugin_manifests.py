@@ -12,11 +12,10 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[2]
+from tests._helpers import REPO_ROOT as REPO
 
 
 def test_plugin_json_parses_and_pins_version() -> None:

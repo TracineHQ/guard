@@ -21,7 +21,8 @@ hallucinated cleanup step can wipe a developer machine.
 
 **What guard does.** Hard deny via `bash_command_validator`. These prefixes
 are in the registry's `ALWAYS_DENY` set, so they block in both interactive
-and autonomous mode. Any `rm -rf` against a non-root path still goes through
+and strict (`auto`/`dontAsk`/`bypassPermissions`) modes. Any `rm -rf`
+against a non-root path still goes through
 the normal `ASK` tier.
 
 ## `git commit -C <ref>`

@@ -24,10 +24,10 @@ from guard.hooks.bash_command_validator import (
 )
 from guard.registry import (
     ALWAYS_DENY,
-    AUTONOMOUS_FEEDBACK,
     DANGEROUS_INTERPRETERS,
     DANGEROUS_RM_OPERANDS,
     INTERPRETER_EVAL_FLAGS,
+    STRICT_FEEDBACK,
 )
 
 HOOK_PATH = (
@@ -398,45 +398,49 @@ class TestRobustness:
         assert "malformed JSON" in result.stderr
 
 
-class TestAutonomousMode:
-    """Direct decide() calls under CLAUDE_AUTONOMOUS=1.
+class TestStrictMode:
+    """Direct decide() calls under permission_mode="dontAsk".
 
     Locks in the strict-mode contract for subagents / driven agents at the
     unit level (no subprocess overhead).
     """
 
-    def test_unknown_command_denied(self, autonomous_env):
-        result = decide("flarbnoz --gronk")
+    def test_unknown_command_denied(self, strict_env):
+        result = decide("flarbnoz --gronk", permission_mode="dontAsk")
         assert result is not None
         assert result["permissionDecision"] == "deny"
 
-    def test_safe_command_allowed(self, autonomous_env):
-        result = decide("ls -la")
+    def test_safe_command_allowed(self, strict_env):
+        result = decide("ls -la", permission_mode="dontAsk")
         assert result is not None
         assert result["permissionDecision"] == "allow"
 
-    def test_autonomous_feedback_message_used(self, autonomous_env):
-        # `rm` is in AUTONOMOUS_FEEDBACK
-        result = decide("rm somefile")
+    def test_strict_feedback_message_used(self, strict_env):
+        # `rm` is in STRICT_FEEDBACK
+        result = decide("rm somefile", permission_mode="dontAsk")
         assert result is not None
         assert result["permissionDecision"] == "deny"
-        assert result["permissionDecisionReason"] == AUTONOMOUS_FEEDBACK["rm"]
+        # Annunciator-wrapped: full STRICT_FEEDBACK text appears within
+        # the reason, prefixed by the mode/rule_id annunciator.
+        assert STRICT_FEEDBACK["rm"] in result["permissionDecisionReason"]
+        assert "permission_mode=dontAsk" in result["permissionDecisionReason"]
+        assert "bash.strict_feedback" in result["permissionDecisionReason"]
 
-    def test_default_deny_for_unregistered(self, autonomous_env):
-        result = decide("noexist --flag")
+    def test_default_deny_for_unregistered(self, strict_env):
+        result = decide("noexist --flag", permission_mode="dontAsk")
         assert result is not None
         assert result["permissionDecision"] == "deny"
-        assert "autonomous mode" in result["permissionDecisionReason"].lower()
+        assert "strict mode" in result["permissionDecisionReason"].lower()
 
-    def test_git_status_allowed_autonomous(self, autonomous_env):
-        # `git status` is on SAFE_PREFIXES — must allow even in autonomous mode.
-        result = decide("git status")
+    def test_git_status_allowed_strict(self, strict_env):
+        # `git status` is on SAFE_PREFIXES — must allow even in strict mode.
+        result = decide("git status", permission_mode="dontAsk")
         assert result is not None
         assert result["permissionDecision"] == "allow"
 
-    def test_git_push_denied_autonomous(self, autonomous_env):
-        # `git push` is in AUTONOMOUS_FEEDBACK — must deny.
-        result = decide("git push origin main")
+    def test_git_push_denied_strict(self, strict_env):
+        # `git push` is in STRICT_FEEDBACK — must deny.
+        result = decide("git push origin main", permission_mode="dontAsk")
         assert result is not None
         assert result["permissionDecision"] == "deny"
 

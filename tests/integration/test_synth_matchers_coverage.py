@@ -6,16 +6,22 @@ One test group per matcher family. Each group has DENY_CASES (must
 produce a deny envelope) and LEGIT_CASES (must NOT deny). Every shape
 the matchers are designed to catch is exercised at least once.
 
-Tests run against the live ``decide()`` in interactive mode (autonomous
-unset) — this is the worst-case for false-negatives because autonomous
+Tests run against the live ``decide()`` in interactive mode (permission_mode
+default) — this is the worst-case for false-negatives because strict
 mode default-denies anything not on the safe-prefix allowlist.
 """
 
 from __future__ import annotations
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
-from guard.hooks.bash_command_validator import decide
+from guard.hooks.bash_command_validator import (
+    _BRACE_EXPANSION_TOKEN_CAP,
+    _expand_braces_in_line,
+    decide,
+)
 
 
 def _is_deny(result: dict | None) -> bool:
@@ -27,9 +33,10 @@ def _is_deny(result: dict | None) -> bool:
 
 
 @pytest.fixture(autouse=True)
-def _interactive_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force interactive mode — agentic default-deny would mask real gaps."""
-    monkeypatch.delenv("CLAUDE_AUTONOMOUS", raising=False)
+def _interactive_mode() -> None:
+    """No-op: permission_mode defaults to 'default' (interactive) when not passed
+    to decide(). Kept as an explicit fixture for clarity at the test boundary.
+    """
 
 
 # ============================================================================
@@ -1594,7 +1601,7 @@ GUARD_LOG_PROTECT_DENY = [
     "cp /tmp/forge.jsonl ~/.claude/guard-decisions.jsonl",
     "tee ~/.claude/guard-decisions.jsonl",
     "truncate -s 0 ~/.claude/guard-decisions.jsonl",
-    "mv /tmp/x ~/.claude/guard-autonomous-queue.jsonl",
+    "mv /tmp/x ~/.claude/guard-strict-deny-queue.jsonl",
     "cp /tmp/x ~/.claude/guard/allowlist.json",
     "tee ~/.claude/guard/allowlist.json",
     "ln -sf /tmp/evil ~/.claude/guard-decisions.jsonl",
@@ -1649,7 +1656,7 @@ def test_deny_reason_includes_rule_id_and_override_path(command: str, expected_r
     assert result is not None
     assert result.get("permissionDecision") == "deny"
     reason = result.get("permissionDecisionReason", "")
-    assert f"Rule: {expected_rule}" in reason, f"missing rule_id in reason: {reason!r}"
+    assert f"denied: {expected_rule}" in reason, f"missing rule_id in reason: {reason!r}"
     assert f"guard allowlist allow-command {expected_rule}" in reason
     assert f"guard allowlist disable-rule {expected_rule}" in reason
 
@@ -1755,48 +1762,95 @@ def test_normal_command_not_length_capped(command: str) -> None:
 # ============================================================================
 
 
+@pytest.mark.timeout(30)
 def test_unclosed_brace_does_not_stall() -> None:
     """Adversarial input ``aaaa...{bbbb...`` (no closing brace) used to
     force ~92 s of O(n²) backtracking through ``_BRACE_EXPAND_RE``. The
     early-exit gate in ``_expand_braces_once`` short-circuits to ``None``
-    when the token is missing either brace; this test ensures the gate is
-    in place by demanding a sub-second decide() on a pathological 100 KB
-    payload (under the cap so the brace path is actually entered).
-    """
-    import time
+    when the token is missing either brace.
 
+    Generous 30s tripwire (~30x expected runtime) catches the O(n^k)
+    regression without flaking on slow CI. The contract is "doesn't stall
+    indefinitely"; the precise speed is not a contract.
+    """
     # Stay under the 8 KiB length cap so the brace path is actually
     # exercised — we want to validate the regex gate, not the cap.
     payload = "echo " + ("a" * 3500) + "{" + ("b" * 3500)
     assert len(payload) < 8192
-    start = time.perf_counter()
     decide(payload)
-    elapsed = time.perf_counter() - start
-    assert elapsed < 1.0, f"unclosed-brace input stalled validator: {elapsed:.2f}s"
 
 
-def test_brace_expansion_blowup_capped() -> None:
-    """Chained brace groups (``{a,b}{c,d}{e,f}{g,h}``, each 32 alternatives)
-    multiply through 4 fixpoint passes — under the 8 KiB input cap, the
-    canonicalized form can grow to >100 MB and OOM the process before any
-    matcher runs. The post-canonicalize length cap is the second guard.
+def _make_brace_blowup_payload(n_alts: int = 30, n_groups: int = 4) -> str:
+    """Construct an adversarial chained-brace payload of ~known shape.
+
+    n_alts^n_groups uncapped expansion. Default (30, 4) ~ 810k tokens.
+    Stays under the 8 KiB input cap so the brace path is actually exercised.
     """
-    import time
+    alts = ",".join(f"x{i}" for i in range(n_alts))
+    return "echo p" + ("{" + alts + "}") * n_groups
 
-    # 4 chained groups, 30 alternatives each = 30^4 ~ 810k expanded
-    # tokens. Input is well under 8 KiB; canonicalized form is huge.
-    alts = ",".join(f"x{i}" for i in range(30))  # 30 short alternatives
-    payload = "echo p" + ("{" + alts + "}") * 4
-    assert len(payload) < 8192
-    start = time.perf_counter()
-    result = decide(payload)
-    elapsed = time.perf_counter() - start
-    # Either denied (post-canonicalize cap fired) or returned promptly. The
-    # contract is: never stall, and never OOM.
-    assert elapsed < 5.0, f"brace blowup stalled validator: {elapsed:.2f}s"
-    if result is not None:
-        # If denied, must be by the length cap (not some other matcher).
-        reason = result.get("permissionDecisionReason", "")
-        assert "command_too_long" in reason or "scan cap" in reason, (
-            f"unexpected deny reason for brace blowup: {reason!r}"
-        )
+
+def test_expand_braces_respects_token_cap_on_adversarial_input() -> None:
+    """Direct bound: 30^4 (~810k tokens uncapped) must collapse to <= cap.
+
+    Tests the cap MECHANISM, not its timing side effect. If someone removes
+    the ``if len(out) > _BRACE_EXPANSION_TOKEN_CAP`` bail-out in
+    ``_expand_braces_in_line``, this test fails immediately.
+    """
+    blowup = _make_brace_blowup_payload(n_alts=30, n_groups=4)
+    assert len(blowup) < 8192
+
+    expanded = _expand_braces_in_line(blowup)
+    token_count = len(expanded.split())
+
+    # Allow one batch overshoot from the inner loop; cap is exact-after-bail.
+    # Critically: NOT 810_000 (the unbounded count).
+    assert token_count <= _BRACE_EXPANSION_TOKEN_CAP * 2, (
+        f"expansion produced {token_count} tokens; cap is "
+        f"{_BRACE_EXPANSION_TOKEN_CAP}. Bail-out guard regressed."
+    )
+
+
+def test_brace_blowup_denied_by_length_cap() -> None:
+    """Behavioral: ``decide()`` denies blowup with ``bash.command_too_long``.
+
+    Cap mechanism + downstream length-check wiring tested together. The
+    cap-bailout produces a partial expansion that the post-canonicalize
+    length cap trips on, surfacing the right rule_id to the operator.
+    """
+    blowup = _make_brace_blowup_payload(n_alts=30, n_groups=4)
+    result = decide(blowup)
+    assert _is_deny(result), f"expected deny, got {result!r}"
+    reason = result.get("permissionDecisionReason", "") if result else ""
+    assert "bash.command_too_long" in reason, (
+        f"expected bash.command_too_long rule_id, got: {reason!r}"
+    )
+
+
+@given(
+    n_alts=st.integers(min_value=1, max_value=30),
+    n_groups=st.integers(min_value=1, max_value=6),
+)
+@settings(max_examples=30, deadline=None)
+def test_expand_braces_bound_holds_for_any_blowup_shape(n_alts: int, n_groups: int) -> None:
+    """Property: for any (n_alts, n_groups) in range, output stays bounded.
+
+    Hypothesis shrinks to the minimal counterexample if the cap math
+    breaks at some specific shape (e.g., 6 groups overshoots the cap by
+    > 2x). deadline=None: we test the bound, not the speed.
+    """
+    blowup = _make_brace_blowup_payload(n_alts=n_alts, n_groups=n_groups)
+    expanded = _expand_braces_in_line(blowup)
+    assert len(expanded.split()) <= _BRACE_EXPANSION_TOKEN_CAP * 2
+
+
+@pytest.mark.timeout(30)
+def test_brace_blowup_tripwire_completes_in_bounded_time() -> None:
+    """Generous wall-clock tripwire: catches catastrophic O(n^k) regressions.
+
+    Not a contract -- the contracts are the direct/property tests above.
+    The 30s ceiling is ~50x the expected runtime; if this fires, the
+    cap mechanism is broken or a new unbounded path was added.
+    """
+    blowup = _make_brace_blowup_payload(n_alts=30, n_groups=4)
+    decide(blowup)

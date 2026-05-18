@@ -20,13 +20,14 @@ import os
 import shutil
 import subprocess
 import sys
+
+# Read from pyproject so a version bump doesn't require touching this constant.
+import tomllib
 from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[2]
-# Read from pyproject so a version bump doesn't require touching this constant.
-import tomllib
+from tests._helpers import REPO_ROOT as REPO
 
 PLUGIN_VERSION = tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["version"]
 STAGED_NAME = f"guard-{PLUGIN_VERSION}"
@@ -314,7 +315,7 @@ def test_marketplace_manifest_shape(staged: Path) -> None:
 def test_hooks_manifest_shape(staged: Path) -> None:
     """``hooks.json`` declares only PreToolUse and references all 8 hooks."""
     hooks = json.loads((staged / "hooks" / "hooks.json").read_text())
-    assert list(hooks["hooks"].keys()) == ["PreToolUse"]
+    assert set(hooks["hooks"]) == {"PreToolUse"}
     referenced: set[str] = set()
     for matcher_block in hooks["hooks"]["PreToolUse"]:
         assert "matcher" in matcher_block
