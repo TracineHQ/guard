@@ -592,7 +592,8 @@ def test_append_jsonl_silently_swallows_oserror(
     jsonl = tmp_path / "decisions.jsonl"
 
     def fake_write(_fd: int, _buf: bytes) -> int:
-        raise OSError("disk full")
+        msg = "disk full"
+        raise OSError(msg)
 
     monkeypatch.setattr("guard._utils.os.write", fake_write)
 
