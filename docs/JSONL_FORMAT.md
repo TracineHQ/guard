@@ -105,7 +105,7 @@ Top-level categories:
 | Prefix | Origin | Examples |
 |---|---|---|
 | `bash.always_deny` | literal `ALWAYS_DENY` registry hits | `git push --force`, `rm -rf /` |
-| `bash.<synth>` | synthetic-deny predicates (one rule_id per predicate) | `bash.dangerous_rm`, `bash.git_config_injection`, `bash.kubectl_destructive`, `bash.gh_api_destructive`, `bash.disk_destruction`, etc. The active list lives next to the `_SYNTHETIC_DENY_MATCHERS` tuple in `bash_command_validator.py`. |
+| `bash.<synth>` | synthetic-deny predicates (one rule_id per predicate) | `bash.dangerous_rm`, `bash.git_config_injection`, `bash.kubectl_destructive`, `bash.gh_api_destructive`, `bash.disk_destruction`, etc. The active list lives next to the `_PER_FORM_MATCHERS` tuple in `bash_command_validator.py`. |
 | `bash.admin_*` | admin-CLI flag-spec violations (default / interactive mode) | `bash.admin_default_deny`, `bash.admin_forbidden_subcommand`, `bash.admin_forbidden_flag`, `bash.admin_sensitive_env_override` |
 | `bash.admin_unknown_flag_strict` | strict mode (`auto`/`dontAsk`/`bypassPermissions`) blocks an admin CLI invocation that carries flags outside the spec's `known_flags` set | strict-only |
 | `bash.strict_feedback` / `bash.strict_default_deny` | strict-mode default-deny for non-admin commands not on the allowlist | strict-only |
