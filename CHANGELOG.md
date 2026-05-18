@@ -26,6 +26,12 @@ adheres to [Semantic Versioning](https://semver.org/).
 - `guard status --json` now includes a `counters` object
   (`decisions_total`, `denies_total`, `internal_errors_total`,
   `last_activity_ts`) for Prometheus-style monitoring.
+- `_BRACE_EXPANSION_TOKEN_CAP = 4096` aggregate cap on
+  `bash_command_validator._expand_braces_in_line`. Closes a DoS shape
+  where chained brace groups (`{a,b}{c,d}{e,f}{g,h}` with ~30 alts each
+  gives ~810k tokens / ~100 MB) would balloon before the per-command
+  length cap could fire. Capped expansions fall through to
+  `bash.command_too_long`.
 
 ### Changed
 

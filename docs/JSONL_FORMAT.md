@@ -6,9 +6,8 @@
 indexer).
 **Specifies:** path, format, schema, writer guarantees, consumer responsibilities.
 
-This document supersedes `docs/output-format.md` for schema v1.1 and onwards.
-The earlier document is preserved for reference; the field set is a strict
-superset.
+This document is the canonical spec. `docs/output-format.md` is a stub
+that points back here; older links should update to point at this file.
 
 ## 1. Path discovery
 
@@ -56,7 +55,7 @@ section is the contract. Consumers can opt-in by reading the env var directly
 | `v` | int | yes | schema version, currently `1`. Short alias of `schema_version`. |
 | `schema_version` | int | yes | long form, kept for backward compatibility |
 | `type` | enum string | optional | record-shape discriminator. Defaults to `"decision"` when absent. Currently one of `"decision"` or `"internal_error"`. Consumers MUST filter on `type` to avoid blending crash records into decision tallies. |
-| `mode` | enum string | yes (decision) | one of `"enforce"`, `"shadow"`, `"off"` |
+| `mode` | enum string | yes (decision) | reserved enum; today the writer always emits `"enforce"`. `"shadow"` and `"off"` are reserved values consumers should accept without erroring, but no code path writes them yet. |
 | `timestamp` | string (ISO-8601 UTC, microsecond precision, `Z` suffix) | yes | e.g. `"2026-04-29T14:32:11.123456Z"` |
 | `hook_id` | string | yes (decision) | namespaced: `guard.<hook_module>` (e.g. `guard.bash_command_validator`) |
 | `event` | string | yes (decision) | matches Claude Code event names (`PreToolUse`, `PostToolUse`) |
@@ -79,9 +78,10 @@ section is the contract. Consumers can opt-in by reading the env var directly
 - `"off"` — the hook ran but is functionally disabled; decisions are
   passthrough.
 
-For v1.1, `mode` is hardcoded to `"enforce"`. Config-driven shadow/off lands
-in a later release; the field is present now so consumers don't have to add
-support later.
+For v1.1, the writer hardcodes `mode` to `"enforce"`. `"shadow"` and
+`"off"` are reserved values: consumers MUST accept them without erroring
+(treat them as observational / passthrough), but no current code path
+emits them. Config-driven shadow/off mode lands in a later release.
 
 ### 3.2 Path discovery for consumers
 
@@ -92,7 +92,32 @@ Consumers SHOULD resolve the log path in this order:
 3. If the default file is exactly one line and parses as `{"redirect": "<path>"}`,
    follow it (one hop only).
 
-### 3.3 `internal_error` records
+### 3.3 `rule_id` taxonomy
+
+Deny records surface a stable `rule_id` in the `reason` field (between
+the `denied:` prefix and the human-readable body), e.g. `guard
+[permission_mode=default] denied: bash.always_deny. ...`. Consumers
+filtering or grouping decisions should key on `rule_id`, not the
+human-readable body (which may evolve).
+
+Top-level categories:
+
+| Prefix | Origin | Examples |
+|---|---|---|
+| `bash.always_deny` | literal `ALWAYS_DENY` registry hits | `git push --force`, `rm -rf /` |
+| `bash.<synth>` | synthetic-deny predicates (one rule_id per predicate) | `bash.dangerous_rm`, `bash.git_config_injection`, `bash.kubectl_destructive`, `bash.gh_api_destructive`, `bash.disk_destruction`, etc. The active list lives next to the `_SYNTHETIC_DENY_MATCHERS` tuple in `bash_command_validator.py`. |
+| `bash.admin_*` | admin-CLI flag-spec violations (default / interactive mode) | `bash.admin_default_deny`, `bash.admin_forbidden_subcommand`, `bash.admin_forbidden_flag`, `bash.admin_sensitive_env_override` |
+| `bash.admin_unknown_flag_strict` | strict mode (`auto`/`dontAsk`/`bypassPermissions`) blocks an admin CLI invocation that carries flags outside the spec's `known_flags` set | strict-only |
+| `bash.strict_feedback` / `bash.strict_default_deny` | strict-mode default-deny for non-admin commands not on the allowlist | strict-only |
+| `bash.command_too_long` | command exceeded `_COMMAND_LENGTH_CAP` after canonicalization | DoS guard |
+| `git_c.*` | `git -C` validator (subcommand class, dangerous config) | `git_c.destructive`, `git_c.shell_operator` |
+
+Strict-mode rule_ids (`bash.admin_unknown_flag_strict`,
+`bash.command_too_long`, `bash.strict_default_deny`,
+`bash.strict_feedback`) are eligible for allowlist override; see
+`guard allowlist allow-command <rule_id> '<command>' --reason '...'`.
+
+### 3.4 `internal_error` records
 
 When a hook raises an uncaught exception, the guard process catches it and
 appends an `internal_error` record before re-raising. These records share
@@ -121,8 +146,9 @@ surfaces `internal_error` records inline; `guard status` aggregates them as
   code before processing records with the new `v`.
 - Consumers MUST tolerate **unknown fields** without erroring. Pin the fields
   you read; ignore the rest.
-- Consumers MUST tolerate **unknown `v` values**: quarantine the record, log a
-  warning, do not crash.
+- Consumers MUST tolerate **unknown `v` values**: skip the record and emit a
+  stderr warning (one line per unknown `v` is sufficient), do not crash. The
+  bundled `JsonlReader` implements this; downstream consumers SHOULD match.
 - Records emitted before `v` was added (legacy records) MAY be treated as
   `v: 0` for triage purposes. Best-effort parse, no hard requirements.
 

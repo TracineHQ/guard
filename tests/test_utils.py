@@ -580,6 +580,31 @@ def test_append_jsonl_refuses_to_follow_symlink(tmp_path: Path) -> None:
     assert target.read_text() == "untouched"
 
 
+def test_append_jsonl_silently_swallows_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing ``os.write`` (e.g. ENOSPC) must not propagate or partially-write.
+
+    Per ``docs/JSONL_FORMAT.md`` §5: the writer fails silently on any
+    ``OSError`` — guard's "guardrails not walls" contract means a logging
+    failure must never block legitimate work.
+    """
+    jsonl = tmp_path / "decisions.jsonl"
+
+    def fake_write(_fd: int, _buf: bytes) -> int:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("guard._utils.os.write", fake_write)
+
+    # Must not raise.
+    result = append_jsonl(jsonl, {"schema_version": 1, "decision": "allow"})
+
+    assert result is None
+    # The file may have been created (O_CREAT) but no record bytes were written.
+    if jsonl.exists():
+        assert jsonl.read_bytes() == b""
+
+
 def test_append_jsonl_concurrent_writes_all_parse(tmp_path: Path) -> None:
     """50-way concurrent writes must all produce valid JSON lines."""
     from concurrent.futures import ThreadPoolExecutor

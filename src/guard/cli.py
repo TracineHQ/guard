@@ -12,8 +12,11 @@ Subcommands:
   chronological.
 - ``guard test "<command>"`` — invokes ``decide()`` on each relevant hook
   in-process; no log access, no subprocess.
-- ``guard diff`` — effective merged config (stub: built-in defaults only;
-  user/project layers land in a future task).
+- ``guard diff`` — print the effective runtime config (registered hook ids,
+  decisions-log path, schema version, mode). Today this is built-in
+  defaults only; the 3-way user/project/builtin merge view lands in a
+  future task. The current command is useful for "what does guard see
+  right now" debugging.
 
 Output: structured JSON by default; pretty-printed when stdout is a TTY.
 """
@@ -35,7 +38,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from guard import __version__
-from guard._utils import GUARD_DECISIONS_PATH
+from guard._utils import (
+    _SCHEMA_V,
+    GUARD_DECISIONS_PATH,
+)
 from guard.allowlist import (
     KNOWN_RULE_IDS,
     _resolve_scope_path,
@@ -97,6 +103,10 @@ class JsonlReader:
     def __init__(self, path: str | Path) -> None:
         """Hold the JSONL log path."""
         self.path = Path(path)
+        # Track unknown ``v`` values already warned about, so a corrupt log
+        # full of future-schema records produces a single line per ``v``
+        # rather than one per record.
+        self._warned_versions: set[Any] = set()
 
     def exists(self) -> bool:
         """Return True if the log file exists."""
@@ -136,6 +146,18 @@ class JsonlReader:
                     continue
                 # Skip a redirect pointer (single-line marker, see JSONL_FORMAT.md §1.1).
                 if "redirect" in rec and len(rec) == 1:
+                    continue
+                # Quarantine records whose schema version we don't recognise:
+                # skip the record and warn once per unknown ``v`` so we don't
+                # crash on a future-schema log written by a newer guard.
+                v = rec.get("v", rec.get("schema_version"))
+                if isinstance(v, int) and v > _SCHEMA_V:
+                    if v not in self._warned_versions:
+                        self._warned_versions.add(v)
+                        sys.stderr.write(
+                            f"guard: warning: skipping record with unknown schema version v={v} "
+                            f"(this reader understands v<={_SCHEMA_V})\n"
+                        )
                     continue
                 if not include_all_types:
                     kind = rec.get("type") or ("decision" if "decision" in rec else None)
@@ -680,14 +702,14 @@ def _test_specs(command: str) -> Iterable[dict[str, Any]]:
 
 
 def cmd_diff() -> tuple[dict[str, Any], str]:
-    """Show the effective merged config.
+    """Print the effective runtime config.
 
-    Stub for v1.1: just the built-in defaults. User / project config layers
-    land in a future task; this command will then expand to a 3-way merge view.
-
-    The hook list comes from the registry — previously this site hardcoded
-    its own list of seven ids that drifted from ``cmd_test``'s hardcoded
-    list of three.
+    Today returns the built-in layer: registered hook ids (sourced from the
+    registry so this can't drift from ``cmd_test``), the effective log path,
+    schema version, and enforcement mode. The "diff" name is a forward-looking
+    label — a 3-way builtin/user/project merge view lands in a later release.
+    Until then this command is useful for "what does guard see right now"
+    debugging, not for diffing.
     """
     from guard.hooks._registry import all_hook_ids  # noqa: PLC0415
 
@@ -1098,10 +1120,10 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "diff",
         help=(
-            "Show effective merged config. v1.1 stub: built-in defaults only; "
-            "user/project layers land later."
+            "Print the effective runtime config (registered hooks, log path, "
+            "mode). Today: built-in defaults only; user/project merge view lands later."
         ),
-        epilog=("Examples:\n  guard diff  # effective config (built-in defaults today)"),
+        epilog=("Examples:\n  guard diff  # print effective runtime config"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 

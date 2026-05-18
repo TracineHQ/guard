@@ -49,6 +49,11 @@ The validators are written with that in mind:
 - Bounded JSON parse size (~1 MiB stdin cap).
 - Path operations restricted to read-only inside `~/.claude/`.
 - Regex compiled with no nested quantifiers (ReDoS resistance).
+- Brace-expansion bounded by `_BRACE_EXPANSION_TOKEN_CAP = 4096` aggregate
+  tokens (`bash_command_validator._expand_braces_in_line`). Chained groups
+  like `{a,b,…}{c,d,…}{e,f,…}{g,h,…}` would otherwise multiply to ~810k
+  tokens before the per-command length cap fires; the aggregate cap stops
+  expansion mid-stream and the offending command falls to `bash.command_too_long`.
 - Cloud admin CLIs (`aws`, `gcloud`, `az`, `kubectl`, `launchctl`) are
   **default-deny**: only verbs on the read-only allowlist pass. v1.3.0
   replaces the previous `describe-*`/`list-*`/`get-*` prefix shortcut with

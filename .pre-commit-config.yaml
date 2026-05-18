@@ -53,3 +53,21 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         files: ^\.github/workflows/.*\.ya?ml$
+      - id: semgrep-hook-rules
+        name: semgrep (hook rules)
+        entry: uv run --with semgrep semgrep scan --error
+          --config .semgrep/rules/no-prefix-predicate-in-readonly.yml
+          --config .semgrep/rules/no-startswith-in-predicate-field.yml
+          src/guard/hooks/
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+        files: ^src/guard/hooks/.*\.py$
+      - id: semgrep-test-hygiene
+        name: semgrep (test hygiene, ERROR-only)
+        entry: uv run --with semgrep semgrep scan --error --severity ERROR
+          --config .semgrep/rules/test-hygiene.yml tests/
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+        files: ^tests/.*\.py$
