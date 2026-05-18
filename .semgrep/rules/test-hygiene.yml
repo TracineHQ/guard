@@ -1,0 +1,63 @@
+rules:
+  - id: no-wallclock-timing-assert-in-tests
+    languages: [python]
+    severity: WARNING
+    paths:
+      include:
+        - "**/tests/**/*.py"
+    message: >
+      Wall-clock timing assertions are flaky on CI. Test the bounded
+      behavior directly (assert len(output) <= cap) and use
+      pytest.mark.timeout or a generous wall-clock tripwire (>= 30s) for
+      the stall check.
+    pattern-either:
+      - pattern: assert $ELAPSED < $N
+      - pattern: assert time.perf_counter() - $START < $N
+      - pattern: assert time.monotonic() - $START < $N
+      - pattern: assert time.time() - $START < $N
+    metavariable-comparison:
+      comparison: $N < 30
+      metavariable: $N
+
+  - id: no-time-sleep-in-tests
+    languages: [python]
+    severity: WARNING
+    paths:
+      include:
+        - "**/tests/**/*.py"
+    message: >
+      time.sleep in tests indicates a race condition or weak test
+      isolation. Use a wait-for-condition helper or fix the underlying
+      race.
+    pattern-either:
+      - pattern: time.sleep($N)
+      - pattern: sleep($N)
+
+  - id: no-hardcoded-timestamps-in-test-asserts
+    languages: [python]
+    severity: INFO
+    paths:
+      include:
+        - "**/tests/**/*.py"
+    message: >
+      Hardcoded timestamps break when the clock moves. Compare deltas or
+      use a frozen-time fixture (freezegun, time-machine).
+    pattern-either:
+      - pattern: assert $X == datetime($Y, ...)
+      - pattern: assert $X == datetime.datetime($Y, ...)
+
+  - id: no-real-home-claude-in-tests
+    languages: [python]
+    severity: ERROR
+    paths:
+      include:
+        - "**/tests/**/*.py"
+      exclude:
+        - "**/tests/conftest.py"
+    message: >
+      Tests must isolate via GUARD_DATA_DIR monkeypatch; reading from the
+      user's real ~/.claude leaks dev-env state into tests.
+    pattern-either:
+      - pattern: Path.home() / ".claude"
+      - pattern: pathlib.Path.home() / ".claude"
+      - pattern: os.path.expanduser("~/.claude")

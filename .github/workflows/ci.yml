@@ -359,8 +359,14 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
-      - name: Run semgrep
-        run: uv run --with semgrep semgrep scan --error --config .semgrep/rules/ src/guard/hooks/
+      - name: Run semgrep (hook rules, block on error)
+        run: |
+          uv run --with semgrep semgrep scan --error \
+            --config .semgrep/rules/no-prefix-predicate-in-readonly.yml \
+            --config .semgrep/rules/no-startswith-in-predicate-field.yml \
+            src/guard/hooks/
+      - name: Run semgrep (test-hygiene rules, block on ERROR-severity only)
+        run: uv run --with semgrep semgrep scan --error --severity ERROR --config .semgrep/rules/test-hygiene.yml tests/
 
   vulture:
     name: Dead-code sweep

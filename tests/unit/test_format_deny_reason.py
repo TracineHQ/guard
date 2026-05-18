@@ -42,14 +42,16 @@ def test_auto_mode_treated_as_strict() -> None:
     assert "hard fence in strict mode" in result
 
 
-def test_annunciator_prefix_carries_mode() -> None:
+@pytest.mark.parametrize(
+    "mode", ["default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions"]
+)
+def test_annunciator_prefix_carries_mode(mode: str) -> None:
     """The deny prefix encodes the active mode so operators can grep transcripts."""
-    for mode in ("default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions"):
-        _REQUEST_CONTEXT["permission_mode"] = mode
-        result = _format_deny_reason("bash.example", "body")
-        assert f"guard [permission_mode={mode}] denied: bash.example" in result, (
-            f"missing annunciator for mode={mode!r}: {result!r}"
-        )
+    _REQUEST_CONTEXT["permission_mode"] = mode
+    result = _format_deny_reason("bash.example", "body")
+    assert f"guard [permission_mode={mode}] denied: bash.example" in result, (
+        f"missing annunciator for mode={mode!r}: {result!r}"
+    )
 
 
 def test_annunciator_prefix_via_decide_end_to_end() -> None:

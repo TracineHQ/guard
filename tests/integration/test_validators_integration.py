@@ -10,11 +10,11 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[2]
+from tests._helpers import REPO_ROOT as REPO
+
 HOOKS_DIR = REPO / "src" / "guard" / "hooks"
 
 HOOK_NAMES = [

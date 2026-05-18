@@ -35,26 +35,33 @@ class TestUnknownFlagsInteractiveAllow:
             hso = output.get("hookSpecificOutput", {})
             assert hso.get("permissionDecision") != "deny", f"unexpected deny: {stdout}"
 
+    @pytest.mark.xfail(
+        reason=(
+            "Interactive-mode admin CLIs route through evaluator-passthrough "
+            "when no segment is on SAFE_PREFIXES, so the explicit-allow "
+            "branch that attaches `unknown_flags` telemetry never fires. "
+            "Equivalent coverage exists via TestUnknownFlagsStrictEscalation "
+            "(strict mode triggers the explicit-deny branch with the same "
+            "telemetry shape). Keeping this test as xfail so the day "
+            "interactive-mode telemetry IS wired, this lights up green and "
+            "we delete the marker."
+        ),
+        strict=True,
+    )
     def test_unknown_flags_captured_in_jsonl(self, tmp_path: Path) -> None:
-        """Unknown flags on allowed admin CLI commands appear in the JSONL record."""
+        """Aspirational: unknown flags on interactive-allowed admin commands appear in JSONL."""
         decisions_path = tmp_path / "decisions.jsonl"
         run_hook(
             "bash_command_validator",
             "aws ec2 describe-instances --recursive --human-readable",
             decisions_path=decisions_path,
         )
-        if not decisions_path.exists():
-            pytest.skip("no JSONL written (passthrough)")
+        assert decisions_path.exists()
         records = [
             json.loads(line) for line in decisions_path.read_text().splitlines() if line.strip()
         ]
-        # Find an allow record with unknown_flags
-        allow_records = [r for r in records if r.get("decision") == "allow"]
-        if not allow_records:
-            pytest.skip("no allow record written")
-        # At least one record should mention the unknown flags
-        unknown_flag_records = [r for r in allow_records if r.get("unknown_flags")]
-        assert unknown_flag_records, f"expected unknown_flags in JSONL, records: {allow_records}"
+        unknown_flag_records = [r for r in records if r.get("unknown_flags")]
+        assert unknown_flag_records, f"expected unknown_flags in JSONL, records: {records!r}"
         flags = unknown_flag_records[0]["unknown_flags"]
         assert "--recursive" in flags or "--human-readable" in flags
 

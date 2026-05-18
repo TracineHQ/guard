@@ -299,9 +299,11 @@ def test_read_permission_mode_default_when_missing() -> None:
     assert read_permission_mode(None) == "default"
 
 
-def test_read_permission_mode_returns_value() -> None:
-    for mode in ("default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions"):
-        assert read_permission_mode({"permission_mode": mode}) == mode
+@pytest.mark.parametrize(
+    "mode", ["default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions"]
+)
+def test_read_permission_mode_returns_value(mode: str) -> None:
+    assert read_permission_mode({"permission_mode": mode}) == mode
 
 
 def test_read_permission_mode_strips_whitespace() -> None:
@@ -321,9 +323,9 @@ def test_is_strict_mode_true_for_unattended_modes() -> None:
     assert is_strict_mode({"permission_mode": "bypassPermissions"}) is True
 
 
-def test_is_strict_mode_false_for_attended_modes() -> None:
-    for mode in ("default", "plan", "acceptEdits"):
-        assert is_strict_mode({"permission_mode": mode}) is False
+@pytest.mark.parametrize("mode", ["default", "plan", "acceptEdits"])
+def test_is_strict_mode_false_for_attended_modes(mode: str) -> None:
+    assert is_strict_mode({"permission_mode": mode}) is False
 
 
 def test_is_strict_mode_false_when_missing() -> None:

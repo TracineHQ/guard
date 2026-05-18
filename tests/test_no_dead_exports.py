@@ -18,8 +18,8 @@ import re
 from pathlib import Path
 
 from guard import _utils, registry
+from tests._helpers import REPO_ROOT as REPO
 
-REPO = Path(__file__).resolve().parents[1]
 HOOKS_DIR = REPO / "src" / "guard" / "hooks"
 
 # Naming heuristic for registry rule sets.

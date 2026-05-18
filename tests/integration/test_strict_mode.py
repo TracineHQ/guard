@@ -19,9 +19,9 @@ from pathlib import Path
 import pytest
 
 from guard.registry import STRICT_FEEDBACK
+from tests._helpers import REPO_ROOT as REPO
 from tests._helpers import decision_from_stdout as _decision
 
-REPO = Path(__file__).resolve().parents[2]
 HOOK = REPO / "src" / "guard" / "hooks" / "bash_command_validator.py"
 
 
@@ -84,13 +84,13 @@ def test_interactive_passes_through_unknown(tmp_path: Path) -> None:
     assert _decision(stdout) is None, f"expected passthrough, got stdout={stdout[:300]}"
 
 
-def test_interactive_still_denies_always_deny(tmp_path: Path) -> None:
+@pytest.mark.parametrize("strict", [True, False])
+def test_interactive_still_denies_always_deny(tmp_path: Path, strict: bool) -> None:  # noqa: FBT001
     """`git add -A` is in ALWAYS_DENY — denied in BOTH modes."""
-    for mode in (True, False):
-        _rc, stdout, _stderr = _run(
-            "git add -A", strict=mode, decisions_path=tmp_path / f"log-{mode}.jsonl"
-        )
-        assert _decision(stdout) == "deny", f"mode={mode} expected deny, got stdout={stdout[:300]}"
+    _rc, stdout, _stderr = _run(
+        "git add -A", strict=strict, decisions_path=tmp_path / f"log-{strict}.jsonl"
+    )
+    assert _decision(stdout) == "deny", f"strict={strict} expected deny, got stdout={stdout[:300]}"
 
 
 @pytest.mark.parametrize("prefix", sorted(STRICT_FEEDBACK.keys()))
