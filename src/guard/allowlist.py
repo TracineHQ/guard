@@ -83,6 +83,7 @@ _BASH_MATCHER_RULE_IDS: tuple[str, ...] = (
     "bash.gem_remote_install",
     "bash.gh_api_destructive",
     "bash.git_config_injection",
+    "bash.git_force_push",
     "bash.git_force_refspec",
     "bash.git_submodule_add",
     "bash.git_worktree_add",

@@ -1686,6 +1686,7 @@ _SYNTH_GLOB_HEAD_DENY = "<glob in command head>"
 _SYNTH_REMOTE_SHELL_DENY = "<remote shell wrapper>"
 _SYNTH_DNS_EXFIL_DENY = "<DNS exfil candidate>"
 _SYNTH_GIT_FORCE_REFSPEC_DENY = "<git push +refspec force>"
+_SYNTH_GIT_FORCE_PUSH_DENY = "<git push --force/-f/--force-with-lease/--force-if-includes>"
 _SYNTH_GIT_SUBMODULE_ADD_DENY = "<git submodule add fetches arbitrary repo>"
 _SYNTH_GIT_WORKTREE_ADD_DENY = "<git worktree add path scoping>"
 _SYNTH_ADMIN_DEFAULT_DENY = "admin-default-deny"
@@ -1911,6 +1912,14 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         "regardless of whether the local fast-forwards. Resolve the divergence "
         "first (``git pull --rebase`` or ``git fetch && git rebase``) and then "
         "push without ``+``."
+    ),
+    _SYNTH_GIT_FORCE_PUSH_DENY: (
+        "git push with a force-push flag (``--force``, ``-f``, "
+        "``--force-with-lease``, ``--force-if-includes``, ``--mirror``) "
+        "rewrites remote history. The literal-prefix deny catches the "
+        "flag-at-front shape (``git push --force origin main``); this matcher "
+        "covers the flag-at-end shape (``git push origin main --force``) "
+        "where the flag drifts past the remote/refspec positional args."
     ),
     _SYNTH_GIT_SUBMODULE_ADD_DENY: (
         "``git submodule add <url>`` fetches an arbitrary repository whose "
@@ -3834,6 +3843,45 @@ def _is_git_force_refspec(normalized: str) -> bool:
     return False
 
 
+# Force-push flags that rewrite remote history regardless of position. The
+# literal ALWAYS_DENY prefix matcher only catches these flags when they sit
+# directly after ``git push`` (``git push --force origin main``); when the
+# flag drifts to the end (``git push origin main --force``) the prefix scan
+# misses. This set is consulted by ``_is_git_force_push`` which scans every
+# token after ``git push``.
+_GIT_FORCE_PUSH_FLAGS = frozenset(
+    {"-f", "--force", "--force-with-lease", "--force-if-includes", "--mirror"}
+)
+
+
+def _is_git_force_push(normalized: str) -> bool:
+    """Return True for any ``git push ... <force-flag> ...`` shape.
+
+    The literal-prefix ALWAYS_DENY entries cover ``git push --force [...]``,
+    ``git push -f [...]``, ``git push --force-with-lease [...]``,
+    ``git push --force-if-includes [...]``, and ``git push --mirror [...]``
+    (with the value-attached ``--force-with-lease=<ref>`` form picked up by
+    ``_match_always_deny_literal``'s ``p + "="`` extension). What that path
+    misses is the positional-flag-at-end shape, e.g.
+    ``git push origin main -f`` -- a common amend-then-push convenience where
+    the user types remote and refspec first and tacks on ``-f`` last. Scan
+    every token after ``git push`` for a force-push flag (bare or
+    ``=value``-attached) so flag position cannot evade the deny.
+    """
+    tokens = normalized.split()
+    if len(tokens) < 3 or _basename(tokens[0]) != "git" or tokens[1] != "push":
+        return False
+    for tok in tokens[2:]:
+        if tok in _GIT_FORCE_PUSH_FLAGS:
+            return True
+        # ``--force-with-lease=ref`` / ``--force-if-includes=ref`` attached-value
+        # variants. Match against the bare-flag prefix so we don't trip on an
+        # unrelated ``--force-something-else=...`` that doesn't exist today.
+        if "=" in tok and tok.split("=", 1)[0] in _GIT_FORCE_PUSH_FLAGS:
+            return True
+    return False
+
+
 def _is_git_submodule_add(normalized: str) -> bool:
     """Return True for ``git submodule add <url>`` (fetch + run hooks)."""
     tokens = normalized.split()
@@ -3983,6 +4031,7 @@ _PER_FORM_MATCHERS: tuple[tuple[Callable[[str], bool], str, str], ...] = (
     (_is_remote_shell_wrapper, _SYNTH_REMOTE_SHELL_DENY, "bash.remote_shell_wrapper"),
     (_is_dns_exfil_candidate, _SYNTH_DNS_EXFIL_DENY, "bash.dns_exfil"),
     (_is_git_force_refspec, _SYNTH_GIT_FORCE_REFSPEC_DENY, "bash.git_force_refspec"),
+    (_is_git_force_push, _SYNTH_GIT_FORCE_PUSH_DENY, "bash.git_force_push"),
     (_is_git_submodule_add, _SYNTH_GIT_SUBMODULE_ADD_DENY, "bash.git_submodule_add"),
     (_is_git_worktree_add, _SYNTH_GIT_WORKTREE_ADD_DENY, "bash.git_worktree_add"),
     (_is_pipe_to_interpreter, _SYNTH_PIPE_TO_INTERPRETER_DENY, "bash.pipe_to_interpreter"),
