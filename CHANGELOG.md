@@ -17,9 +17,32 @@ adheres to [Semantic Versioning](https://semver.org/).
   synth-deny matcher scans every token after `git push` for any member of
   `{-f, --force, --force-with-lease, --force-if-includes, --mirror}` including
   the `=value` attached form. Allowlist-overridable.
+- `bash.gh_api_destructive`: extended fused-verb handling to cover the
+  `-X=VERB` form. The matcher previously caught `-X DELETE` (separate),
+  `-XDELETE` (fused), and `--method=DELETE` (long-form fused-equals) but
+  missed the shell-friendly `-X=DELETE` shape on the short flag. Same
+  fix applies to PATCH and PUT.
+- `_strip_git_global_options` now also consumes git's bare (no-value)
+  globals (`--no-pager`, `--paginate`, `--bare`, `--no-replace-objects`,
+  `--no-optional-locks`, and the `*-pathspecs` family). Without this,
+  `git --no-pager submodule add <url>` shifted the positional index past
+  the `tokens[1]=="submodule"` anchor and slipped past
+  `bash.git_submodule_add`. The fix applies uniformly across every git
+  positional matcher (force-push, force-refspec, submodule-add,
+  worktree-add).
 
 ### Added
 
+- Shadow/off mode (config-driven). New top-level `mode` field on
+  `.claude/guard/allowlist.json` accepts `"enforce"` (default),
+  `"shadow"`, or `"off"`. Set via `guard mode <value> [--project|--global]`.
+  In shadow, denies are logged with `mode: "shadow"` but the hook exits 0
+  with empty stdout — useful for testing a new rule against real
+  sessions before promoting. In off, the hook short-circuits and writes
+  no decision row. Project mode overrides global; global overrides
+  default. `guard status` surfaces the resolved mode.
+- `guard mode [enforce|shadow|off]` CLI subcommand reads or writes the
+  mode for the current scope.
 - `guard healthcheck` CLI subcommand: synthesises two independent
   always-deny PreToolUse payloads, asserts each comes back with the
   expected `permissionDecision: deny` + rule_id substring in the reason.
@@ -109,6 +132,15 @@ adheres to [Semantic Versioning](https://semver.org/).
 - Log consumers parsing deny reasons: the prefix `guard [permission_mode=
   <mode>] denied: <rule_id>` replaces the trailing `Rule: <rule_id>`. The
   `rule_id` is still surfaced, now leading.
+
+### Tests
+
+- New `tests/integration/test_canonicalize_properties.py` carries
+  hypothesis property tests for the input-canonicalization pipeline:
+  `_canonicalize` idempotence, `_normalize_segment` bounded
+  convergence, `strip_inline_comment` quoted-`#` preservation +
+  idempotence, and `_expand_braces_in_line` token-cap respect over a
+  shape-space distinct from the existing brace-DoS property test.
 
 ## [1.3.1] - 2026-05-13
 
