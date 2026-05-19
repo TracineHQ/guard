@@ -331,7 +331,7 @@ def test_safe_read_text_capped_sensitive_target_refused(
     monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
     sensitive = tmp_path / ".ssh" / "id_rsa"
     sensitive.parent.mkdir()
-    sensitive.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n")
+    sensitive.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n")  # pragma: allowlist secret
     assert safe_read_text_capped(sensitive, cwd=str(tmp_path), max_bytes=1024) is None
 
 
