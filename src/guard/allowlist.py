@@ -43,7 +43,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from guard._utils import GUARD_HOME
 
@@ -182,11 +182,7 @@ def _validate_mode(raw: Any, source: str) -> Mode | None:  # noqa: ANN401 -- JSO
     if not isinstance(raw, str) or raw not in _VALID_MODES:
         _warn(f"{source}: 'mode' must be one of {sorted(_VALID_MODES)}; ignoring (got {raw!r})")
         return None
-    if raw == "enforce":
-        return "enforce"
-    if raw == "shadow":
-        return "shadow"
-    return "off"
+    return cast("Mode", raw)
 
 
 def _validate_disable_rules(raw: Any, source: str) -> list[str]:  # noqa: ANN401 -- JSON value is genuinely Any
