@@ -30,6 +30,16 @@ adheres to [Semantic Versioning](https://semver.org/).
   `bash.git_submodule_add`. The fix applies uniformly across every git
   positional matcher (force-push, force-refspec, submodule-add,
   worktree-add).
+- `_is_aws_s3_destructive` and `_is_kubectl_destructive` now strip
+  leading global flags before the positional service/verb check. Shapes
+  like `aws --region us-east-1 s3 rm s3://b --recursive` and
+  `kubectl -n default delete pod nginx --all` were already denied
+  end-to-end via the generic `bash.admin_default_deny` fallback, but
+  the more specific rule_id is now surfaced in the audit log -- the
+  operator-facing reason carries `bash.aws_s3_destructive` /
+  `bash.kubectl_destructive` instead of the generic catch-all. Mirrors
+  the leading-flag normalization already used by `_is_aws_destructive`,
+  `_is_gcloud_destructive`, and `_is_az_destructive`.
 
 ### Added
 

@@ -54,6 +54,8 @@ from guard._utils import (
 )
 from guard.allowlist import Allowlist, load_allowlist
 from guard.hooks._admin_specs import (
+    _KUBECTL_GLOBAL_BARE_FLAGS,
+    _KUBECTL_GLOBAL_VALUE_FLAGS,
     ADMIN_CLI_SPECS,
     AdminCliSpec,
 )
@@ -2334,8 +2336,11 @@ def _is_kubectl_destructive(normalized: str) -> bool:
     Single-resource deletions (``kubectl delete pod my-pod``) are NOT
     affected.
     """
-    tokens = normalized.split()
-    if len(tokens) < 3 or _basename(tokens[0]) != "kubectl":
+    raw = normalized.split()
+    if len(raw) < 3 or _basename(raw[0]) != "kubectl":
+        return False
+    tokens = _strip_cloud_global_flags(raw, _KUBECTL_GLOBAL_VALUE_FLAGS, _KUBECTL_GLOBAL_BARE_FLAGS)
+    if len(tokens) < 3:
         return False
     handler = _KUBECTL_VERB_DISPATCH.get(tokens[1])
     if handler is None:
@@ -2459,15 +2464,21 @@ def _is_aws_s3_destructive(normalized: str) -> bool:
       * ``aws s3 rm <path> --recursive`` / ``-r`` — recursive object removal
       * ``aws s3api delete-bucket / delete-bucket-* / delete-object[s]`` —
         raw-API equivalents that bypass the high-level ``aws s3 rb`` rule
+
+    Leading global flags (``aws --region X s3 rm ...``) are stripped before
+    the positional check so the service-token anchor isn't shifted.
     """
-    tokens = normalized.split()
-    if len(tokens) < 3 or _basename(tokens[0]) != "aws":
+    raw = normalized.split()
+    if len(raw) < 3 or _basename(raw[0]) != "aws":
+        return False
+    tokens = _strip_cloud_global_flags(raw, _AWS_GLOBAL_VALUE_FLAGS, _AWS_GLOBAL_BARE_FLAGS)
+    if len(tokens) < 3:
         return False
     if tokens[1] == "s3" and tokens[2] == "sync" and "--delete" in tokens[3:]:
         return True
     if tokens[1] == "s3" and tokens[2] == "rm":
         return any(t in {"--recursive", "-r", "-R"} for t in tokens[3:])
-    return tokens[1] == "s3api" and len(tokens) >= 3 and tokens[2] in _AWS_S3API_DESTRUCTIVE
+    return tokens[1] == "s3api" and tokens[2] in _AWS_S3API_DESTRUCTIVE
 
 
 _CHMOD_DANGEROUS_MODES = {"777", "0777"}
