@@ -1,0 +1,41 @@
+rules:
+  - id: no-bare-noqa
+    languages: [python]
+    severity: WARNING
+    paths:
+      include:
+        - "**/src/**/*.py"
+        - "**/tests/**/*.py"
+    message: >
+      Bare `# noqa` is undocumented. Add `-- <one-line reason>` after the
+      rule code so the next reader knows whether the directive is
+      load-bearing or rot.
+    pattern-regex: '#\s*noqa(:[^-\n]*?)?(?:\s*#[^-\n]*)?$'
+    pattern-not-regex: '(?:--|ruff: noqa)'
+
+  - id: no-bare-type-ignore
+    languages: [python]
+    severity: WARNING
+    paths:
+      include:
+        - "**/src/**/*.py"
+        - "**/tests/**/*.py"
+    message: >
+      Bare `# type: ignore` is undocumented. Add `-- <one-line reason>`
+      after the code so the next reader knows why the type check is
+      suppressed.
+    pattern-regex: '#\s*type:\s*ignore(\[[^\]]*\])?(?:\s*#[^-\n]*)?$'
+    pattern-not-regex: '--'
+
+  - id: no-bare-nosec
+    languages: [python]
+    severity: WARNING
+    paths:
+      include:
+        - "**/src/**/*.py"
+        - "**/tests/**/*.py"
+    message: >
+      Bare `# nosec` is undocumented. Add `-- <one-line reason>` after
+      the bandit code so the next reader knows the threat is mitigated.
+    pattern-regex: '#\s*nosec(\s+B\d+(\s+B\d+)*)?(?:\s*#[^-\n]*)?$'
+    pattern-not-regex: '--'

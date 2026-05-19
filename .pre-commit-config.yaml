@@ -71,3 +71,12 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         files: ^tests/.*\.py$
+      - id: semgrep-no-bare-noqa
+        name: semgrep (no bare noqa/type:ignore/nosec)
+        entry: uv run --with semgrep semgrep scan --error
+          --config .semgrep/rules/no-bare-noqa.yml
+          src/ tests/
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+        files: ^(src|tests)/.*\.py$
