@@ -110,7 +110,11 @@ Top-level categories:
 | `bash.admin_unknown_flag_strict` | strict mode (`auto`/`dontAsk`/`bypassPermissions`) blocks an admin CLI invocation that carries flags outside the spec's `known_flags` set | strict-only |
 | `bash.strict_feedback` / `bash.strict_default_deny` | strict-mode default-deny for non-admin commands not on the allowlist | strict-only |
 | `bash.command_too_long` | command exceeded `_COMMAND_LENGTH_CAP` after canonicalization | DoS guard |
-| `git_c.*` | `git -C` validator (subcommand class, dangerous config) | `git_c.destructive`, `git_c.shell_operator` |
+
+`git_c_validator` decisions do not carry a `rule_id`; the deny `reason` is
+self-describing (`"git -C: 'reset' is destructive and blocked"`,
+`"git -c <key>=<value>: command-line override of core.hooksPath / ..."`).
+Group git-C decisions on `hook_id == "guard.git_c_validator"`.
 
 Strict-mode rule_ids (`bash.admin_unknown_flag_strict`,
 `bash.command_too_long`, `bash.strict_default_deny`,
@@ -189,8 +193,9 @@ surfaces `internal_error` records inline; `guard status` aggregates them as
 ## 8. Reference implementation
 
 - Writer: `src/guard/_utils.py` — `log_decision()` and `append_jsonl()`.
-- Built-in reader: `src/guard/cli.py` — the `guard` CLI (`guard noisy`,
-  `guard silent`, `guard trace`, `guard status`, `guard test`, `guard diff`).
+- Built-in reader: `src/guard/cli.py` — the `guard` CLI (`guard status`,
+  `guard healthcheck`, `guard noisy`, `guard silent`, `guard trace`,
+  `guard test`, `guard diff`, `guard allowlist *`, `guard migrate-log`).
 - Path constant: `GUARD_DECISIONS_PATH` in `src/guard/_utils.py`.
 
 ## 9. See also

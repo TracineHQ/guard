@@ -118,11 +118,14 @@ Or use the built-in `guard` CLI for read-side queries:
 
 ```
 guard status               # installation status + log location + line count
+guard healthcheck          # synthesise a known-deny payload and assert deny
 guard noisy --since 7d     # top hit rules in the last week
 guard silent --since 30d   # rules that haven't fired in 30 days
 guard trace <session-id>   # all records for a single session
 guard test "<command>"     # what would each hook decide?
 guard diff                 # effective merged config (stub)
+guard allowlist list       # show effective allowlist (list/rules/disable-rule/...)
+guard migrate-log          # one-shot rewrite of the JSONL log to schema v1
 ```
 
 ## Development

@@ -6,12 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- `bash.git_force_push`: closes a positional force-push bypass. Literal-prefix
+  matching on `ALWAYS_DENY` caught `git push -f` and `git push
+  --force-with-lease` only when the flag immediately followed `git push`.
+  Positional forms (`git push origin main -f`,
+  `git push origin main --force-with-lease`) passed through because the prefix
+  anchor was broken by the positional remote/ref. New `_is_git_force_push`
+  synth-deny matcher scans every token after `git push` for any member of
+  `{-f, --force, --force-with-lease, --force-if-includes, --mirror}` including
+  the `=value` attached form. Allowlist-overridable.
+
 ### Added
 
 - `guard healthcheck` CLI subcommand: synthesises two independent
   always-deny PreToolUse payloads, asserts each comes back with the
   expected `permissionDecision: deny` + rule_id substring in the reason.
   Exit 0 = healthy. Suitable for CI gates and external monitoring.
+- `guard migrate-log` CLI subcommand: one-shot, idempotent rewrite of the
+  JSONL decision log to schema v1. Writes a sibling `.bak.<UTC-timestamp>`
+  by default; `--dry-run` reports counts without writing; `--no-backup`
+  skips the backup. Recommended to pause Claude Code sessions during the
+  migration so concurrent appends don't land on the orphaned inode.
 - `internal_error` JSONL records emitted from `safe_main` before fail-open,
   so hook crashes become observable. Carries `exc_class`, redacted
   `exc_msg` (passed through the secret-redaction catalog), and a
@@ -43,6 +60,10 @@ adheres to [Semantic Versioning](https://semver.org/).
   `guard [permission_mode=<mode>] denied: <rule_id>. ...`. Transcript
   scrapers / log indexers keying on the previous "Rule: ..." trailer
   must update.
+- `.pre-commit-config.yaml` now wires the existing semgrep hook-rules
+  (`no-prefix-predicate-in-readonly`, `no-startswith-in-predicate-field`)
+  and a new `test-hygiene.yml` ruleset as `pre-push` hooks. Devs see
+  violations locally before CI rejects them.
 - Renames across registry, public Python symbols, env vars, queue file,
   and matcher rule_ids:
   - `autonomous_feedback` -> `strict_feedback`
