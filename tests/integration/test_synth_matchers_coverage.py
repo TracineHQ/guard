@@ -1186,6 +1186,56 @@ def test_git_global_bare_flag_positional_denied(command: str) -> None:
 
 
 # ============================================================================
+# Admin matcher specificity — when leading global flags shift the positional
+# index, the specific matcher (aws_s3_destructive, kubectl_destructive)
+# should still fire rather than falling through to the generic
+# admin_default_deny. Same end-to-end deny either way, but the audit log
+# carries a more specific rule_id.
+# ============================================================================
+
+ADMIN_SPECIFIC_RULE_PROBES = [
+    (
+        "aws --region us-east-1 s3 rm s3://bucket/path --recursive",
+        "bash.aws_s3_destructive",
+    ),
+    (
+        "aws --output json s3 rm s3://bucket/path --recursive",
+        "bash.aws_s3_destructive",
+    ),
+    (
+        "aws --no-paginate s3 sync /tmp s3://bucket --delete",
+        "bash.aws_s3_destructive",
+    ),
+    (
+        "aws --region us-east-1 s3api delete-bucket --bucket b",
+        "bash.aws_s3_destructive",
+    ),
+    (
+        "kubectl -n default delete pod nginx --all",
+        "bash.kubectl_destructive",
+    ),
+    (
+        "kubectl --namespace=default delete pod nginx --all",
+        "bash.kubectl_destructive",
+    ),
+    (
+        "kubectl --request-timeout=30s delete deployment --all",
+        "bash.kubectl_destructive",
+    ),
+]
+
+
+@pytest.mark.parametrize(("command", "expected_rule"), ADMIN_SPECIFIC_RULE_PROBES)
+def test_admin_matcher_specificity_post_global_strip(command: str, expected_rule: str) -> None:
+    result = decide(command)
+    assert _is_deny(result), f"expected deny on {command!r}, got: {result}"
+    reason = result.get("permissionDecisionReason", "") if result else ""
+    assert expected_rule in reason, (
+        f"expected rule {expected_rule!r} in deny reason for {command!r}, got: {reason!r}"
+    )
+
+
+# ============================================================================
 # git_c_validator fused-form bypass
 # ============================================================================
 
