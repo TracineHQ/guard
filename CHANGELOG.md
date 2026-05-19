@@ -6,7 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [1.4.0] - 2026-05-19
+## [1.4.1] - 2026-05-19
+
+### Fixed
+
+- Release-workflow smoke step now installs the audited `[dev]` extras via
+  `uv export` instead of a hardcoded `pytest pytest-cov pytest-xdist`
+  list. The hardcoded list had drifted: `hypothesis` and `pytest-timeout`
+  (both in pyproject's `[dev]` and continuously CVE-scanned by ci.yml's
+  pip-audit job) were missing, so two test files failed to import at
+  release-smoke time. v1.4.0 reached TestPyPI but never published to
+  production PyPI because of this; v1.4.1 ships the v1.4.0 feature set
+  plus this fix.
 
 ### Security
 
