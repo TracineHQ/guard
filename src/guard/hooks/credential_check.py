@@ -57,8 +57,6 @@ CREDENTIAL_FILES: list[Path] = [
     Path.home() / ".claude" / ".credentials.json",
 ]
 
-MAX_PERMISSIONS = stat.S_IRUSR | stat.S_IWUSR  # 0o600
-
 _GROUP_OTHER_MASK = (
     stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH
 )

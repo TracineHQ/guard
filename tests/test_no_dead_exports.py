@@ -38,10 +38,6 @@ UTILS_INTERNAL_ALLOW: frozenset[str] = frozenset(
         # Read inside log_decision() / append_jsonl() within _utils itself,
         # not by hooks directly — so it's "live" but not greppable.
         "GUARD_DECISIONS_PATH",
-        "LOOP_DETECTION_THRESHOLD",
-        "LOOP_DETECTION_WINDOW_MINUTES",
-        "CONTEXT_BUDGET_WARN_BYTES",
-        "CONTEXT_BUDGET_HARD_BYTES",
         # Re-exports / typing imports
         "TYPE_CHECKING",
         "UTC",
