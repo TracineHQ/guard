@@ -364,6 +364,7 @@ def cmd_status() -> tuple[dict[str, Any], str]:
     wiring = _check_wiring()
 
     counters = reader.counters()
+    allowlist = load_allowlist()
     payload: dict[str, Any] = {
         "version": __version__,
         "active": wiring["active"],
@@ -372,7 +373,7 @@ def cmd_status() -> tuple[dict[str, Any], str]:
         "log_exists": reader.exists(),
         "line_count": line_count,
         "last_record_timestamp": last_ts,
-        "mode": "enforce",
+        "mode": allowlist.mode,
         "schema_version": 1,
         "counters": counters,
     }
@@ -380,13 +381,18 @@ def cmd_status() -> tuple[dict[str, Any], str]:
     def tick(*, ok: bool) -> str:
         return "yes" if ok else "no"
 
+    mode_hint = {
+        "enforce": "denies are surfaced and exit 2",
+        "shadow": "denies are logged with mode=shadow; pass-through to Claude Code",
+        "off": "hook is short-circuited; no decisions computed",
+    }.get(allowlist.mode, "")
     lines = [
         f"guard {__version__}",
         f"active: {tick(ok=wiring['active'])}",
         f"  plugin cache:        {tick(ok=wiring['plugin_cache_present'])}",
         f"  settings reference:  {tick(ok=wiring['settings_references_guard'])}",
         f"  log has guard rec:   {tick(ok=wiring['log_has_guard_records'])}",
-        "mode: enforce  (config-driven shadow/off lands in a future release)",
+        f"mode: {allowlist.mode}  ({mode_hint})",
         f"log: {path}",
         f"  exists: {tick(ok=reader.exists())}",
         f"  records: {line_count}",
@@ -713,6 +719,75 @@ def _test_specs(command: str) -> Iterable[dict[str, Any]]:
             decision = "?"
             reason = ""
         yield {"hook_id": spec.id, "decision": decision, "reason": reason}
+
+
+def cmd_mode(
+    value: str | None, *, scope: str, cwd: Path | None = None
+) -> tuple[dict[str, Any], str]:
+    """Print or set the effective guard mode (enforce|shadow|off).
+
+    With no ``value``, prints the resolved mode plus the per-scope values so
+    operators can see why the resolved mode is what it is. With a value,
+    writes that mode to the chosen scope's allowlist file and reports both
+    the previous and new effective mode.
+    """
+    from guard.allowlist import Mode, set_mode  # noqa: PLC0415 -- lazy: avoids circulars on import
+
+    if value is not None:
+        # Argparse choices on the subparser restrict ``value`` to a Mode literal at runtime.
+        if value == "enforce":
+            mode_value: Mode = "enforce"
+        elif value == "shadow":
+            mode_value = "shadow"
+        else:
+            mode_value = "off"
+        previous = set_mode(mode_value, scope=scope, cwd=cwd)
+        effective = load_allowlist(cwd).mode
+        payload: dict[str, Any] = {
+            "scope": scope,
+            "previous": previous,
+            "written": value,
+            "effective_mode": effective,
+        }
+        lines = [
+            f"guard mode: {scope} <- {value}",
+            f"  previous ({scope}): {previous or '(default)'}",
+            f"  effective mode now: {effective}",
+        ]
+        return payload, "\n".join(lines) + "\n"
+
+    # Read-only path: show resolved + per-scope.
+    allow = load_allowlist(cwd)
+    project_doc = _scope_doc("project", cwd)
+    global_doc = _scope_doc("global", None)
+    payload = {
+        "effective_mode": allow.mode,
+        "project_mode": project_doc.get("mode"),
+        "global_mode": global_doc.get("mode"),
+        "default_mode": "enforce",
+    }
+    lines = [
+        f"effective mode: {allow.mode}",
+        f"  project: {project_doc.get('mode') or '(unset)'}",
+        f"  global:  {global_doc.get('mode') or '(unset)'}",
+        "  default: enforce",
+        "(precedence: project > global > default)",
+    ]
+    return payload, "\n".join(lines) + "\n"
+
+
+def _scope_doc(scope: str, cwd: Path | None) -> dict[str, Any]:
+    """Return the raw JSON dict for a scope's allowlist file (or empty dict)."""
+    path = _resolve_scope_path(scope, cwd)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def cmd_diff() -> tuple[dict[str, Any], str]:
@@ -1220,6 +1295,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip writing a sibling .bak.<timestamp> file (not recommended).",
     )
 
+    p_mode = sub.add_parser(
+        "mode",
+        help=(
+            "Print or set the effective guard mode (enforce|shadow|off). "
+            "With no value, prints the resolved mode and the source file."
+        ),
+    )
+    p_mode.add_argument(
+        "value",
+        nargs="?",
+        choices=["enforce", "shadow", "off"],
+        help="If set, writes mode to the chosen scope's allowlist file.",
+    )
+    _add_scope_args(p_mode)
+
     return parser
 
 
@@ -1284,6 +1374,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 -- linear
                 dry_run=bool(args.dry_run),
                 backup=bool(args.backup),
             )
+        elif cmd == "mode":
+            payload, pretty = cmd_mode(args.value, scope=_resolve_scope(args))
         elif cmd == "allowlist":
             dispatched = _dispatch_allowlist(args, parser)
             if dispatched is None:

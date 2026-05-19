@@ -20,6 +20,16 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Shadow/off mode (config-driven). New top-level `mode` field on
+  `.claude/guard/allowlist.json` accepts `"enforce"` (default),
+  `"shadow"`, or `"off"`. Set via `guard mode <value> [--project|--global]`.
+  In shadow, denies are logged with `mode: "shadow"` but the hook exits 0
+  with empty stdout — useful for testing a new rule against real
+  sessions before promoting. In off, the hook short-circuits and writes
+  no decision row. Project mode overrides global; global overrides
+  default. `guard status` surfaces the resolved mode.
+- `guard mode [enforce|shadow|off]` CLI subcommand reads or writes the
+  mode for the current scope.
 - `guard healthcheck` CLI subcommand: synthesises two independent
   always-deny PreToolUse payloads, asserts each comes back with the
   expected `permissionDecision: deny` + rule_id substring in the reason.

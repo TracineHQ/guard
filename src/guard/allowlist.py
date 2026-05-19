@@ -43,9 +43,13 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from guard._utils import GUARD_HOME
+
+Mode = Literal["enforce", "shadow", "off"]
+_VALID_MODES: frozenset[str] = frozenset(("enforce", "shadow", "off"))
+_DEFAULT_MODE: Mode = "enforce"
 
 PROJECT_ALLOWLIST_RELPATH = Path(".claude") / "guard" / "allowlist.json"
 
@@ -151,6 +155,7 @@ class Allowlist:
     disable_rules: frozenset[str] = field(default_factory=frozenset)
     allow_commands: tuple[AllowEntry, ...] = ()
     sources: tuple[Path, ...] = ()  # files actually read (for diagnostics)
+    mode: Mode = _DEFAULT_MODE  # enforce | shadow | off; project overrides global
 
     def is_rule_disabled(self, rule_id: str) -> bool:
         """True if ``rule_id`` is in ``disable_rules``."""
@@ -168,6 +173,20 @@ class Allowlist:
             if e.rule == rule_id and e.command.strip() == cmd:
                 return e
         return None
+
+
+def _validate_mode(raw: Any, source: str) -> Mode | None:  # noqa: ANN401 -- JSON value is genuinely Any
+    """Return a valid Mode or None (None means "key absent / invalid; skip")."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or raw not in _VALID_MODES:
+        _warn(f"{source}: 'mode' must be one of {sorted(_VALID_MODES)}; ignoring (got {raw!r})")
+        return None
+    if raw == "enforce":
+        return "enforce"
+    if raw == "shadow":
+        return "shadow"
+    return "off"
 
 
 def _validate_disable_rules(raw: Any, source: str) -> list[str]:  # noqa: ANN401 -- JSON value is genuinely Any
@@ -219,23 +238,24 @@ def _warn(msg: str) -> None:
         sys.stderr.flush()
 
 
-def _load_one(path: Path, source_label: str) -> tuple[list[str], list[AllowEntry]]:
-    """Parse one allowlist file. Returns ``([], [])`` if missing or unreadable."""
+def _load_one(path: Path, source_label: str) -> tuple[list[str], list[AllowEntry], Mode | None]:
+    """Parse one allowlist file. Returns ``([], [], None)`` if missing or unreadable."""
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
-        return [], []
+        return [], [], None
     try:
         data = json.loads(text)
     except (json.JSONDecodeError, ValueError) as exc:
         _warn(f"{path}: invalid JSON: {exc}; ignoring file")
-        return [], []
+        return [], [], None
     if not isinstance(data, dict):
         _warn(f"{path}: top-level must be an object; ignoring file")
-        return [], []
+        return [], [], None
     rules = _validate_disable_rules(data.get("disable_rules"), source_label)
     cmds = _validate_allow_commands(data.get("allow_commands"), source_label)
-    return rules, cmds
+    mode = _validate_mode(data.get("mode"), source_label)
+    return rules, cmds, mode
 
 
 def global_allowlist_path() -> Path:
@@ -410,6 +430,20 @@ def remove_allow_command(
     return True
 
 
+def set_mode(value: Mode, *, scope: str = "project", cwd: Path | None = None) -> Mode | None:
+    """Write ``mode`` to the chosen scope's allowlist file.
+
+    Returns the previous mode value (``None`` if absent / default).
+    """
+    path = _resolve_scope_path(scope, cwd)
+    doc = _read_raw(path)
+    previous = doc.get("mode")
+    prev_validated = _validate_mode(previous, scope) if previous is not None else None
+    doc["mode"] = value
+    _write_raw(path, doc)
+    return prev_validated
+
+
 def _resolve_scope_path(scope: str, cwd: Path | None) -> Path:
     if scope == "global":
         return global_allowlist_path()
@@ -432,17 +466,23 @@ def load_allowlist(cwd: Path | None = None) -> Allowlist:
     """
     sources: list[Path] = []
     project_path = project_allowlist_path(cwd)
-    project_rules, project_cmds = _load_one(project_path, "project")
+    project_rules, project_cmds, project_mode = _load_one(project_path, "project")
     if project_path.exists():
         sources.append(project_path)
 
     global_path = global_allowlist_path()
-    global_rules, global_cmds = _load_one(global_path, "global")
+    global_rules, global_cmds, global_mode = _load_one(global_path, "global")
     if global_path.exists():
         sources.append(global_path)
+
+    # Project beats global beats default. Once mode lands, an operator
+    # flipping the project file to ``shadow`` overrides the global setting
+    # so per-repo experiments don't leak across the rest of their machine.
+    effective_mode: Mode = project_mode or global_mode or _DEFAULT_MODE
 
     return Allowlist(
         disable_rules=frozenset(project_rules) | frozenset(global_rules),
         allow_commands=(*project_cmds, *global_cmds),
         sources=tuple(sources),
+        mode=effective_mode,
     )

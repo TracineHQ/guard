@@ -33,6 +33,7 @@ import re
 import shlex
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
@@ -121,7 +122,12 @@ _SPEC_DECISION_MAP: dict[str, Literal["allow", "deny", "ask", "pass"]] = {
 # this at entry; ``_log_local`` (called from ``decide`` and helpers) reads
 # from it. Falls back to ``CLAUDE_SESSION_ID`` env when called outside a
 # ``hook()`` context (e.g. unit tests that drive ``decide`` directly).
-_REQUEST_CONTEXT: dict[str, Any] = {"session_id": "", "cwd": None, "permission_mode": "default"}
+_REQUEST_CONTEXT: dict[str, Any] = {
+    "session_id": "",
+    "cwd": None,
+    "permission_mode": "default",
+    "mode": "enforce",  # guard mode (enforce|shadow|off) resolved from allowlist at hook entry
+}
 
 # Parsed once from GUARD_ADMIN_ALLOW_VERBS on first call to _get_admin_allow_verbs().
 _ADMIN_ALLOW_VERBS_CACHE: dict[str, frozenset[tuple[str, ...]]] | None = None
@@ -168,6 +174,7 @@ def _log_local(
         session_id=session_id,
         cwd=_REQUEST_CONTEXT["cwd"],
         permission_mode=_REQUEST_CONTEXT.get("permission_mode"),
+        mode=_REQUEST_CONTEXT.get("mode"),
         extra=extra,
     )
 
@@ -4823,11 +4830,23 @@ def hook(payload: dict[str, Any]) -> None:
     _REQUEST_CONTEXT["cwd"] = cwd if isinstance(cwd, str) else None
     permission_mode = read_permission_mode(payload)
     _REQUEST_CONTEXT["permission_mode"] = permission_mode
+    effective_mode = load_allowlist(Path(cwd) if isinstance(cwd, str) else None).mode
+    _REQUEST_CONTEXT["mode"] = effective_mode
+
+    # mode=off: pass-through, no decision computed, no enforcement.
+    if effective_mode == "off":
+        return
 
     _hard_deny_check(command)
 
     decision = decide(command, permission_mode=permission_mode)
     if decision is None:
+        return
+
+    # mode=shadow: decision is already logged (with mode=shadow) by _log_local;
+    # don't surface the deny envelope and don't exit 2 -- Claude Code sees
+    # passthrough behavior while the audit log captures the would-be deny.
+    if effective_mode == "shadow":
         return
 
     output = {
