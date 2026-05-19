@@ -33,7 +33,7 @@ PLUGIN_VERSION = tomllib.loads((REPO / "pyproject.toml").read_text())["project"]
 STAGED_NAME = f"guard-{PLUGIN_VERSION}"
 
 # Constants used by structural assertions.
-EXPECTED_HOOK_FILES = {
+EXPECTED_PRE_TOOL_USE_HOOK_FILES = {
     "bash_command_validator.py",
     "git_c_validator.py",
     "commit_message_validator.py",
@@ -42,6 +42,8 @@ EXPECTED_HOOK_FILES = {
     "protected_files.py",
     "subagent_scope.py",
 }
+EXPECTED_PERMISSION_REQUEST_HOOK_FILES = {"permission_request_logger.py"}
+EXPECTED_HOOK_FILES = EXPECTED_PRE_TOOL_USE_HOOK_FILES | EXPECTED_PERMISSION_REQUEST_HOOK_FILES
 MAX_RECORD_BYTES = 4096
 VALID_DECISIONS = {"allow", "deny", "ask", "pass", "defer"}
 
@@ -313,17 +315,18 @@ def test_marketplace_manifest_shape(staged: Path) -> None:
 
 
 def test_hooks_manifest_shape(staged: Path) -> None:
-    """``hooks.json`` declares only PreToolUse and references all 8 hooks."""
+    """``hooks.json`` declares PreToolUse + PermissionRequest events and references every shipped hook."""
     hooks = json.loads((staged / "hooks" / "hooks.json").read_text())
-    assert set(hooks["hooks"]) == {"PreToolUse"}
+    assert set(hooks["hooks"]) == {"PreToolUse", "PermissionRequest"}
     referenced: set[str] = set()
-    for matcher_block in hooks["hooks"]["PreToolUse"]:
-        assert "matcher" in matcher_block
-        for entry in matcher_block["hooks"]:
-            assert entry["type"] == "command"
-            cmd = entry["command"]
-            assert "${CLAUDE_PLUGIN_ROOT}" in cmd, f"hook cmd missing CLAUDE_PLUGIN_ROOT: {cmd}"
-            referenced.add(cmd.rsplit("/", 1)[-1])
+    for event_name in ("PreToolUse", "PermissionRequest"):
+        for matcher_block in hooks["hooks"][event_name]:
+            assert "matcher" in matcher_block
+            for entry in matcher_block["hooks"]:
+                assert entry["type"] == "command"
+                cmd = entry["command"]
+                assert "${CLAUDE_PLUGIN_ROOT}" in cmd, f"hook cmd missing CLAUDE_PLUGIN_ROOT: {cmd}"
+                referenced.add(cmd.rsplit("/", 1)[-1])
     assert referenced == EXPECTED_HOOK_FILES
 
 
@@ -338,9 +341,10 @@ def test_no_symlinks_under_staged(staged: Path) -> None:
 def test_no_relative_escape_in_hook_commands(staged: Path) -> None:
     """No hook command escapes the plugin root with ``../``."""
     hooks = json.loads((staged / "hooks" / "hooks.json").read_text())
-    for matcher_block in hooks["hooks"]["PreToolUse"]:
-        for entry in matcher_block["hooks"]:
-            assert "../" not in entry["command"], f"relative escape in {entry['command']!r}"
+    for event_blocks in hooks["hooks"].values():
+        for matcher_block in event_blocks:
+            for entry in matcher_block["hooks"]:
+                assert "../" not in entry["command"], f"relative escape in {entry['command']!r}"
 
 
 def test_no_developer_absolute_paths_in_sources(staged: Path) -> None:

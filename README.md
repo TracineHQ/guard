@@ -25,6 +25,7 @@ Guardrails not walls: guard catches the obvious foot-guns at the Claude Code hoo
 | agent_output_guard | reads of subagent transcript files (`/tmp/claude-<pid>/.../tasks/*.output`) |
 | protected_files | edits to user-marked protected files |
 | subagent_scope | file edits outside the declared `.claude/subagent-scope.json` allowlist |
+| permission_request_logger | observation-only: logs every Claude Code permission prompt as a `permission_request` JSONL row (no enforcement) |
 
 ## Install
 

@@ -504,6 +504,65 @@ def log_internal_error(exc: BaseException, *, session_id: str = "") -> None:
     )
 
 
+def log_permission_request(  # noqa: PLR0913 -- mirror log_decision's keyword-only contract
+    *,
+    session_id: str,
+    tool_name: str,
+    tool_input: dict[str, Any],
+    tool_use_id: str | None = None,
+    permission_mode: str | None = None,
+    cwd: str | None = None,
+    mode: str | None = None,
+) -> None:
+    """Append a ``permission_request`` JSONL record.
+
+    Fired by the PermissionRequest hook when Claude Code is about to prompt
+    the user for permission. Observation-only: never blocks, never returns
+    a decision; the record exists so operators can ``jq '.type ==
+    "permission_request"'`` to see what Claude Code surfaced to the user.
+
+    ``tool_input`` is JSON-stringified, passed through the secret-redaction
+    catalog, and truncated to the standard command-excerpt envelope. Stringify
+    rather than per-field pick keeps the helper generic across Bash / Edit /
+    Read / Glob / MCP tool shapes without an exhaustive field list.
+
+    Args:
+        session_id: Claude Code session id.
+        tool_name: Tool about to be invoked (``"Bash"``, ``"Edit"``, ...).
+        tool_input: The payload Claude Code received from the model.
+        tool_use_id: Optional unique id Claude Code assigns to the call.
+        permission_mode: Optional permission_mode string from the payload.
+        cwd: Optional working directory.
+        mode: Effective guard mode (``"enforce"``/``"shadow"``/``"off"``).
+            Hooks at top of pipeline read this from
+            ``load_allowlist().mode``; ``"off"`` callers are expected to
+            short-circuit before reaching this function.
+    """
+    try:
+        input_str = json.dumps(tool_input, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        input_str = repr(tool_input)
+    redacted = _redact_secrets(input_str)[:_COMMAND_EXCERPT_MAX_CHARS]
+
+    record: dict[str, Any] = {
+        "type": "permission_request",
+        "v": _SCHEMA_V,
+        "schema_version": _SCHEMA_V,
+        "mode": mode or _DEFAULT_MODE,
+        "timestamp": _utc_now_iso(),
+        "session_id": session_id,
+        "tool_name": tool_name,
+        "tool_input_excerpt": redacted,
+    }
+    if tool_use_id:
+        record["tool_use_id"] = tool_use_id
+    if permission_mode is not None:
+        record["permission_mode"] = permission_mode
+    if cwd is not None:
+        record["cwd"] = cwd
+    append_jsonl(GUARD_DECISIONS_PATH, record)
+
+
 def make_decision(decision: str, reason: str) -> str:
     """Build a ``hookSpecificOutput`` JSON string for PreToolUse decisions.
 

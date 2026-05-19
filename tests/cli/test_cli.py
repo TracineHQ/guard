@@ -310,6 +310,88 @@ def test_noisy_filter_returns_empty_when_no_match(populated_log: Path) -> None:
     assert payload["top"] == []
 
 
+@pytest.fixture
+def log_with_permission_requests(decision_log_env: Path) -> Path:
+    """Synthetic log mixing decision rows with permission_request rows."""
+    now = datetime.now(tz=UTC).replace(tzinfo=None)
+    records = [
+        {
+            "v": 1,
+            "schema_version": 1,
+            "mode": "enforce",
+            "type": "decision",
+            "timestamp": _ts(now, hours_ago=1),
+            "hook_id": "guard.bash_command_validator",
+            "event": "PreToolUse",
+            "tool_name": "Bash",
+            "decision": "deny",
+            "reason": "rm -rf / blocked",
+            "session_id": "sess-A",
+        },
+        {
+            "v": 1,
+            "schema_version": 1,
+            "mode": "enforce",
+            "type": "permission_request",
+            "timestamp": _ts(now, hours_ago=2),
+            "session_id": "sess-A",
+            "tool_name": "Bash",
+            "tool_input_excerpt": '{"command": "ls"}',
+        },
+        {
+            "v": 1,
+            "schema_version": 1,
+            "mode": "enforce",
+            "type": "permission_request",
+            "timestamp": _ts(now, hours_ago=3),
+            "session_id": "sess-A",
+            "tool_name": "Bash",
+            "tool_input_excerpt": '{"command": "pwd"}',
+        },
+        {
+            "v": 1,
+            "schema_version": 1,
+            "mode": "enforce",
+            "type": "permission_request",
+            "timestamp": _ts(now, hours_ago=4),
+            "session_id": "sess-A",
+            "tool_name": "Edit",
+            "tool_input_excerpt": '{"file_path": "/tmp/x.py"}',
+        },
+    ]
+    _write_log(decision_log_env, records)
+    return decision_log_env
+
+
+def test_noisy_includes_permission_requests_by_default(
+    log_with_permission_requests: Path,
+) -> None:
+    from guard.cli import cmd_noisy
+
+    payload, pretty = cmd_noisy(timedelta(days=7), limit=10)
+    rows = payload["top"]
+    # Bash permission_request fires twice; should be the top noisy bucket.
+    bash_prompt = next(
+        (r for r in rows if r["hook_id"] == "permission_request" and r["decision"] == "Bash"),
+        None,
+    )
+    assert bash_prompt is not None
+    assert bash_prompt["count"] == 2
+    # Edit prompt also surfaced.
+    assert any(r["hook_id"] == "permission_request" and r["decision"] == "Edit" for r in rows)
+    assert "permission_request" in pretty
+
+
+def test_noisy_no_prompts_flag_excludes_them(log_with_permission_requests: Path) -> None:
+    from guard.cli import cmd_noisy
+
+    payload, _ = cmd_noisy(timedelta(days=7), limit=10, include_prompts=False)
+    rows = payload["top"]
+    # Only the one decision row remains.
+    assert all(r["hook_id"] != "permission_request" for r in rows)
+    assert any(r["hook_id"] == "guard.bash_command_validator" for r in rows)
+
+
 # === guard silent ===
 
 
