@@ -35,7 +35,7 @@ def _isolate_guard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("GUARD_STRICT_DENY_QUEUE_PATH", raising=False)
     monkeypatch.delenv("GUARD_DECISIONS_PATH", raising=False)
     monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "guard-home"))
-    _utils._CLAUDE_AUTONOMOUS_WARNED["once"] = False  # noqa: SLF001
+    _utils._CLAUDE_AUTONOMOUS_WARNED["once"] = False  # noqa: SLF001 -- reset module-private warn-once flag
 
 
 @pytest.fixture

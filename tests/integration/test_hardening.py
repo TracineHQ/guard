@@ -41,7 +41,7 @@ def _run_bash(command: str, *, strict: bool = False) -> tuple[int, str, str]:
     ],
 )
 @pytest.mark.parametrize("strict", [False, True])
-def test_rm_rf_root_denied_in_both_modes(cmd: str, strict: bool) -> None:  # noqa: FBT001
+def test_rm_rf_root_denied_in_both_modes(cmd: str, strict: bool) -> None:  # noqa: FBT001 -- bool from parametrize
     _, stdout, _ = _run_bash(cmd, strict=strict)
     assert _decision(stdout) == "deny", f"{cmd!r} strict={strict} not denied"
 
@@ -155,7 +155,7 @@ def test_malformed_json_denied() -> None:
     ],
 )
 @pytest.mark.parametrize("strict", [False, True])
-def test_curl_pipe_shell_denied_in_both_modes(cmd: str, strict: bool) -> None:  # noqa: FBT001
+def test_curl_pipe_shell_denied_in_both_modes(cmd: str, strict: bool) -> None:  # noqa: FBT001 -- bool from parametrize
     _, stdout, _ = _run_bash(cmd, strict=strict)
     assert _decision(stdout) == "deny", f"{cmd!r} strict={strict} not denied"
 
@@ -242,7 +242,7 @@ def test_git_commit_long_file_flag_with_ai_attribution_denied(tmp_path: Path) ->
     ],
 )
 @pytest.mark.parametrize("strict", [False, True])
-def test_always_deny_normalized(cmd: str, strict: bool) -> None:  # noqa: FBT001
+def test_always_deny_normalized(cmd: str, strict: bool) -> None:  # noqa: FBT001 -- bool from parametrize
     """Quoting/whitespace bypass must not evade ALWAYS_DENY (Fix 3+4)."""
     _, stdout, _ = _run_bash(cmd, strict=strict)
     assert _decision(stdout) == "deny", f"{cmd!r} strict={strict} not denied"
@@ -259,7 +259,7 @@ def test_always_deny_normalized(cmd: str, strict: bool) -> None:  # noqa: FBT001
     ],
 )
 @pytest.mark.parametrize("strict", [False, True])
-def test_interpreter_rce_denied_in_both_modes(cmd: str, strict: bool) -> None:  # noqa: FBT001
+def test_interpreter_rce_denied_in_both_modes(cmd: str, strict: bool) -> None:  # noqa: FBT001 -- bool from parametrize
     """python -c / python3 -c / node -e are RCE primitives (Fix 1)."""
     _, stdout, _ = _run_bash(cmd, strict=strict)
     assert _decision(stdout) == "deny", f"{cmd!r} strict={strict} not denied"
