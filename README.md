@@ -85,6 +85,15 @@ warning -- remove the env var before the next minor release.
 **Healthcheck:** `guard healthcheck` exits 0 on healthy, non-zero on
 failure. Suitable for CI gates and cron-based monitors.
 
+**Mode (enforce / shadow / off):** the effective mode lives in
+`.claude/guard/allowlist.json` as a top-level `"mode"` field (project),
+with `~/.claude/guard/allowlist.json` (global) as fallback. Default is
+`"enforce"`. Flip with `guard mode shadow --project` to test a new rule
+against real sessions without blocking -- denies are logged with
+`mode: "shadow"` but the hook exits 0 so Claude Code's normal permission
+flow takes over. Restore with `guard mode enforce --project`. `"off"`
+short-circuits the hook entirely (no decisions, no audit row).
+
 | Variable | Purpose |
 |---|---|
 | `GUARD_DECISIONS_PATH` | Override the JSONL decision-log path |
