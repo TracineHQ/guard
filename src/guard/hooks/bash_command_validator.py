@@ -128,7 +128,7 @@ _ADMIN_ALLOW_VERBS_CACHE: dict[str, frozenset[tuple[str, ...]]] | None = None
 
 
 def _get_admin_allow_verbs() -> dict[str, frozenset[tuple[str, ...]]]:
-    global _ADMIN_ALLOW_VERBS_CACHE  # noqa: PLW0603
+    global _ADMIN_ALLOW_VERBS_CACHE  # noqa: PLW0603 -- memoization cache
     if _ADMIN_ALLOW_VERBS_CACHE is not None:
         return _ADMIN_ALLOW_VERBS_CACHE
     raw = os.environ.get("GUARD_ADMIN_ALLOW_VERBS", "")
@@ -2204,6 +2204,85 @@ _KUBECTL_FLAGS_TAKING_VALUE = {
 }
 
 
+def _kubectl_delete_is_destructive(rest: list[str]) -> bool:
+    # Cluster-wide flag anywhere (separate or fused) → catastrophic.
+    for tok in rest:
+        if tok in _KUBECTL_CLUSTER_FLAGS or tok.startswith("--all="):
+            return True
+    # First positional after `delete` (skipping flags + their values)
+    # is the resource type. ``namespace`` / ``ns`` here means the user
+    # is deleting a namespace (cascades to every resource in it).
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok in _KUBECTL_FLAGS_TAKING_VALUE:
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        return tok in _KUBECTL_NAMESPACE_RESOURCES
+    return False
+
+
+def _kubectl_scale_is_destructive(rest: list[str]) -> bool:
+    # ``--replicas=0`` (fused) or ``--replicas 0`` (separate).
+    has_zero_replicas = any(
+        tok in {"--replicas=0", "-r=0"}
+        or (tok in {"--replicas", "-r"} and i + 1 < len(rest) and rest[i + 1] == "0")
+        for i, tok in enumerate(rest)
+    )
+    # Cluster-wide flag OR a label-selector. ``-l app=prod`` /
+    # ``--selector role=worker`` matches multiple resources just as
+    # broadly as ``--all`` for mass-action purposes.
+    has_broad_scope = any(
+        tok in _KUBECTL_CLUSTER_FLAGS
+        or tok.startswith(("--all=", "--selector=", "-l="))
+        or tok in {"-l", "--selector"}
+        for tok in rest
+    )
+    return has_zero_replicas and has_broad_scope
+
+
+def _kubectl_drain_is_destructive(rest: list[str]) -> bool:
+    # ``drain <node> --force`` or ``--grace-period=0`` evicts all pods
+    # and ignores PDBs — functionally equivalent to mass-deleting them.
+    return any(
+        tok == "--force"
+        or tok == "--grace-period=0"
+        or (tok == "--grace-period" and i + 1 < len(rest) and rest[i + 1] == "0")
+        for i, tok in enumerate(rest)
+    )
+
+
+def _kubectl_replace_is_destructive(rest: list[str]) -> bool:
+    # ``replace --force -f <manifest>`` is delete-then-create; drops
+    # any state not present in the manifest.
+    has_force = "--force" in rest
+    has_filename = any(tok in {"-f", "--filename"} or tok.startswith("--filename=") for tok in rest)
+    return has_force and has_filename
+
+
+def _kubectl_rollout_is_destructive(rest: list[str]) -> bool:
+    # ``rollout restart`` with cluster-wide flag rolling-restarts every
+    # workload in scope. ``rollout undo`` rolls every targeted
+    # workload back to a prior revision — equally destructive in prod.
+    # Single-target forms (``rollout restart deploy/foo``) are not
+    # flagged because they take a positional argument, not --all.
+    if not rest or rest[0] not in {"restart", "undo"}:
+        return False
+    return any(tok in _KUBECTL_CLUSTER_FLAGS for tok in rest[1:])
+
+
+_KUBECTL_VERB_DISPATCH: dict[str, Callable[[list[str]], bool]] = {
+    "delete": _kubectl_delete_is_destructive,
+    "scale": _kubectl_scale_is_destructive,
+    "drain": _kubectl_drain_is_destructive,
+    "replace": _kubectl_replace_is_destructive,
+    "rollout": _kubectl_rollout_is_destructive,
+}
+
+
 def _is_kubectl_destructive(normalized: str) -> bool:
     """Return True for ``kubectl`` shapes that wipe broad scope.
 
@@ -2230,71 +2309,10 @@ def _is_kubectl_destructive(normalized: str) -> bool:
     tokens = normalized.split()
     if len(tokens) < 3 or _basename(tokens[0]) != "kubectl":
         return False
-    verb = tokens[1]
-    rest = tokens[2:]
-    if verb == "delete":
-        # Cluster-wide flag anywhere (separate or fused) → catastrophic.
-        for tok in rest:
-            if tok in _KUBECTL_CLUSTER_FLAGS or tok.startswith("--all="):
-                return True
-        # First positional after `delete` (skipping flags + their values)
-        # is the resource type. ``namespace`` / ``ns`` here means the user
-        # is deleting a namespace (cascades to every resource in it).
-        i = 0
-        while i < len(rest):
-            tok = rest[i]
-            if tok in _KUBECTL_FLAGS_TAKING_VALUE:
-                i += 2
-                continue
-            if tok.startswith("-"):
-                i += 1
-                continue
-            return tok in _KUBECTL_NAMESPACE_RESOURCES
+    handler = _KUBECTL_VERB_DISPATCH.get(tokens[1])
+    if handler is None:
         return False
-    if verb == "scale":
-        # ``--replicas=0`` (fused) or ``--replicas 0`` (separate).
-        has_zero_replicas = any(
-            tok in {"--replicas=0", "-r=0"}
-            or (tok in {"--replicas", "-r"} and i + 1 < len(rest) and rest[i + 1] == "0")
-            for i, tok in enumerate(rest)
-        )
-        # Cluster-wide flag OR a label-selector. ``-l app=prod`` /
-        # ``--selector role=worker`` matches multiple resources just as
-        # broadly as ``--all`` for mass-action purposes.
-        has_broad_scope = any(
-            tok in _KUBECTL_CLUSTER_FLAGS
-            or tok.startswith(("--all=", "--selector=", "-l="))
-            or tok in {"-l", "--selector"}
-            for tok in rest
-        )
-        return has_zero_replicas and has_broad_scope
-    if verb == "drain":
-        # ``drain <node> --force`` or ``--grace-period=0`` evicts all pods
-        # and ignores PDBs — functionally equivalent to mass-deleting them.
-        return any(
-            tok == "--force"
-            or tok == "--grace-period=0"
-            or (tok == "--grace-period" and i + 1 < len(rest) and rest[i + 1] == "0")
-            for i, tok in enumerate(rest)
-        )
-    if verb == "replace":
-        # ``replace --force -f <manifest>`` is delete-then-create; drops
-        # any state not present in the manifest.
-        has_force = "--force" in rest
-        has_filename = any(
-            tok in {"-f", "--filename"} or tok.startswith("--filename=") for tok in rest
-        )
-        return has_force and has_filename
-    if verb == "rollout":
-        # ``rollout restart`` with cluster-wide flag rolling-restarts every
-        # workload in scope. ``rollout undo`` rolls every targeted
-        # workload back to a prior revision — equally destructive in prod.
-        # Single-target forms (``rollout restart deploy/foo``) are not
-        # flagged because they take a positional argument, not --all.
-        if not rest or rest[0] not in {"restart", "undo"}:
-            return False
-        return any(tok in _KUBECTL_CLUSTER_FLAGS for tok in rest[1:])
-    return False
+    return handler(tokens[2:])
 
 
 _GH_API_DESTRUCTIVE_VERBS = {"DELETE", "PATCH", "PUT"}
@@ -4251,7 +4269,7 @@ def _get_always_deny(segments: list[str]) -> tuple[dict[str, str], str] | None:
             body = (
                 f"Blocked: `{prefix}` is on the always-deny list ({rule_reason})"
                 if rule_reason
-                else f"Blocked: `{seg[:80]}` is on the always-deny list"
+                else f"Blocked: `{seg[:_SEGMENT_DISPLAY_TRUNC]}` is on the always-deny list"
             )
             return _deny(_format_deny_reason("bash.always_deny", body)), "bash.always_deny"
         synth = _match_synthetic_deny(seg)
@@ -4260,7 +4278,7 @@ def _get_always_deny(segments: list[str]) -> tuple[dict[str, str], str] | None:
                 label, rule_id, body = synth
             else:
                 label, rule_id = synth
-                body = f"Blocked: `{seg[:80]}` — {_SYNTH_DENY_REASONS[label]}"
+                body = f"Blocked: `{seg[:_SEGMENT_DISPLAY_TRUNC]}` — {_SYNTH_DENY_REASONS[label]}"
             return _deny(_format_deny_reason(rule_id, body)), rule_id
         # Shell-wrapper recursion: ``bash -c "rm -rf /; other"`` has
         # operators inside the payload that the outer split missed.
@@ -4316,7 +4334,7 @@ def queue_denied_command(command: str) -> None:
     """
     entry = {
         "timestamp": datetime.now(UTC).isoformat(),
-        "command": command[:500],
+        "command": command[:_QUEUE_COMMAND_TRUNC],
         "session_id": os.environ.get("CLAUDE_SESSION_ID", ""),
     }
     append_jsonl(GUARD_STRICT_DENY_QUEUE_PATH, entry)
@@ -4401,9 +4419,9 @@ def _maybe_allow_via_allowlist(
 
     Both bypasses are logged via ``log_decision()`` so the audit trail
     captures the rule_id, the reason, and the original command. Returns
-    ``None`` if no allowlist rule applies — the caller proceeds with the
-    denial as written. ``pending_decision`` is currently unused (the deny
-    envelope is reconstructed from rule_id context) but reserved for a
+    ``None`` if no allowlist rule applies — the caller keeps
+    ``pending_decision`` and proceeds with the denial as written.
+    ``pending_decision`` is currently accepted but unused — reserved for a
     future "shadow"-mode implementation that records what would have been
     denied.
     """
@@ -4454,7 +4472,7 @@ def _evaluate_segments(
         if feedback:
             _log_local(command, "deny", feedback)
             return _deny(feedback)
-        _log_local(command, "passthrough", f"unknown segment: {segment[:80]}")
+        _log_local(command, "passthrough", f"unknown segment: {segment[:_SEGMENT_DISPLAY_TRUNC]}")
         return None
 
     reason = "All command segments are read-only/safe"
@@ -4464,6 +4482,15 @@ def _evaluate_segments(
 
 
 _COMMAND_LENGTH_CAP = 8192
+
+# Truncate the offending segment when echoing it back inside a deny reason.
+# Reasons land in stderr / the transcript, so we keep them to ~one terminal line.
+_SEGMENT_DISPLAY_TRUNC = 80
+
+# Truncate the command stored in the strict-deny review queue. Far larger than
+# the display cap because a human reviewing the queue may want enough context
+# to reconstruct intent, but still small enough to keep the JSONL line tidy.
+_QUEUE_COMMAND_TRUNC = 500
 
 
 def decide(
@@ -4478,7 +4505,7 @@ def decide(
 
     ``permission_mode`` is the documented Claude Code permission mode
     (``default`` / ``plan`` / ``acceptEdits`` / ``auto`` / ``dontAsk`` /
-    ``bypassPermissions``). Strict modes (``dontAsk``,
+    ``bypassPermissions``). Strict modes (``auto``, ``dontAsk``,
     ``bypassPermissions``) route through default-deny evaluation; all
     other modes use the advisory evaluator. The value is stamped onto
     ``_REQUEST_CONTEXT`` so downstream helpers (deny annunciator,
@@ -4646,7 +4673,7 @@ def _pre_evaluate_dangerous(command: str, segments: list[str]) -> dict[str, str]
     for segment in segments:
         if has_dangerous_constructs(segment):
             reason = (
-                f"Blocked: `{segment[:80]}` contains a dangerous shell "
+                f"Blocked: `{segment[:_SEGMENT_DISPLAY_TRUNC]}` contains a dangerous shell "
                 "construct ($(...), backticks, or process substitution). "
                 "These are exfil/RCE primitives and are denied in both "
                 "interactive and strict mode."
