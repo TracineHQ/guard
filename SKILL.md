@@ -163,9 +163,13 @@ pipx install tracine-guard
 
 Then:
 - `guard status` — log location and last record summary.
+- `guard healthcheck` — synthesise a known-deny payload and assert deny (exit 0 = healthy; suitable for CI gates and cron monitors).
 - `guard noisy --since 24h` — top rules by hit count in a time window.
 - `guard silent --since 30d` — rules that fired historically but not recently.
 - `guard trace <session_id>` — chronological dump for one session.
+- `guard test "<command>"` — in-process invocation of every bash-surface hook against one or more commands.
+- `guard diff` — effective merged config (stub).
+- `guard migrate-log` — one-shot rewrite of the JSONL log to schema v1 (idempotent; writes a sibling `.bak.<timestamp>` by default).
 
 Without the CLI, the log is plain JSONL and works with anything that reads stdin: `tail -f ~/.claude/guard-decisions.jsonl | jq`.
 

@@ -71,7 +71,7 @@ def looks_like_stream_path(path: str) -> bool:
 _TEMP_PREFIXES: tuple[str, ...] = (
     "/tmp/",  # noqa: S108 -- standard temp prefixes for scope check, not file creation
     "/var/folders/",  # macOS user temp
-    "/var/tmp/",  # noqa: S108
+    "/var/tmp/",  # noqa: S108 -- temp prefix for scope check, not file creation
     "/private/tmp/",  # macOS realpath form
     "/private/var/folders/",
     "/private/var/tmp/",

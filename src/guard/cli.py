@@ -3,6 +3,8 @@
 Subcommands:
 
 - ``guard status`` — effective config, log location, line count, last record.
+- ``guard healthcheck`` — synthesize known-deny PreToolUse payloads and
+  assert guard responds with ``deny`` plus the expected rule_id.
 - ``guard noisy [--since 7d] [--limit 10]`` — top N hit rules grouped by
   ``(hook_id, decision)``.
 - ``guard silent [--since 30d]`` — rules that haven't fired in N days,
@@ -10,10 +12,17 @@ Subcommands:
   seen in the log.
 - ``guard trace <session-id>`` — every record for a single session,
   chronological.
-- ``guard test "<command>"`` — invokes ``decide()`` on each relevant hook
-  in-process; no log access, no subprocess.
-- ``guard diff`` — effective merged config (stub: built-in defaults only;
-  user/project layers land in a future task).
+- ``guard test "<command>" ...`` — invokes ``decide()`` on each relevant
+  hook in-process; no log access, no subprocess. Accepts multiple commands.
+- ``guard diff`` — print the effective runtime config (registered hook ids,
+  decisions-log path, schema version, mode). Today this is built-in
+  defaults only; the 3-way user/project/builtin merge view lands in a
+  future task. The current command is useful for "what does guard see
+  right now" debugging.
+- ``guard allowlist <list|rules|disable-rule|enable-rule|allow-command|remove-command>``
+  — manage the project + global allowlist (``disable_rules`` /
+  ``allow_commands``).
+- ``guard migrate-log`` — one-shot rewrite of the JSONL log to schema v1.
 
 Output: structured JSON by default; pretty-printed when stdout is a TTY.
 """
@@ -35,7 +44,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from guard import __version__
-from guard._utils import GUARD_DECISIONS_PATH
+from guard._utils import (
+    _SCHEMA_V,
+    GUARD_DECISIONS_PATH,
+)
 from guard.allowlist import (
     KNOWN_RULE_IDS,
     _resolve_scope_path,
@@ -52,6 +64,12 @@ if TYPE_CHECKING:
 # === since-parser ===
 
 _SINCE_RE = re.compile(r"^\s*(\d+)\s*([dhm])\s*$")
+
+# Truncate ``reason`` / ``command_excerpt`` to ~one terminal line when rendering
+# pretty `guard top` / `guard tail` / `guard test` output. Records on disk are
+# already capped at the schema-v1 limits (see ``_utils._REASON_MAX_CHARS``); this
+# is a display-only cap.
+_REASON_DISPLAY_TRUNC = 80
 
 
 def parse_since(text: str) -> timedelta:
@@ -97,6 +115,10 @@ class JsonlReader:
     def __init__(self, path: str | Path) -> None:
         """Hold the JSONL log path."""
         self.path = Path(path)
+        # Track unknown ``v`` values already warned about, so a corrupt log
+        # full of future-schema records produces a single line per ``v``
+        # rather than one per record.
+        self._warned_versions: set[Any] = set()
 
     def exists(self) -> bool:
         """Return True if the log file exists."""
@@ -136,6 +158,18 @@ class JsonlReader:
                     continue
                 # Skip a redirect pointer (single-line marker, see JSONL_FORMAT.md §1.1).
                 if "redirect" in rec and len(rec) == 1:
+                    continue
+                # Quarantine records whose schema version we don't recognise:
+                # skip the record and warn once per unknown ``v`` so we don't
+                # crash on a future-schema log written by a newer guard.
+                v = rec.get("v", rec.get("schema_version"))
+                if isinstance(v, int) and v > _SCHEMA_V:
+                    if v not in self._warned_versions:
+                        self._warned_versions.add(v)
+                        sys.stderr.write(
+                            f"guard: warning: skipping record with unknown schema version v={v} "
+                            f"(this reader understands v<={_SCHEMA_V})\n"
+                        )
                     continue
                 if not include_all_types:
                     kind = rec.get("type") or ("decision" if "decision" in rec else None)
@@ -262,7 +296,7 @@ def _settings_reference_guard(home: Path) -> bool:
     ids come from the registry so a user who enables only a subset of
     hooks (e.g. just ``guard.protected_files``) still registers as wired.
     """
-    from guard.hooks._registry import all_hook_ids  # noqa: PLC0415
+    from guard.hooks._registry import all_hook_ids  # noqa: PLC0415 -- lazy: defer registry import
 
     hook_ids = all_hook_ids()
     for name in ("settings.json", "settings.local.json"):
@@ -371,20 +405,25 @@ def cmd_status() -> tuple[dict[str, Any], str]:
     return payload, "\n".join(lines) + "\n"
 
 
-_HEALTHCHECK_PROBES: tuple[tuple[str, str], ...] = (
-    # (command, expected rule_id substring in deny reason). Two independent
-    # probes so a single registry change cannot turn the healthcheck into a
-    # false-positive: both must deny AND the deny reason must carry the
-    # expected rule_id (emitted by the ``_format_deny_reason`` annunciator).
-    # We pin to rule_id, not body text, because body wording is operational
-    # copy and gets rephrased; rule_id is the stable contract.
-    ("rm -rf /", "bash.always_deny"),
-    ("python -c 'x'", "bash.always_deny"),
+_HEALTHCHECK_PROBES: tuple[tuple[str, str, str], ...] = (
+    # (command, permission_mode, expected rule_id substring). Three probes:
+    # two interactive-mode always-deny commands plus one strict-mode probe
+    # that exercises the strict_default_deny path. A registry-only weakening
+    # cannot turn the healthcheck green; a permission-mode plumbing
+    # regression cannot either. Rule_id is the stable contract, not body
+    # wording.
+    ("rm -rf /", "default", "bash.always_deny"),
+    ("python -c 'x'", "default", "bash.always_deny"),
+    ("flarbnoz --gronk", "dontAsk", "bash.strict_default_deny"),
 )
 
 
 def _run_healthcheck_probe(
-    hook_path: Path, command: str, expected_rule: str, timeout_s: float = 2.0
+    hook_path: Path,
+    command: str,
+    permission_mode: str,
+    expected_rule: str,
+    timeout_s: float = 2.0,
 ) -> dict[str, Any]:
     payload = {
         "session_id": "guard-healthcheck",
@@ -392,7 +431,7 @@ def _run_healthcheck_probe(
         "tool_input": {"command": command},
         "hook_event_name": "PreToolUse",
         "cwd": str(Path.home()),
-        "permission_mode": "default",
+        "permission_mode": permission_mode,
     }
     start = time.monotonic()
     try:
@@ -407,6 +446,7 @@ def _run_healthcheck_probe(
     except subprocess.TimeoutExpired:
         return {
             "command": command,
+            "permission_mode": permission_mode,
             "expected_rule": expected_rule,
             "passed": False,
             "elapsed_ms": int((time.monotonic() - start) * 1000),
@@ -427,6 +467,7 @@ def _run_healthcheck_probe(
             decision = None
     return {
         "command": command,
+        "permission_mode": permission_mode,
         "expected_rule": expected_rule,
         "passed": decision == "deny" and rule_seen,
         "elapsed_ms": elapsed_ms,
@@ -436,17 +477,22 @@ def _run_healthcheck_probe(
 def cmd_healthcheck() -> tuple[dict[str, Any], str]:
     """Synthesize known-deny PreToolUse payloads and assert guard denies.
 
-    Pipes two independent always-deny commands to the bundled bash hook
-    and asserts each one comes back with ``permissionDecision: deny`` AND
-    the expected rule_id substring in the reason. Requiring two probes
-    plus rule_id matching defeats a single-rule weakening that would
-    leave a one-probe healthcheck falsely green.
+    Three probes: two interactive-mode (``default``) always-deny commands
+    plus one strict-mode (``dontAsk``) probe that exercises the
+    strict_default_deny path. Each must come back with
+    ``permissionDecision: deny`` AND the expected rule_id substring in
+    the reason. Requiring distinct probes plus rule_id matching defeats
+    both single-rule registry weakening and permission_mode plumbing
+    regressions.
 
     When a probe fails, the full deny envelope is in
     ``~/.claude/guard-decisions.jsonl`` -- this output stays minimal.
     """
     hook_path = Path(__file__).parent / "hooks" / "bash_command_validator.py"
-    probes = [_run_healthcheck_probe(hook_path, cmd, rule) for cmd, rule in _HEALTHCHECK_PROBES]
+    probes = [
+        _run_healthcheck_probe(hook_path, cmd, mode, rule)
+        for cmd, mode, rule in _HEALTHCHECK_PROBES
+    ]
     healthy = all(p["passed"] for p in probes)
     result: dict[str, Any] = {
         "healthy": healthy,
@@ -479,7 +525,9 @@ def cmd_noisy(
         counts[key] += 1
         total += 1
         if key not in samples:
-            samples[key] = str(rec.get("command_excerpt") or rec.get("reason", ""))[:80]
+            samples[key] = str(rec.get("command_excerpt") or rec.get("reason", ""))[
+                :_REASON_DISPLAY_TRUNC
+            ]
 
     top = counts.most_common(limit)
     payload: dict[str, Any] = {
@@ -594,12 +642,12 @@ def cmd_trace(
             rec_type = rec.get("type", "decision")
             if rec_type == "internal_error":
                 exc_class = rec.get("exc_class", "?")
-                exc_msg = str(rec.get("exc_msg", ""))[:80]
+                exc_msg = str(rec.get("exc_msg", ""))[:_REASON_DISPLAY_TRUNC]
                 lines.append(f"  {ts}  ERROR  {exc_class}  {exc_msg}")
             else:
                 decision = rec.get("decision", "?")
                 hook_id = rec.get("hook_id", "?")
-                reason = str(rec.get("reason", ""))[:80]
+                reason = str(rec.get("reason", ""))[:_REASON_DISPLAY_TRUNC]
                 lines.append(f"  {ts}  {decision:<5}  {hook_id}  {reason}")
     return payload, "\n".join(lines) + "\n"
 
@@ -620,7 +668,7 @@ def cmd_test(commands: list[str]) -> tuple[dict[str, Any], str]:
         for r in results:
             decision = r.get("decision") or "passthrough"
             reason = r.get("reason") or ""
-            lines.append(f"  {r['hook_id']:<35}  {decision:<11}  {reason[:80]}")
+            lines.append(f"  {r['hook_id']:<35}  {decision:<11}  {reason[:_REASON_DISPLAY_TRUNC]}")
     payload: dict[str, Any] = {"commands": runs}
     return payload, "\n".join(lines) + "\n"
 
@@ -635,7 +683,7 @@ def _test_specs(command: str) -> Iterable[dict[str, Any]]:
     """
     # Lazy import — keep the CLI's import cost low and isolate hook bugs from
     # subcommands that don't need them.
-    from guard.hooks._registry import bash_surface_hooks  # noqa: PLC0415
+    from guard.hooks._registry import bash_surface_hooks  # noqa: PLC0415 -- lazy
 
     tool_input = {"command": command}
     for spec in bash_surface_hooks():
@@ -668,16 +716,16 @@ def _test_specs(command: str) -> Iterable[dict[str, Any]]:
 
 
 def cmd_diff() -> tuple[dict[str, Any], str]:
-    """Show the effective merged config.
+    """Print the effective runtime config.
 
-    Stub for v1.1: just the built-in defaults. User / project config layers
-    land in a future task; this command will then expand to a 3-way merge view.
-
-    The hook list comes from the registry — previously this site hardcoded
-    its own list of seven ids that drifted from ``cmd_test``'s hardcoded
-    list of three.
+    Today returns the built-in layer: registered hook ids (sourced from the
+    registry so this can't drift from ``cmd_test``), the effective log path,
+    schema version, and enforcement mode. The "diff" name is a forward-looking
+    label — a 3-way builtin/user/project merge view lands in a later release.
+    Until then this command is useful for "what does guard see right now"
+    debugging, not for diffing.
     """
-    from guard.hooks._registry import all_hook_ids  # noqa: PLC0415
+    from guard.hooks._registry import all_hook_ids  # noqa: PLC0415 -- lazy: defer registry import
 
     hook_ids = list(all_hook_ids())
     payload: dict[str, Any] = {
@@ -712,7 +760,7 @@ def cmd_migrate_log(
     backup: bool,
 ) -> tuple[dict[str, Any], str]:
     """Rewrite the JSONL log in place to v1, in one shot."""
-    from guard.migrate_log import migrate_file  # noqa: PLC0415
+    from guard.migrate_log import migrate_file  # noqa: PLC0415 -- lazy
 
     target = Path(log_path_override) if log_path_override else Path(effective_log_path())
     report = migrate_file(target, dry_run=dry_run, backup=backup)
@@ -885,7 +933,7 @@ def _dispatch_allowlist(
     scope = _resolve_scope(args)
     if allow_cmd in _ALLOWLIST_DISPATCH:
         fn = globals()[_ALLOWLIST_DISPATCH[allow_cmd]]
-        return fn()  # type: ignore[no-any-return]
+        return fn()  # type: ignore[no-any-return]  # -- globals() dispatch erases return type
     if allow_cmd == "disable-rule":
         return cmd_allowlist_disable_rule(args.rule_id, scope=scope)
     if allow_cmd == "enable-rule":
@@ -1086,10 +1134,10 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "diff",
         help=(
-            "Show effective merged config. v1.1 stub: built-in defaults only; "
-            "user/project layers land later."
+            "Print the effective runtime config (registered hooks, log path, "
+            "mode). Today: built-in defaults only; user/project merge view lands later."
         ),
-        epilog=("Examples:\n  guard diff  # effective config (built-in defaults today)"),
+        epilog=("Examples:\n  guard diff  # print effective runtime config"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 

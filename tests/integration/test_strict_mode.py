@@ -85,7 +85,7 @@ def test_interactive_passes_through_unknown(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("strict", [True, False])
-def test_interactive_still_denies_always_deny(tmp_path: Path, strict: bool) -> None:  # noqa: FBT001
+def test_interactive_still_denies_always_deny(tmp_path: Path, strict: bool) -> None:  # noqa: FBT001 -- bool from parametrize
     """`git add -A` is in ALWAYS_DENY — denied in BOTH modes."""
     _rc, stdout, _stderr = _run(
         "git add -A", strict=strict, decisions_path=tmp_path / f"log-{strict}.jsonl"

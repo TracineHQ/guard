@@ -369,6 +369,8 @@ jobs:
             src/guard/hooks/
       - name: Run semgrep (test-hygiene rules, block on ERROR-severity only)
         run: uv run --with semgrep semgrep scan --error --severity ERROR --config .semgrep/rules/test-hygiene.yml tests/
+      - name: Run semgrep (no bare noqa/type-ignore/nosec, block on warning)
+        run: uv run --with semgrep semgrep scan --error --config .semgrep/rules/no-bare-noqa.yml src/ tests/
 
   vulture:
     name: Dead-code sweep

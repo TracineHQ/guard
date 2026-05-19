@@ -73,7 +73,6 @@ class MigrationReport:
     invalid_json: int = 0
     blank: int = 0
     backup_path: Path | None = None
-    output_path: Path | None = None
     dry_run: bool = False
     samples_unrecognized: list[str] = field(default_factory=list)
 
@@ -308,5 +307,4 @@ def migrate_file(
         blank=counts["blank"],
         samples_unrecognized=samples_unrecognized,
         backup_path=backup_path,
-        output_path=path,
     )

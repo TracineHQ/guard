@@ -58,6 +58,28 @@ rules:
       Tests must isolate via GUARD_DATA_DIR monkeypatch; reading from the
       user's real ~/.claude leaks dev-env state into tests.
     pattern-either:
+      # Plain Path.home() / ".claude" and variants
       - pattern: Path.home() / ".claude"
       - pattern: pathlib.Path.home() / ".claude"
-      - pattern: os.path.expanduser("~/.claude")
+      - pattern: Path.home().joinpath(".claude")
+      - pattern: pathlib.Path.home().joinpath(".claude")
+      # os.path.expanduser forms (catches trailing slash + nested paths)
+      - patterns:
+          - pattern: os.path.expanduser($PATH)
+          - metavariable-regex:
+              metavariable: $PATH
+              regex: '^["''](~/\.claude.*|~)["'']$'
+      # Path() wrapper forms
+      - patterns:
+          - pattern: Path($PATH).expanduser()
+          - metavariable-regex:
+              metavariable: $PATH
+              regex: '^["'']~/\.claude.*["'']$'
+      # os.environ["HOME"] string concat
+      - patterns:
+          - pattern-either:
+              - pattern: os.environ["HOME"] + $TAIL
+              - pattern: os.environ.get("HOME") + $TAIL
+          - metavariable-regex:
+              metavariable: $TAIL
+              regex: '^["'']/\.claude.*["'']$'

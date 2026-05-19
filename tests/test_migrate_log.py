@@ -237,11 +237,11 @@ def test_migrate_file_captures_concurrent_tail(
     appended_record = _v1_record(session_id="late-write")
     appended_line = json.dumps(appended_record) + "\n"
 
-    def _injecting_copy2(src, dst, *args, **kwargs):  # type: ignore[no-untyped-def]
+    def _injecting_copy2(src, dst, *args, **kwargs):  # type: ignore[no-untyped-def]  # -- monkey-patch sig matches shutil.copy2
         # Real copy first — establishes the frozen snapshot.
         real_copy2(src, dst, *args, **kwargs)
         # Then simulate a concurrent guard writer appending to the original.
-        with open(src, "a", encoding="utf-8") as fh:  # noqa: PTH123
+        with open(src, "a", encoding="utf-8") as fh:  # noqa: PTH123 -- src is shutil.copy2 path (str), not pathlib
             fh.write(appended_line)
 
     monkeypatch.setattr(ml.shutil, "copy2", _injecting_copy2)

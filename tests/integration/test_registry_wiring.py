@@ -15,7 +15,9 @@ import sys
 
 import pytest
 
-from guard.registry import ALWAYS_DENY  # type: ignore[import-not-found]
+from guard.registry import (
+    ALWAYS_DENY,  # type: ignore[import-not-found]  # -- mypy run on src/ only
+)
 from tests._helpers import REPO_ROOT as REPO
 
 HOOK = REPO / "src" / "guard" / "hooks" / "bash_command_validator.py"

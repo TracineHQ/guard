@@ -600,3 +600,282 @@ def test_module_reload_clean() -> None:
     importlib.reload(guard.cli)
     assert hasattr(guard.cli, "main")
     assert callable(guard.cli.main)
+
+
+# === cmd_migrate_log ===
+
+
+def test_cmd_migrate_log_promotes_v0_and_v1_0_records(tmp_path: Path) -> None:
+    """Happy path: a mixed-shape log gets promoted to v1 in place."""
+    from guard.cli import cmd_migrate_log
+
+    log = tmp_path / "log.jsonl"
+    v0_record = {
+        "ts": "2026-04-01T00:00:00.000000+00:00",
+        "command": "git add -A",
+        "base_cmd": "git",
+        "decision": "deny",
+        "reason": "blocked",
+        "session_id": "sess-A",
+    }
+    v1_0_record = {
+        "schema_version": 1,
+        "timestamp": "2026-04-02T00:00:00.000000Z",
+        "hook_id": "guard.bash_command_validator",
+        "event": "PreToolUse",
+        "tool_name": "Bash",
+        "decision": "allow",
+        "reason": "ok",
+        "session_id": "sess-B",
+    }
+    v1_record = {
+        "v": 1,
+        "schema_version": 1,
+        "mode": "enforce",
+        "timestamp": "2026-04-03T00:00:00.000000Z",
+        "hook_id": "guard.bash_command_validator",
+        "event": "PreToolUse",
+        "tool_name": "Bash",
+        "decision": "pass",
+        "reason": "noop",
+        "session_id": "sess-C",
+    }
+    log.write_text(
+        json.dumps(v0_record)
+        + "\n"
+        + json.dumps(v1_0_record)
+        + "\n"
+        + json.dumps(v1_record)
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload, pretty = cmd_migrate_log(str(log), dry_run=False, backup=True)
+
+    assert payload["total_lines"] == 3
+    assert payload["already_v1"] == 1
+    assert payload["promoted_v1_0"] == 1
+    assert payload["promoted_v0"] == 1
+    assert payload["unrecognized"] == 0
+    assert payload["invalid_json"] == 0
+    assert payload["dry_run"] is False
+    assert payload["backup_path"] is not None
+    assert "migrated:" in pretty
+
+    # Every line is now v1
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 3
+    for line in lines:
+        rec = json.loads(line)
+        assert rec["v"] == 1
+        assert rec["mode"] == "enforce"
+
+
+def test_cmd_migrate_log_skips_malformed_lines(tmp_path: Path) -> None:
+    """Invalid JSON and unrecognized shapes are counted and preserved as-is."""
+    from guard.cli import cmd_migrate_log
+
+    log = tmp_path / "log.jsonl"
+    log.write_text(
+        "not-valid-json\n"
+        + json.dumps({"random": "shape", "no": "match"})
+        + "\n"
+        + "\n"  # blank line
+        + json.dumps(
+            {
+                "v": 1,
+                "schema_version": 1,
+                "mode": "enforce",
+                "timestamp": "2026-04-01T00:00:00.000000Z",
+                "hook_id": "guard.bash_command_validator",
+                "event": "PreToolUse",
+                "tool_name": "Bash",
+                "decision": "allow",
+                "reason": "ok",
+                "session_id": "s1",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload, _ = cmd_migrate_log(str(log), dry_run=False, backup=False)
+
+    assert payload["total_lines"] == 4
+    assert payload["already_v1"] == 1
+    assert payload["invalid_json"] == 1
+    assert payload["unrecognized"] == 1
+    assert payload["blank"] == 1
+    assert payload["backup_path"] is None
+    # samples_unrecognized captures the unrecognized shape (not the invalid JSON)
+    assert payload["samples_unrecognized"]
+
+
+def test_cmd_migrate_log_dry_run_does_not_rewrite(tmp_path: Path) -> None:
+    """``--dry-run`` reports counts without touching the file."""
+    from guard.cli import cmd_migrate_log
+
+    log = tmp_path / "log.jsonl"
+    v0_record = {
+        "ts": "2026-04-01T00:00:00.000000+00:00",
+        "command": "ls",
+        "base_cmd": "ls",
+        "decision": "passthrough",
+        "reason": "ok",
+        "session_id": "s1",
+    }
+    original = json.dumps(v0_record) + "\n"
+    log.write_text(original, encoding="utf-8")
+
+    payload, pretty = cmd_migrate_log(str(log), dry_run=True, backup=True)
+
+    assert payload["dry_run"] is True
+    assert payload["promoted_v0"] == 1
+    assert payload["backup_path"] is None
+    assert "would migrate" in pretty
+    # File untouched
+    assert log.read_text(encoding="utf-8") == original
+
+
+def test_main_migrate_log_dispatch(tmp_path: Path) -> None:
+    """The argparse dispatch routes ``guard migrate-log`` through ``cmd_migrate_log``."""
+    from guard import cli
+
+    log = tmp_path / "log.jsonl"
+    log.write_text(
+        json.dumps(
+            {
+                "v": 1,
+                "schema_version": 1,
+                "mode": "enforce",
+                "timestamp": "2026-04-01T00:00:00.000000Z",
+                "hook_id": "guard.bash_command_validator",
+                "event": "PreToolUse",
+                "tool_name": "Bash",
+                "decision": "allow",
+                "reason": "ok",
+                "session_id": "s1",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rc = cli.main(["--json", "migrate-log", "--path", str(log), "--dry-run"])
+    assert rc == 0
+
+
+# === _dispatch_allowlist branches ===
+
+
+def test_dispatch_allowlist_disable_rule_via_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``guard allowlist disable-rule <id>`` writes the rule to the project allowlist."""
+    from guard import cli
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "global" / ".claude" / "guard"))
+
+    rc = cli.main(["--json", "allowlist", "disable-rule", "bash.disk_destruction", "--project"])
+    assert rc == 0
+    doc = json.loads((project / ".claude" / "guard" / "allowlist.json").read_text(encoding="utf-8"))
+    assert doc["disable_rules"] == ["bash.disk_destruction"]
+
+
+def test_dispatch_allowlist_enable_rule_via_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``guard allowlist enable-rule <id>`` removes the rule from the project allowlist."""
+    from guard import cli
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "global" / ".claude" / "guard"))
+
+    # Seed: disable, then enable.
+    cli.main(["--json", "allowlist", "disable-rule", "bash.disk_destruction", "--project"])
+    rc = cli.main(["--json", "allowlist", "enable-rule", "bash.disk_destruction", "--project"])
+    assert rc == 0
+    doc = json.loads((project / ".claude" / "guard" / "allowlist.json").read_text(encoding="utf-8"))
+    assert doc["disable_rules"] == []
+
+
+def test_dispatch_allowlist_allow_command_via_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``guard allowlist allow-command ...`` writes an entry through the dispatcher."""
+    from guard import cli
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "global" / ".claude" / "guard"))
+
+    rc = cli.main(
+        [
+            "--json",
+            "allowlist",
+            "allow-command",
+            "--rule",
+            "bash.disk_destruction",
+            "--command",
+            "dd if=/dev/zero of=/tmp/x.qcow2 bs=1M count=1",
+            "--reason",
+            "VM image fixture",
+            "--project",
+        ]
+    )
+    assert rc == 0
+    doc = json.loads((project / ".claude" / "guard" / "allowlist.json").read_text(encoding="utf-8"))
+    assert doc["allow_commands"][0]["rule"] == "bash.disk_destruction"
+
+
+def test_dispatch_allowlist_remove_command_via_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``guard allowlist remove-command ...`` removes an entry through the dispatcher."""
+    from guard import cli
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "global" / ".claude" / "guard"))
+
+    cli.main(
+        [
+            "--json",
+            "allowlist",
+            "allow-command",
+            "--rule",
+            "r",
+            "--command",
+            "c",
+            "--reason",
+            "x",
+            "--project",
+        ]
+    )
+    rc = cli.main(
+        ["--json", "allowlist", "remove-command", "--rule", "r", "--command", "c", "--project"]
+    )
+    assert rc == 0
+    doc = json.loads((project / ".claude" / "guard" / "allowlist.json").read_text(encoding="utf-8"))
+    assert doc["allow_commands"] == []
+
+
+def test_dispatch_allowlist_no_subcommand_shows_help(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``guard allowlist`` (no sub) falls through to the help branch in _dispatch_allowlist."""
+    from guard import cli
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "global" / ".claude" / "guard"))
+
+    with pytest.raises(SystemExit):
+        cli.main(["allowlist"])

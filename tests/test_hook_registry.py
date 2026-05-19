@@ -175,5 +175,5 @@ def test_adapter_accepts_normalised_payload(spec: object) -> None:
         # Don't care about the return value — only that no exception escapes.
         # Mypy can't narrow `spec` to HookSpec via parametrize; the runtime
         # check is sufficient here.
-        result = spec.decide(tool_name, tool_input)  # type: ignore[attr-defined]
+        result = spec.decide(tool_name, tool_input)  # type: ignore[attr-defined]  # -- parametrize erases HookSpec narrowing
         assert result is None or isinstance(result, dict)

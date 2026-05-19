@@ -25,11 +25,12 @@ concatenated. Project entries are listed first so they're easy to spot in
 ``guard allowlist list`` output, but match priority is irrelevant: any
 rule on either list disables, any matching command on either list allows.
 
-Files are parsed with ``json.loads``; malformed top-level shape raises
-``AllowlistError``. Individual entries that fail validation are dropped
-with a warning emitted to stderr — the goal is to keep guard running even
-if a user's allowlist is partially broken (the worst-case fallback is
-"matcher fires", which is the safe direction).
+Files are parsed with ``json.loads``; malformed JSON or non-object top-level
+shape is logged as a stderr warning and the file is ignored. Individual
+entries that fail validation are dropped with a warning emitted to stderr —
+the goal is to keep guard running even if a user's allowlist is partially
+broken (the worst-case fallback is "matcher fires", which is the safe
+direction).
 """
 
 # SPDX-License-Identifier: Apache-2.0
@@ -83,6 +84,7 @@ _BASH_MATCHER_RULE_IDS: tuple[str, ...] = (
     "bash.gem_remote_install",
     "bash.gh_api_destructive",
     "bash.git_config_injection",
+    "bash.git_force_push",
     "bash.git_force_refspec",
     "bash.git_submodule_add",
     "bash.git_worktree_add",
@@ -114,25 +116,22 @@ _BASH_MATCHER_RULE_IDS: tuple[str, ...] = (
 
 
 def _build_known_rule_ids() -> tuple[str, ...]:
-    """Bash matcher ids + whole-hook disable ids, in stable display order."""
+    """Bash matcher ids + whole-hook disable ids, in registration order."""
     # Local import to avoid a load-order cycle: hooks import this module for
     # ``hook_bypass_reason`` / ``load_allowlist``; the registry doesn't,
     # but importing it at module load would still surface as
-    # ``allowlist -> hook_registry -> guard.hooks.<x>`` if anyone ever
-    # extended the registry to do eager imports.
-    from guard.hooks._registry import disable_hook_ids  # noqa: PLC0415
+    # ``allowlist -> guard.hooks._registry -> guard.hooks.<x>`` if anyone
+    # ever extended the registry to do eager imports.
+    from guard.hooks._registry import disable_hook_ids  # noqa: PLC0415 -- lazy: avoid cycle
 
     return _BASH_MATCHER_RULE_IDS + disable_hook_ids()
 
 
 # All known rule_ids users can put on ``disable_rules`` / ``allow_commands.rule``.
 # Sourced from the bash matcher list above plus the registry's whole-hook
-# disable ids. Sorted for deterministic CLI output.
+# disable ids. Order is bash-matcher declaration order followed by
+# registry-order whole-hook ids — stable across runs given the same source.
 KNOWN_RULE_IDS: tuple[str, ...] = _build_known_rule_ids()
-
-
-class AllowlistError(ValueError):
-    """Raised when an allowlist file is structurally invalid (not a JSON object)."""
 
 
 @dataclass(frozen=True)

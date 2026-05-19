@@ -118,8 +118,8 @@ naive prefix matching would let attacker-controlled flags re-exec code.
 ## High-risk ASK commands
 
 These are not denied but are surfaced for human confirmation. In strict mode
-(`permission_mode` is `dontAsk` or `bypassPermissions`) they are denied with
-a queued-for-session-end message.
+(`permission_mode` is `auto`, `dontAsk`, or `bypassPermissions`) they are
+denied with a queued-for-session-end message.
 
 ### Filesystem writes
 

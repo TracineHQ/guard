@@ -307,7 +307,7 @@ class TestNegative:
         assert decide("WebSearch", {"query": "how to deploy"}) is None
 
     def test_non_dict_tool_input_passes(self):
-        assert decide("Read", "not a dict") is None  # type: ignore[arg-type]
+        assert decide("Read", "not a dict") is None  # type: ignore[arg-type]  # -- intentional bad input
 
 
 # --- Subprocess integration ---

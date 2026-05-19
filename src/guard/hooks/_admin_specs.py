@@ -25,8 +25,11 @@ What does NOT belong here:
 
 from __future__ import annotations
 
-from collections.abc import Callable  # noqa: TC003
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 RULE_ID = "bash.admin_default_deny"
 

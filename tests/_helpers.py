@@ -57,7 +57,7 @@ def decision_from_stdout(stdout: str) -> str | None:
     return envelope.get("permissionDecision") if isinstance(envelope, dict) else None
 
 
-def run_hook(  # noqa: PLR0913 - kw-only flags, all optional and orthogonal
+def run_hook(  # noqa: PLR0913 -- kw-only flags, all optional and orthogonal
     hook_name: str,
     command: str,
     *,

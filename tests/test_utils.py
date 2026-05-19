@@ -9,13 +9,11 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from unittest import mock
 
 import pytest
 
 from guard._utils import (
     GUARD_DECISIONS_PATH,
-    _env_int,
     all_paths_in,
     append_jsonl,
     emit_pretooluse_decision,
@@ -291,9 +289,6 @@ def test_emit_pretooluse_decision_ask() -> None:
     assert hso["permissionDecisionReason"] == "confirm edit to protected file"
 
 
-# === _env_int: malformed/unset handling ===
-
-
 def test_read_permission_mode_default_when_missing() -> None:
     assert read_permission_mode({}) == "default"
     assert read_permission_mode(None) == "default"
@@ -331,22 +326,6 @@ def test_is_strict_mode_false_for_attended_modes(mode: str) -> None:
 def test_is_strict_mode_false_when_missing() -> None:
     assert is_strict_mode({}) is False
     assert is_strict_mode(None) is False
-
-
-def test_env_int_unset_returns_default() -> None:
-    with mock.patch.dict(os.environ, {}, clear=False):
-        os.environ.pop("FAKE_VAR_X", None)
-        assert _env_int("FAKE_VAR_X", 42) == 42
-
-
-def test_env_int_valid_returns_parsed() -> None:
-    with mock.patch.dict(os.environ, {"FAKE_VAR_X": "7"}):
-        assert _env_int("FAKE_VAR_X", 42) == 7
-
-
-def test_env_int_malformed_falls_back_to_default() -> None:
-    with mock.patch.dict(os.environ, {"FAKE_VAR_X": "not-a-number"}):
-        assert _env_int("FAKE_VAR_X", 42) == 42
 
 
 # === log_decision: spec-compliant JSONL writer ===
@@ -580,6 +559,32 @@ def test_append_jsonl_refuses_to_follow_symlink(tmp_path: Path) -> None:
     assert target.read_text() == "untouched"
 
 
+def test_append_jsonl_silently_swallows_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing ``os.write`` (e.g. ENOSPC) must not propagate or partially-write.
+
+    Per ``docs/JSONL_FORMAT.md`` §5: the writer fails silently on any
+    ``OSError`` — guard's "guardrails not walls" contract means a logging
+    failure must never block legitimate work.
+    """
+    jsonl = tmp_path / "decisions.jsonl"
+
+    def fake_write(_fd: int, _buf: bytes) -> int:
+        msg = "disk full"
+        raise OSError(msg)
+
+    monkeypatch.setattr("guard._utils.os.write", fake_write)
+
+    # Must not raise.
+    result = append_jsonl(jsonl, {"schema_version": 1, "decision": "allow"})
+
+    assert result is None
+    # The file may have been created (O_CREAT) but no record bytes were written.
+    if jsonl.exists():
+        assert jsonl.read_bytes() == b""
+
+
 def test_append_jsonl_concurrent_writes_all_parse(tmp_path: Path) -> None:
     """50-way concurrent writes must all produce valid JSON lines."""
     from concurrent.futures import ThreadPoolExecutor
@@ -669,3 +674,462 @@ def test_all_paths_in_dedupes():
 def test_all_paths_in_ignores_pure_strings_without_paths():
     paths = list(all_paths_in({"text": "just some text no paths here"}))
     assert paths == []
+
+
+def test_all_paths_in_skips_empty_strings():
+    """Empty strings in the payload are skipped before regex search."""
+    paths = list(all_paths_in({"empty": "", "real": "/etc/foo"}))
+    assert paths == ["/etc/foo"]
+
+
+# === In-process coverage for paths that subprocess tests skip ===
+#
+# parse_hook_input / make_decision / safe_main / log_internal_error are
+# covered by subprocess tests above for end-to-end behavior, but coverage.py
+# attributes those lines to the subprocess (which is dropped). The tests
+# below exercise the same code paths inside the pytest process so coverage
+# can see them.
+
+
+def test_token_basename_returns_basename():
+    from guard._utils import token_basename
+
+    assert token_basename("/usr/bin/python3") == "python3"
+    assert token_basename("python3") == "python3"
+    assert token_basename("./foo/bar") == "bar"
+
+
+def test_make_decision_in_process_shape():
+    from guard._utils import make_decision
+
+    out = json.loads(make_decision("deny", "no"))
+    hso = out["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PreToolUse"
+    assert hso["permissionDecision"] == "deny"
+    assert hso["permissionDecisionReason"] == "no"
+
+
+def test_redact_secrets_empty_string_short_circuits():
+    """Empty input returns immediately without iterating the regex catalog."""
+    from guard._utils import _redact_secrets
+
+    assert _redact_secrets("") == ""
+
+
+def test_log_decision_writes_permission_mode_and_extra(guard_decisions_jsonl: Path) -> None:
+    """The optional ``permission_mode`` and ``extra`` merge paths get written verbatim."""
+    log_decision(
+        hook_id="guard.test",
+        event="PreToolUse",
+        tool_name="Bash",
+        decision="deny",
+        reason="x",
+        permission_mode="dontAsk",
+        extra={"unknown_flags": ["--foo"], "matched_rule": "R-1"},
+    )
+    record = json.loads(guard_decisions_jsonl.read_text().splitlines()[-1])
+    assert record["permission_mode"] == "dontAsk"
+    assert record["unknown_flags"] == ["--foo"]
+    assert record["matched_rule"] == "R-1"
+
+
+def test_log_decision_falsy_extra_is_not_merged(guard_decisions_jsonl: Path) -> None:
+    """Passing an empty ``extra`` dict must not crash and must not pollute the record."""
+    log_decision(
+        hook_id="guard.test",
+        event="PreToolUse",
+        tool_name="Bash",
+        decision="allow",
+        reason="ok",
+        extra={},
+    )
+    record = json.loads(guard_decisions_jsonl.read_text().splitlines()[-1])
+    # All canonical fields present, no spurious keys from extra={}.
+    assert record["decision"] == "allow"
+
+
+def test_log_internal_error_writes_hashed_traceback(guard_decisions_jsonl: Path) -> None:
+    """``log_internal_error`` emits a structured record with a sha256 traceback hash."""
+    from guard._utils import log_internal_error
+
+    try:
+        msg = "boom"
+        raise RuntimeError(msg)  # noqa: TRY301 -- intentional: synthesise an exc to capture
+    except RuntimeError as exc:
+        log_internal_error(exc, session_id="sess-99")
+
+    record = json.loads(guard_decisions_jsonl.read_text().splitlines()[-1])
+    assert record["type"] == "internal_error"
+    assert record["exc_class"] == "RuntimeError"
+    assert record["exc_msg"] == "boom"
+    assert record["session_id"] == "sess-99"
+    assert record["traceback_hash"].startswith("sha256:")
+    # Hashed 16 hex chars + ``sha256:`` prefix.
+    assert len(record["traceback_hash"]) == len("sha256:") + 16
+
+
+def test_log_internal_error_redacts_secret_in_message(guard_decisions_jsonl: Path) -> None:
+    """If the exception message carries a credential shape it must be redacted."""
+    from guard._utils import log_internal_error
+
+    secret = "ghp_" + "0" * 36  # pragma: allowlist secret
+    try:
+        msg = f"crashed with token {secret}"
+        raise RuntimeError(msg)  # noqa: TRY301 -- intentional: synthesise an exc to capture
+    except RuntimeError as exc:
+        log_internal_error(exc)
+
+    record = json.loads(guard_decisions_jsonl.read_text().splitlines()[-1])
+    assert secret not in record["exc_msg"]
+    assert "[REDACTED-GITHUB-TOKEN]" in record["exc_msg"]
+
+
+def test_parse_hook_input_oversize_exits_two(monkeypatch: pytest.MonkeyPatch) -> None:
+    """stdin > 1 MiB triggers ``sys.exit(2)`` with a stderr note."""
+    from io import BytesIO
+
+    from guard import _utils
+
+    oversize = b"x" * (2 << 20)
+
+    class FakeStdin:
+        buffer = BytesIO(oversize)
+
+    monkeypatch.setattr(_utils.sys, "stdin", FakeStdin())
+    with pytest.raises(SystemExit) as excinfo:
+        _utils.parse_hook_input()
+    assert excinfo.value.code == 2
+
+
+def test_parse_hook_input_oserror_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An ``OSError`` from the stdin read collapses to ``None`` (fail-open)."""
+    from guard import _utils
+
+    class BrokenBuffer:
+        def read(self, _n: int) -> bytes:
+            msg = "stdin gone"
+            raise OSError(msg)
+
+    class FakeStdin:
+        buffer = BrokenBuffer()
+
+    monkeypatch.setattr(_utils.sys, "stdin", FakeStdin())
+    assert _utils.parse_hook_input() is None
+
+
+def test_parse_hook_input_non_dict_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A valid JSON top-level array (not a dict) collapses to ``None``."""
+    from io import BytesIO
+
+    from guard import _utils
+
+    class FakeStdin:
+        buffer = BytesIO(b'["not-a-dict"]')
+
+    monkeypatch.setattr(_utils.sys, "stdin", FakeStdin())
+    assert _utils.parse_hook_input() is None
+
+
+def test_parse_hook_input_valid_dict(monkeypatch: pytest.MonkeyPatch) -> None:
+    from io import BytesIO
+
+    from guard import _utils
+
+    class FakeStdin:
+        buffer = BytesIO(b'{"tool_name": "Bash"}')
+
+    monkeypatch.setattr(_utils.sys, "stdin", FakeStdin())
+    assert _utils.parse_hook_input() == {"tool_name": "Bash"}
+
+
+def test_parse_hook_input_malformed_json_exits_two(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Malformed JSON triggers ``sys.exit(2)`` with a stderr note (fail-closed)."""
+    from io import BytesIO
+
+    from guard import _utils
+
+    class FakeStdin:
+        buffer = BytesIO(b"not-json{{{")
+
+    monkeypatch.setattr(_utils.sys, "stdin", FakeStdin())
+    with pytest.raises(SystemExit) as excinfo:
+        _utils.parse_hook_input()
+    assert excinfo.value.code == 2
+
+
+def test_safe_main_in_process_passthrough_on_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    guard_decisions_jsonl: Path,
+) -> None:
+    """``safe_main`` catches generic exceptions, logs an internal-error record, and returns."""
+    from io import BytesIO
+
+    from guard import _utils
+
+    class FakeStdin:
+        buffer = BytesIO(b'{"tool_name": "Bash", "session_id": "abc"}')
+
+    monkeypatch.setattr(_utils.sys, "stdin", FakeStdin())
+
+    def crashing_hook(_payload: dict) -> None:
+        msg = "crashed"
+        raise RuntimeError(msg)
+
+    # Must not raise.
+    _utils.safe_main(crashing_hook)
+
+    # And it must have written an internal_error record with the session_id.
+    record = json.loads(guard_decisions_jsonl.read_text().splitlines()[-1])
+    assert record["type"] == "internal_error"
+    assert record["session_id"] == "abc"
+
+
+def test_safe_main_debug_branch_emits_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With ``GUARD_DEBUG=1`` set, the crash branch writes the traceback to stderr."""
+    from io import BytesIO
+
+    from guard import _utils
+
+    monkeypatch.setenv("GUARD_DEBUG", "1")
+
+    class FakeStdin:
+        buffer = BytesIO(b'{"tool_name": "Bash"}')
+
+    monkeypatch.setattr(_utils.sys, "stdin", FakeStdin())
+
+    def crashing_hook(_payload: dict) -> None:
+        msg = "boom-debug"
+        raise RuntimeError(msg)
+
+    _utils.safe_main(crashing_hook)
+    err = capsys.readouterr().err
+    assert "hook crashed" in err
+    assert "boom-debug" in err
+
+
+def test_safe_main_reraises_systemexit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``SystemExit`` from the hook function propagates, not swallowed."""
+    from io import BytesIO
+
+    from guard import _utils
+
+    class FakeStdin:
+        buffer = BytesIO(b'{"tool_name": "Bash"}')
+
+    monkeypatch.setattr(_utils.sys, "stdin", FakeStdin())
+
+    def denying_hook(_payload: dict) -> None:
+        raise SystemExit(2)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _utils.safe_main(denying_hook)
+    assert excinfo.value.code == 2
+
+
+def test_safe_main_returns_when_payload_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty stdin yields ``None`` payload; the hook fn is not called."""
+    from io import BytesIO
+
+    from guard import _utils
+
+    class FakeStdin:
+        buffer = BytesIO(b"")
+
+    monkeypatch.setattr(_utils.sys, "stdin", FakeStdin())
+
+    called = []
+
+    def hook_fn(_payload: dict) -> None:
+        called.append(True)
+
+    _utils.safe_main(hook_fn)
+    assert called == []
+
+
+# === CLAUDE_AUTONOMOUS deprecation fallback (env-var, one-cycle window) ===
+
+
+def test_read_permission_mode_env_fallback_emits_warning(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Legacy ``CLAUDE_AUTONOMOUS=1`` escalates to ``dontAsk`` + writes a deprecation note."""
+    monkeypatch.setenv("CLAUDE_AUTONOMOUS", "1")
+    # Point sentinel dir at fresh tmp_path so it doesn't pre-exist.
+    monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "guard-home-warn"))
+    from guard import _utils
+
+    _utils._CLAUDE_AUTONOMOUS_WARNED["once"] = False  # noqa: SLF001 -- reset warn-once flag
+
+    mode = _utils.read_permission_mode({})
+    assert mode == "dontAsk"
+    err = capsys.readouterr().err
+    assert "CLAUDE_AUTONOMOUS is deprecated" in err
+
+    # Sentinel file gets created so subsequent invocations skip the stderr write.
+    sentinel = tmp_path / "guard-home-warn" / ".autonomous-warned"
+    assert sentinel.exists()
+
+
+def test_read_permission_mode_env_fallback_silent_after_sentinel(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """When the sentinel exists, the warning is suppressed."""
+    monkeypatch.setenv("CLAUDE_AUTONOMOUS", "yes")
+    home = tmp_path / "guard-home-silent"
+    monkeypatch.setenv("GUARD_DATA_DIR", str(home))
+    home.mkdir(parents=True)
+    (home / ".autonomous-warned").touch()
+
+    from guard import _utils
+
+    _utils._CLAUDE_AUTONOMOUS_WARNED["once"] = False  # noqa: SLF001 -- reset warn-once flag
+
+    mode = _utils.read_permission_mode({})
+    assert mode == "dontAsk"
+    assert "deprecated" not in capsys.readouterr().err
+
+
+def test_emit_autonomous_deprecation_warning_short_circuits_after_first_call(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Once the in-process ``_CLAUDE_AUTONOMOUS_WARNED`` flag is set, the function returns early."""
+    from guard import _utils
+
+    _utils._CLAUDE_AUTONOMOUS_WARNED["once"] = True  # noqa: SLF001 -- set warn-once flag
+    _utils._emit_autonomous_deprecation_warning()  # noqa: SLF001 -- module-private
+    assert capsys.readouterr().err == ""
+
+
+def test_read_permission_mode_env_fallback_oserror_falls_back_to_in_proc_flag(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``Path.exists`` raising ``OSError`` is suppressed; warning still fires once."""
+    monkeypatch.setenv("CLAUDE_AUTONOMOUS", "true")
+    from guard import _utils
+
+    _utils._CLAUDE_AUTONOMOUS_WARNED["once"] = False  # noqa: SLF001 -- reset warn-once flag
+
+    real_exists = Path.exists
+
+    def boom(self: Path) -> bool:
+        if self.name == ".autonomous-warned":
+            msg = "denied"
+            raise OSError(msg)
+        return real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", boom)
+
+    mode = _utils.read_permission_mode({})
+    assert mode == "dontAsk"
+    assert "deprecated" in capsys.readouterr().err
+
+
+# === _shrink_to_envelope corner cases ===
+
+
+def test_shrink_to_envelope_handles_missing_truncatable_field() -> None:
+    """When ``command_excerpt`` is absent, only ``reason`` is shrunk."""
+    from guard._utils import _shrink_to_envelope
+
+    entry = {
+        "schema_version": 1,
+        "decision": "deny",
+        "hook_id": "guard.x",
+        "timestamp": "t",
+        "reason": "r" * 6000,
+    }
+    line = _shrink_to_envelope(entry)
+    assert len(line) <= 4096
+    parsed = json.loads(line)
+    assert "command_excerpt" not in parsed
+    assert "…[truncated]" in parsed["reason"]
+
+
+def test_shrink_to_envelope_skips_non_string_field() -> None:
+    """A non-string ``reason`` is skipped (continue branch), but the line still must fit."""
+    from guard._utils import _shrink_to_envelope
+
+    entry = {
+        "schema_version": 1,
+        "decision": "deny",
+        "hook_id": "guard.x",
+        "timestamp": "t",
+        "reason": 12345,  # not a string -> skip shrink for this field
+        "command_excerpt": "c" * 6000,
+    }
+    line = _shrink_to_envelope(entry)
+    assert len(line) <= 4096
+    parsed = json.loads(line)
+    assert parsed["reason"] == 12345
+
+
+def test_shrink_to_envelope_skips_empty_string_field() -> None:
+    """An empty truncatable field is skipped without iteration.
+
+    Force the loop to actually reach ``reason`` by leaving ``command_excerpt``
+    empty (so the binary-search-shrink branch doesn't fit the record on the
+    first iteration). Hits the ``if not original: continue`` skip on the
+    second iteration when ``reason`` is also empty isn't possible because
+    that wouldn't overflow; the realistic shape is empty ``command_excerpt``
+    + huge ``reason``.
+    """
+    from guard._utils import _shrink_to_envelope
+
+    entry = {
+        "schema_version": 1,
+        "decision": "deny",
+        "hook_id": "guard.x",
+        "timestamp": "t",
+        "reason": "r" * 6000,
+        "command_excerpt": "",
+    }
+    line = _shrink_to_envelope(entry)
+    assert len(line) <= 4096
+    parsed = json.loads(line)
+    assert parsed["command_excerpt"] == ""
+    assert "…[truncated]" in parsed["reason"]
+
+
+def test_shrink_to_envelope_falls_back_to_minimal_record() -> None:
+    """When non-truncatable fields alone overflow, the minimal-record path runs.
+
+    Forced by giving ``hook_id`` a huge non-truncatable value: after both
+    truncatable fields collapse to bare markers the line still exceeds 4 KiB,
+    triggering the last-resort minimal record.
+    """
+    from guard._utils import _shrink_to_envelope
+
+    entry = {
+        "v": 1,
+        "schema_version": 1,
+        "mode": "enforce",
+        "timestamp": "2026-01-01T00:00:00.000000Z",
+        "hook_id": "g." + "x" * 5000,  # huge non-truncatable
+        "decision": "deny",
+        "reason": "r" * 10,
+        "command_excerpt": "c" * 10,
+    }
+    line = _shrink_to_envelope(entry)
+    # The minimal record is small and parseable.
+    parsed = json.loads(line)
+    assert parsed["decision"] == "deny"
+    assert parsed["reason"] == "…[truncated]"
+    # The huge hook_id is preserved verbatim from the source entry — minimal
+    # record carries `hook_id` through unchanged.
+    assert parsed["hook_id"].startswith("g.xxx")
+
+
+def test_log_debug_writes_when_env_set(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``_log_debug`` is silent unless ``GUARD_DEBUG=1``."""
+    from guard._utils import _log_debug
+
+    _log_debug("silent message")
+    assert capsys.readouterr().err == ""
+
+    monkeypatch.setenv("GUARD_DEBUG", "1")
+    _log_debug("loud message")
+    assert "loud message" in capsys.readouterr().err

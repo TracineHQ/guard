@@ -28,6 +28,10 @@ DEFAULT_DECISIONS_PATH = str(Path("~/.claude/guard-decisions.jsonl").expanduser(
 
 INSTALL_HINT = "No hooks wired up - run `/plugin install guard@TracineHQ` in Claude Code."
 
+# Display-only cap for the recent-decisions tail. On-disk records are bounded by
+# the schema-v1 limits in ``_utils``; this trims to ~one terminal line.
+_REASON_DISPLAY_TRUNC = 80
+
 
 def _hooks_dir() -> Path:
     """Return the directory containing shipped hook modules."""
@@ -171,12 +175,12 @@ def _format_recent_decisions(decisions_path: str, limit: int = 3) -> list[str]:
         try:
             rec = json.loads(raw)
         except (json.JSONDecodeError, ValueError):
-            lines.append(f"  (unparsable line) {raw.strip()[:80]}")
+            lines.append(f"  (unparsable line) {raw.strip()[:_REASON_DISPLAY_TRUNC]}")
             continue
         ts = str(rec.get("timestamp", "?"))
         decision = str(rec.get("decision", "?"))
         hook_id = str(rec.get("hook_id", "?"))
-        reason = str(rec.get("reason", ""))[:80]
+        reason = str(rec.get("reason", ""))[:_REASON_DISPLAY_TRUNC]
         lines.append(f"  {ts} {decision} {hook_id}: {reason}")
     return lines
 

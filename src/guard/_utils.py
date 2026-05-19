@@ -70,17 +70,6 @@ GUARD_STRICT_DENY_QUEUE_PATH: str = os.environ.get(
 )
 
 
-def _env_int(name: str, default: int) -> int:
-    """Parse int from environment variable, falling back to default on miss/invalid."""
-    val = os.environ.get(name)
-    if val is None:
-        return default
-    try:
-        return int(val)
-    except ValueError:
-        return default
-
-
 def _log_debug(msg: str) -> None:
     """Emit a debug line to stderr when ``GUARD_DEBUG=1``."""
     if os.environ.get("GUARD_DEBUG") == "1":
@@ -179,15 +168,6 @@ def is_strict_mode(hook_input: dict[str, Any] | None) -> bool:
     ``acceptEdits``) stay in advisory evaluation.
     """
     return read_permission_mode(hook_input) in STRICT_PERMISSION_MODES
-
-
-# Loop detection settings
-LOOP_DETECTION_THRESHOLD = _env_int("GUARD_LOOP_THRESHOLD", 3)
-LOOP_DETECTION_WINDOW_MINUTES = _env_int("GUARD_LOOP_WINDOW", 10)
-
-# Context budget settings
-CONTEXT_BUDGET_WARN_BYTES = _env_int("GUARD_CONTEXT_WARN", 500_000)
-CONTEXT_BUDGET_HARD_BYTES = _env_int("GUARD_CONTEXT_HARD", 1_000_000)
 
 
 # === Shared Hook Utilities ===
@@ -497,8 +477,8 @@ def log_internal_error(exc: BaseException, *, session_id: str = "") -> None:
     crashes mid-credential-handling may surface the value in its exception
     message — and this log is the exact channel the redactor catalog seals.
     """
-    import hashlib  # noqa: PLC0415
-    import traceback  # noqa: PLC0415
+    import hashlib  # noqa: PLC0415 -- lazy: error-path only
+    import traceback  # noqa: PLC0415 -- lazy: error-path only
 
     tb_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     tb_hash = "sha256:" + hashlib.sha256(tb_text.encode("utf-8")).hexdigest()[:16]
@@ -684,7 +664,9 @@ def safe_main(hook_fn: Callable[[dict[str, Any]], None]) -> None:
 
     Reads stdin JSON, calls ``hook_fn(payload)``. If stdin is invalid or
     ``hook_fn`` raises, exits silently (passthrough). Hooks should never
-    block on errors.
+    block on errors. When ``hook_fn`` raises, an ``internal_error`` record
+    is appended to the JSONL log via ``log_internal_error`` before the
+    silent passthrough so the crash is observable.
 
     Args:
         hook_fn: Callable that takes a dict payload. May call

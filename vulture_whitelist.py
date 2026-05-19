@@ -48,15 +48,10 @@ subagent_scope.hook
 _utils.safe_main
 
 # --- Public _utils constants ---
-# These are env-driven config knobs documented in docs/output-format.md and
-# guarded by tests/test_no_dead_exports.py. They are read inside _utils itself
-# (e.g. via append_jsonl / log_decision) and by hook modules indirectly through
-# the helpers that close over them — vulture's static pass cannot follow that.
+# Env-driven config knobs read at module load. `GUARD_HOME` is referenced
+# indirectly through helpers (e.g. `global_allowlist_path()`) and by tests
+# that monkey-patch the env — vulture's static pass cannot follow that.
 _utils.GUARD_HOME
-_utils.LOOP_DETECTION_THRESHOLD
-_utils.LOOP_DETECTION_WINDOW_MINUTES
-_utils.CONTEXT_BUDGET_WARN_BYTES
-_utils.CONTEXT_BUDGET_HARD_BYTES
 
 # --- Public decision builder ---
 # `make_decision()` is exercised only by subprocess-based tests in
