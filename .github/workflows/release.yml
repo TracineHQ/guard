@@ -211,15 +211,21 @@ jobs:
           assert d['hookSpecificOutput']['permissionDecision'] == 'deny', d
           print('hook deny OK')
           "
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          enable-cache: false
       - name: Run full pytest suite against the TestPyPI-installed package
         shell: bash
         run: |
           set -eux
-          # Test deps installed unpinned here (release-time validation).
-          # The package under test is hash-pinned; pytest itself is just
-          # the harness — drift would only affect failure messages, not
-          # the bytes being validated.
-          /tmp/guard-smoke/bin/pip install pytest pytest-cov pytest-xdist
+          # Install test-harness deps from pyproject's [dev] extras, which
+          # ci.yml's pip-audit job validates --strict against CVEs on every
+          # PR. ``--no-emit-project`` keeps the in-tree tracine-guard out of
+          # the requirements file so we don't shadow the TestPyPI-installed
+          # wheel with the source tree.
+          uv export --format requirements-txt --no-hashes --no-emit-project \
+            --extra dev > /tmp/smoke-deps.txt
+          /tmp/guard-smoke/bin/pip install -r /tmp/smoke-deps.txt
 
           # Confirm `import guard` resolves to the TestPyPI-installed
           # package, not the in-tree src/. If src/ leaked into sys.path
