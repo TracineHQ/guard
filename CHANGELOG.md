@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-05-19
+
 ### Security
 
 - `bash.git_force_push`: closes a positional force-push bypass. Literal-prefix
