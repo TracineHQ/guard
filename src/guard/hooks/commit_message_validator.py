@@ -529,7 +529,7 @@ def _ai_email_in_git_config(cwd: str | None) -> str | None:
     """
     try:
         proc = subprocess.run(  # nosec B603 B607 -- static argv, PATH-resolved git matches user shell
-            ["git", "config", "user.email"],  # noqa: S607
+            ["git", "config", "user.email"],  # noqa: S607 -- PATH-resolved git matches user shell
             cwd=cwd,
             capture_output=True,
             text=True,

@@ -3,6 +3,8 @@
 Subcommands:
 
 - ``guard status`` — effective config, log location, line count, last record.
+- ``guard healthcheck`` — synthesize known-deny PreToolUse payloads and
+  assert guard responds with ``deny`` plus the expected rule_id.
 - ``guard noisy [--since 7d] [--limit 10]`` — top N hit rules grouped by
   ``(hook_id, decision)``.
 - ``guard silent [--since 30d]`` — rules that haven't fired in N days,
@@ -10,13 +12,17 @@ Subcommands:
   seen in the log.
 - ``guard trace <session-id>`` — every record for a single session,
   chronological.
-- ``guard test "<command>"`` — invokes ``decide()`` on each relevant hook
-  in-process; no log access, no subprocess.
+- ``guard test "<command>" ...`` — invokes ``decide()`` on each relevant
+  hook in-process; no log access, no subprocess. Accepts multiple commands.
 - ``guard diff`` — print the effective runtime config (registered hook ids,
   decisions-log path, schema version, mode). Today this is built-in
   defaults only; the 3-way user/project/builtin merge view lands in a
   future task. The current command is useful for "what does guard see
   right now" debugging.
+- ``guard allowlist <list|rules|disable-rule|enable-rule|allow-command|remove-command>``
+  — manage the project + global allowlist (``disable_rules`` /
+  ``allow_commands``).
+- ``guard migrate-log`` — one-shot rewrite of the JSONL log to schema v1.
 
 Output: structured JSON by default; pretty-printed when stdout is a TTY.
 """
@@ -58,6 +64,12 @@ if TYPE_CHECKING:
 # === since-parser ===
 
 _SINCE_RE = re.compile(r"^\s*(\d+)\s*([dhm])\s*$")
+
+# Truncate ``reason`` / ``command_excerpt`` to ~one terminal line when rendering
+# pretty `guard top` / `guard tail` / `guard test` output. Records on disk are
+# already capped at the schema-v1 limits (see ``_utils._REASON_MAX_CHARS``); this
+# is a display-only cap.
+_REASON_DISPLAY_TRUNC = 80
 
 
 def parse_since(text: str) -> timedelta:
@@ -284,7 +296,7 @@ def _settings_reference_guard(home: Path) -> bool:
     ids come from the registry so a user who enables only a subset of
     hooks (e.g. just ``guard.protected_files``) still registers as wired.
     """
-    from guard.hooks._registry import all_hook_ids  # noqa: PLC0415
+    from guard.hooks._registry import all_hook_ids  # noqa: PLC0415 -- lazy: defer registry import
 
     hook_ids = all_hook_ids()
     for name in ("settings.json", "settings.local.json"):
@@ -513,7 +525,9 @@ def cmd_noisy(
         counts[key] += 1
         total += 1
         if key not in samples:
-            samples[key] = str(rec.get("command_excerpt") or rec.get("reason", ""))[:80]
+            samples[key] = str(rec.get("command_excerpt") or rec.get("reason", ""))[
+                :_REASON_DISPLAY_TRUNC
+            ]
 
     top = counts.most_common(limit)
     payload: dict[str, Any] = {
@@ -628,12 +642,12 @@ def cmd_trace(
             rec_type = rec.get("type", "decision")
             if rec_type == "internal_error":
                 exc_class = rec.get("exc_class", "?")
-                exc_msg = str(rec.get("exc_msg", ""))[:80]
+                exc_msg = str(rec.get("exc_msg", ""))[:_REASON_DISPLAY_TRUNC]
                 lines.append(f"  {ts}  ERROR  {exc_class}  {exc_msg}")
             else:
                 decision = rec.get("decision", "?")
                 hook_id = rec.get("hook_id", "?")
-                reason = str(rec.get("reason", ""))[:80]
+                reason = str(rec.get("reason", ""))[:_REASON_DISPLAY_TRUNC]
                 lines.append(f"  {ts}  {decision:<5}  {hook_id}  {reason}")
     return payload, "\n".join(lines) + "\n"
 
@@ -654,7 +668,7 @@ def cmd_test(commands: list[str]) -> tuple[dict[str, Any], str]:
         for r in results:
             decision = r.get("decision") or "passthrough"
             reason = r.get("reason") or ""
-            lines.append(f"  {r['hook_id']:<35}  {decision:<11}  {reason[:80]}")
+            lines.append(f"  {r['hook_id']:<35}  {decision:<11}  {reason[:_REASON_DISPLAY_TRUNC]}")
     payload: dict[str, Any] = {"commands": runs}
     return payload, "\n".join(lines) + "\n"
 
@@ -669,7 +683,7 @@ def _test_specs(command: str) -> Iterable[dict[str, Any]]:
     """
     # Lazy import — keep the CLI's import cost low and isolate hook bugs from
     # subcommands that don't need them.
-    from guard.hooks._registry import bash_surface_hooks  # noqa: PLC0415
+    from guard.hooks._registry import bash_surface_hooks  # noqa: PLC0415 -- lazy
 
     tool_input = {"command": command}
     for spec in bash_surface_hooks():
@@ -711,7 +725,7 @@ def cmd_diff() -> tuple[dict[str, Any], str]:
     Until then this command is useful for "what does guard see right now"
     debugging, not for diffing.
     """
-    from guard.hooks._registry import all_hook_ids  # noqa: PLC0415
+    from guard.hooks._registry import all_hook_ids  # noqa: PLC0415 -- lazy: defer registry import
 
     hook_ids = list(all_hook_ids())
     payload: dict[str, Any] = {
@@ -746,7 +760,7 @@ def cmd_migrate_log(
     backup: bool,
 ) -> tuple[dict[str, Any], str]:
     """Rewrite the JSONL log in place to v1, in one shot."""
-    from guard.migrate_log import migrate_file  # noqa: PLC0415
+    from guard.migrate_log import migrate_file  # noqa: PLC0415 -- lazy
 
     target = Path(log_path_override) if log_path_override else Path(effective_log_path())
     report = migrate_file(target, dry_run=dry_run, backup=backup)
@@ -919,7 +933,7 @@ def _dispatch_allowlist(
     scope = _resolve_scope(args)
     if allow_cmd in _ALLOWLIST_DISPATCH:
         fn = globals()[_ALLOWLIST_DISPATCH[allow_cmd]]
-        return fn()  # type: ignore[no-any-return]
+        return fn()  # type: ignore[no-any-return]  # -- globals() dispatch erases return type
     if allow_cmd == "disable-rule":
         return cmd_allowlist_disable_rule(args.rule_id, scope=scope)
     if allow_cmd == "enable-rule":

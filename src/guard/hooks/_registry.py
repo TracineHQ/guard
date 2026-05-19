@@ -122,7 +122,7 @@ def _bash_command_validator_decide(
     cmd = _command_from_bash(tool_name, tool_input)
     if cmd is None:
         return None
-    from guard.hooks import bash_command_validator  # noqa: PLC0415
+    from guard.hooks import bash_command_validator  # noqa: PLC0415 -- lazy adapter (see module doc)
 
     return bash_command_validator.decide(cmd)
 
@@ -131,7 +131,7 @@ def _git_c_validator_decide(tool_name: str, tool_input: Mapping[str, Any]) -> di
     cmd = _command_from_bash(tool_name, tool_input)
     if cmd is None:
         return None
-    from guard.hooks import git_c_validator  # noqa: PLC0415
+    from guard.hooks import git_c_validator  # noqa: PLC0415 -- lazy adapter
 
     return git_c_validator.decide(cmd)
 
@@ -142,7 +142,7 @@ def _commit_message_validator_decide(
     cmd = _command_from_bash(tool_name, tool_input)
     if cmd is None:
         return None
-    from guard.hooks import commit_message_validator  # noqa: PLC0415
+    from guard.hooks import commit_message_validator  # noqa: PLC0415 -- lazy adapter
 
     return commit_message_validator.decide(cmd)
 
@@ -150,7 +150,7 @@ def _commit_message_validator_decide(
 def _credential_check_decide(
     tool_name: str, tool_input: Mapping[str, Any]
 ) -> dict[str, Any] | None:
-    from guard.hooks import credential_check  # noqa: PLC0415
+    from guard.hooks import credential_check  # noqa: PLC0415 -- lazy adapter
 
     # credential_check already takes (tool_name, tool_input) natively — no
     # shape conversion needed. The wrapper exists only to defer the import.
@@ -160,13 +160,13 @@ def _credential_check_decide(
 def _agent_output_guard_decide(
     tool_name: str, tool_input: Mapping[str, Any]
 ) -> dict[str, Any] | None:
-    from guard.hooks import agent_output_guard  # noqa: PLC0415
+    from guard.hooks import agent_output_guard  # noqa: PLC0415 -- lazy adapter
 
     return agent_output_guard.decide(tool_name, dict(tool_input))
 
 
 def _protected_files_decide(tool_name: str, tool_input: Mapping[str, Any]) -> dict[str, Any] | None:
-    from guard.hooks import protected_files  # noqa: PLC0415
+    from guard.hooks import protected_files  # noqa: PLC0415 -- lazy adapter
 
     # ``protected_files.decide()`` is the pure decision logic shared with the
     # production hook entry point — no I/O, no allowlist consultation.
