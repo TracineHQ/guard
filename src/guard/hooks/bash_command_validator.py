@@ -963,6 +963,24 @@ _GIT_GLOBAL_FUSED_NAMES: frozenset[str] = frozenset(
         "--exec-path",
     }
 )
+# No-value git globals. ``git --no-pager submodule add ...`` would otherwise
+# shift the positional indices past the matcher's ``tokens[1]=="submodule"``
+# anchor; consuming these here means matchers downstream see canonical
+# ``git submodule add ...``. Mirrors the force-push positional-bypass fix.
+_GIT_GLOBAL_BARE_FLAGS: frozenset[str] = frozenset(
+    {
+        "--no-pager",
+        "--paginate",
+        "--bare",
+        "--no-replace-objects",
+        "--no-optional-locks",
+        "--literal-pathspecs",
+        "--no-literal-pathspecs",
+        "--icase-pathspecs",
+        "--glob-pathspecs",
+        "--noglob-pathspecs",
+    }
+)
 
 
 def _strip_git_global_options(normalized: str) -> str | None:
@@ -979,6 +997,9 @@ def _strip_git_global_options(normalized: str) -> str | None:
     i = 1
     while i < len(tokens):
         tok = tokens[i]
+        if tok in _GIT_GLOBAL_BARE_FLAGS:
+            i += 1
+            continue
         if tok in _GIT_GLOBAL_VALUE_FLAGS:
             # consume flag + value, but only if a value is actually present
             # (don't swallow the next token past EOL on a malformed
@@ -2370,12 +2391,12 @@ def _is_gh_api_destructive(normalized: str) -> bool:
             and rest[i + 1].upper() in _GH_API_DESTRUCTIVE_VERBS
         ):
             return True
-        if (
-            tok.upper().startswith("-X")
-            and len(tok) > 2
-            and tok[2:].upper() in _GH_API_DESTRUCTIVE_VERBS
-        ):
-            return True
+        if tok.upper().startswith("-X") and len(tok) > 2:
+            # Fused (``-XDELETE``) and fused-equals (``-X=DELETE``) forms.
+            suffix = tok[2:]
+            suffix = suffix.removeprefix("=")
+            if suffix.upper() in _GH_API_DESTRUCTIVE_VERBS:
+                return True
         if (
             tok.startswith("--method=")
             and tok[len("--method=") :].upper() in _GH_API_DESTRUCTIVE_VERBS
