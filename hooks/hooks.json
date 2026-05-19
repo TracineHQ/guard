@@ -28,6 +28,14 @@
           { "type": "command", "command": "python3 ${CLAUDE_PLUGIN_ROOT}/src/guard/hooks/subagent_scope.py" }
         ]
       }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "python3 ${CLAUDE_PLUGIN_ROOT}/src/guard/hooks/permission_request_logger.py" }
+        ]
+      }
     ]
   }
 }

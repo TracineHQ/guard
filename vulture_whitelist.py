@@ -75,3 +75,5 @@ strict_env = None
 strict_env
 decision_log_env = None
 decision_log_env
+log_with_permission_requests = None
+log_with_permission_requests

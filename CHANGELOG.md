@@ -43,6 +43,18 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `permission_request` JSONL telemetry. New PermissionRequest hook
+  (`permission_request_logger.py`) observes when Claude Code is about to
+  prompt the user for permission and appends a row with `type:
+  "permission_request"`, the tool name, redacted `tool_input_excerpt`,
+  `tool_use_id`, `session_id`, `cwd`, and the active `permission_mode`.
+  Observation-only -- the hook never blocks. Doesn't fire in `dontAsk` /
+  `bypassPermissions` modes (Claude Code doesn't prompt then).
+- `guard noisy` now includes `permission_request` rows by default,
+  grouped under the synthetic bucket
+  `(hook_id="permission_request", decision="<tool_name>")` so operators
+  see prompt frequency alongside deny frequency. Pass `--no-prompts` to
+  exclude.
 - Shadow/off mode (config-driven). New top-level `mode` field on
   `.claude/guard/allowlist.json` accepts `"enforce"` (default),
   `"shadow"`, or `"off"`. Set via `guard mode <value> [--project|--global]`.

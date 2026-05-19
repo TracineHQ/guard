@@ -97,10 +97,13 @@ def test_strip_inline_comment_preserves_quoted_hash(
     payload_clean = payload.replace(quote, "")
     if "#" not in payload_clean:
         payload_clean = payload_clean + "#" + payload_clean
-    # Likewise strip quote chars from ``pre`` to keep the quoted region
-    # well-formed. Internal ``#`` in pre/post is fine — its handling is
-    # tested separately by the stripper's direct tests.
-    pre_clean = pre.replace(quote, "").replace("#", "")
+    # Strip BOTH quote chars from ``pre`` -- a stray opposite-kind quote
+    # would open its own quoted region and swallow the synthesized one,
+    # invalidating the test's premise that the synthesized region is the
+    # active quote context at the ``#``. Internal ``#`` in pre is also
+    # stripped for the same reason (don't terminate the line before our
+    # quoted region appears).
+    pre_clean = pre.replace("'", "").replace('"', "").replace("#", "")
     quoted = f"{quote}{payload_clean}{quote}"
     line = f"{pre_clean}{quoted} {post}"
     stripped = strip_inline_comment(line)

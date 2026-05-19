@@ -54,7 +54,7 @@ section is the contract. Consumers can opt-in by reading the env var directly
 |---|---|---|---|
 | `v` | int | yes | schema version, currently `1`. Short alias of `schema_version`. |
 | `schema_version` | int | yes | long form, kept for backward compatibility |
-| `type` | enum string | optional | record-shape discriminator. Defaults to `"decision"` when absent. Currently one of `"decision"` or `"internal_error"`. Consumers MUST filter on `type` to avoid blending crash records into decision tallies. |
+| `type` | enum string | optional | record-shape discriminator. Defaults to `"decision"` when absent. Currently one of `"decision"`, `"internal_error"`, or `"permission_request"` (§3.4, §3.5). Consumers MUST filter on `type` to avoid blending non-decision records into decision tallies. |
 | `mode` | enum string | yes (decision) | one of `"enforce"`, `"shadow"`, `"off"`. Set per-record from the resolved allowlist mode (project > global > default `"enforce"`). `"shadow"` decisions are logged but not enforced; `"off"` short-circuits the hook and emits no record. |
 | `timestamp` | string (ISO-8601 UTC, microsecond precision, `Z` suffix) | yes | e.g. `"2026-04-29T14:32:11.123456Z"` |
 | `hook_id` | string | yes (decision) | namespaced: `guard.<hook_module>` (e.g. `guard.bash_command_validator`) |
@@ -144,6 +144,32 @@ Consumers tallying decisions MUST filter on `type == "decision"` (or absent)
 so crash records don't pollute counters. The bundled `guard trace <session>`
 surfaces `internal_error` records inline; `guard status` aggregates them as
 `internal_errors_total`.
+
+### 3.5 `permission_request` records
+
+Claude Code emits a `PermissionRequest` hook event when it is about to
+show the user a permission dialog (interactive permission modes only --
+never in `dontAsk` / `bypassPermissions`). Guard observes these events
+and appends a `permission_request` record. The hook never blocks: the
+record is observation-only, and the prompt proceeds normally.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `type` | string | yes | always `"permission_request"` for this record shape |
+| `v` / `schema_version` | int | yes | schema version (currently `1`) |
+| `mode` | string | yes | guard's effective mode at request time (`"enforce"` / `"shadow"` / `"off"`); `"off"` short-circuits before logging |
+| `timestamp` | string | yes | ISO-8601 UTC with microsecond precision |
+| `session_id` | string | yes | Claude Code session id |
+| `tool_name` | string | yes | tool about to be invoked (`"Bash"`, `"Edit"`, `"mcp__server__tool"`, ...) |
+| `tool_input_excerpt` | string | yes | JSON-stringified `tool_input`, secret-shape-redacted, ≤ 4096 chars |
+| `tool_use_id` | string | optional | unique id Claude Code assigns to the call, if present in the payload |
+| `permission_mode` | string | optional | Claude Code permission mode string, if present in the payload |
+| `cwd` | string | optional | working directory, if present in the payload |
+
+`guard noisy` includes `permission_request` rows by default under the
+synthetic bucket `(hook_id="permission_request", decision="<tool_name>")`
+so operators see prompt frequency alongside deny frequency. Pass
+`--no-prompts` to revert to decisions-only.
 
 ## 4. Schema versioning rules
 

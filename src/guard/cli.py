@@ -133,6 +133,7 @@ class JsonlReader:
         tool_name: str | None = None,
         session_id: str | None = None,
         include_all_types: bool = False,
+        record_types: frozenset[str] | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Yield records matching the supplied filters.
 
@@ -141,7 +142,9 @@ class JsonlReader:
         decisions). Operational records (``internal_error``) are skipped so
         ``noisy`` / ``silent`` / ``trace`` views don't surface a ``? ?``
         pollution row. Pass ``include_all_types=True`` for raw scans
-        (counters, debugging).
+        (counters, debugging). Pass ``record_types`` to opt in to a
+        wider set (e.g. ``frozenset({"decision", "permission_request"})``
+        for ``noisy``).
         """
         if not self.path.exists():
             return
@@ -173,7 +176,8 @@ class JsonlReader:
                     continue
                 if not include_all_types:
                     kind = rec.get("type") or ("decision" if "decision" in rec else None)
-                    if kind != "decision":
+                    allowed = record_types if record_types is not None else frozenset({"decision"})
+                    if kind not in allowed:
                         continue
                 if hook_id is not None and rec.get("hook_id") != hook_id:
                     continue
@@ -510,30 +514,53 @@ def cmd_healthcheck() -> tuple[dict[str, Any], str]:
     return result, f"guard healthcheck: {status_label} ({summary})\n"
 
 
-def cmd_noisy(
+def cmd_noisy(  # noqa: PLR0913 -- argparse-derived filter ladder; refactoring to dataclass adds indirection
     since: timedelta | None,
     limit: int,
     *,
     decision: str | None = None,
     hook_id: str | None = None,
     tool_name: str | None = None,
+    include_prompts: bool = True,
 ) -> tuple[dict[str, Any], str]:
-    """Top N rules by hit count, grouped by ``(hook_id, decision)``."""
+    """Top N rules by hit count, grouped by ``(hook_id, decision)``.
+
+    When ``include_prompts`` is true (default), Claude Code permission
+    prompts captured by the PermissionRequest hook are merged into the
+    ranking under a synthetic ``permission_request`` bucket -- the
+    ``hook_id`` column reads ``"permission_request"`` and the
+    ``decision`` column reads the tool that triggered the prompt
+    (``"Bash"``, ``"Edit"``, etc.).
+    """
     cutoff = datetime.now(UTC) - since if since is not None else None
     reader = JsonlReader(effective_log_path())
     counts: Counter[tuple[str, str]] = Counter()
     samples: dict[tuple[str, str], str] = {}
     total = 0
+    record_types = (
+        frozenset({"decision", "permission_request"})
+        if include_prompts
+        else frozenset({"decision"})
+    )
     for rec in reader.iter_records(
-        since=cutoff, decision=decision, hook_id=hook_id, tool_name=tool_name
+        since=cutoff,
+        decision=decision,
+        hook_id=hook_id,
+        tool_name=tool_name,
+        record_types=record_types,
     ):
-        key = (str(rec.get("hook_id", "?")), str(rec.get("decision", "?")))
+        if rec.get("type") == "permission_request":
+            key = ("permission_request", str(rec.get("tool_name", "?")))
+            sample = str(rec.get("tool_input_excerpt", ""))[:_REASON_DISPLAY_TRUNC]
+        else:
+            key = (str(rec.get("hook_id", "?")), str(rec.get("decision", "?")))
+            sample = str(rec.get("command_excerpt") or rec.get("reason", ""))[
+                :_REASON_DISPLAY_TRUNC
+            ]
         counts[key] += 1
         total += 1
         if key not in samples:
-            samples[key] = str(rec.get("command_excerpt") or rec.get("reason", ""))[
-                :_REASON_DISPLAY_TRUNC
-            ]
+            samples[key] = sample
 
     top = counts.most_common(limit)
     payload: dict[str, Any] = {
@@ -1165,6 +1192,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_noisy.add_argument("--since", default="7d", help="Time window: Nd/Nh/Nm (default: 7d).")
     p_noisy.add_argument("--limit", type=int, default=10, help="Max entries (default: 10).")
+    p_noisy.add_argument(
+        "--no-prompts",
+        dest="include_prompts",
+        action="store_false",
+        default=True,
+        help="Exclude PermissionRequest rows from the ranking (decisions only).",
+    )
     _add_log_filter_args(p_noisy)
 
     p_silent = sub.add_parser(
@@ -1348,6 +1382,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 -- linear
                 decision=args.decision,
                 hook_id=args.hook_id,
                 tool_name=args.tool_name,
+                include_prompts=args.include_prompts,
             )
         elif cmd == "silent":
             since = parse_since(args.since)
