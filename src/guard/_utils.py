@@ -403,6 +403,7 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
     cwd: str | None = None,
     permission_mode: str | None = None,
     extra: dict[str, Any] | None = None,
+    mode: str | None = None,
 ) -> None:
     """Append a spec-compliant decision record to the JSONL log.
 
@@ -410,8 +411,9 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
 
     - ``v: 1`` -- short schema-version alias for fast consumers
     - ``schema_version: 1`` -- long form, kept for backward compatibility
-    - ``mode: "enforce"`` -- effective enforcement posture; reserved for
-      ``"shadow"`` / ``"off"`` once config-driven mode lands
+    - ``mode`` -- effective enforcement posture (``enforce``/``shadow``/``off``);
+      callers pass the value resolved from the allowlist via the ``mode``
+      kwarg, defaulting to ``"enforce"`` when omitted
     - ``timestamp`` -- ISO-8601 UTC with microsecond precision and ``Z`` suffix
 
     Truncates ``command_excerpt`` to 4096 chars and ``reason`` to 1024 chars
@@ -435,6 +437,10 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
             (e.g. ``{"unknown_flags": ["--foo", "--bar"]}``). Values are
             written verbatim; callers are responsible for not including
             secret material.
+        mode: Effective guard mode at decision time
+            (``"enforce"``/``"shadow"``/``"off"``). Defaults to ``"enforce"``
+            when omitted. Callers typically resolve this from
+            ``load_allowlist().mode`` once at hook entry and pass it through.
     """
     timestamp = datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
     redacted_reason = _redact_secrets(reason)
@@ -442,7 +448,7 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
         "type": "decision",
         "v": _SCHEMA_V,
         "schema_version": _SCHEMA_V,
-        "mode": _DEFAULT_MODE,
+        "mode": mode or _DEFAULT_MODE,
         "timestamp": timestamp,
         "hook_id": hook_id,
         "event": event,

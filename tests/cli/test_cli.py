@@ -784,6 +784,51 @@ def test_dispatch_allowlist_disable_rule_via_main(
     assert doc["disable_rules"] == ["bash.disk_destruction"]
 
 
+def test_cmd_mode_reads_default_enforce(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``guard mode`` with no allowlist file reports the default enforce mode."""
+    from guard import cli
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "global" / ".claude" / "guard"))
+
+    rc = cli.main(["--json", "mode"])
+    assert rc == 0
+
+
+def test_cmd_mode_writes_project_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``guard mode shadow`` writes the project allowlist's mode field."""
+    from guard import cli
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "global" / ".claude" / "guard"))
+
+    rc = cli.main(["--json", "mode", "shadow"])
+    assert rc == 0
+    doc = json.loads((project / ".claude" / "guard" / "allowlist.json").read_text(encoding="utf-8"))
+    assert doc["mode"] == "shadow"
+
+
+def test_cmd_mode_round_trip_back_to_enforce(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setting shadow then enforce overwrites the project mode field."""
+    from guard import cli
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "global" / ".claude" / "guard"))
+
+    cli.main(["--json", "mode", "shadow"])
+    cli.main(["--json", "mode", "enforce"])
+    doc = json.loads((project / ".claude" / "guard" / "allowlist.json").read_text(encoding="utf-8"))
+    assert doc["mode"] == "enforce"
+
+
 def test_dispatch_allowlist_enable_rule_via_main(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

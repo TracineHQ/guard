@@ -55,7 +55,7 @@ section is the contract. Consumers can opt-in by reading the env var directly
 | `v` | int | yes | schema version, currently `1`. Short alias of `schema_version`. |
 | `schema_version` | int | yes | long form, kept for backward compatibility |
 | `type` | enum string | optional | record-shape discriminator. Defaults to `"decision"` when absent. Currently one of `"decision"` or `"internal_error"`. Consumers MUST filter on `type` to avoid blending crash records into decision tallies. |
-| `mode` | enum string | yes (decision) | reserved enum; today the writer always emits `"enforce"`. `"shadow"` and `"off"` are reserved values consumers should accept without erroring, but no code path writes them yet. |
+| `mode` | enum string | yes (decision) | one of `"enforce"`, `"shadow"`, `"off"`. Set per-record from the resolved allowlist mode (project > global > default `"enforce"`). `"shadow"` decisions are logged but not enforced; `"off"` short-circuits the hook and emits no record. |
 | `timestamp` | string (ISO-8601 UTC, microsecond precision, `Z` suffix) | yes | e.g. `"2026-04-29T14:32:11.123456Z"` |
 | `hook_id` | string | yes (decision) | namespaced: `guard.<hook_module>` (e.g. `guard.bash_command_validator`) |
 | `event` | string | yes (decision) | matches Claude Code event names (`PreToolUse`, `PostToolUse`) |
@@ -78,10 +78,14 @@ section is the contract. Consumers can opt-in by reading the env var directly
 - `"off"` — the hook ran but is functionally disabled; decisions are
   passthrough.
 
-For v1.1, the writer hardcodes `mode` to `"enforce"`. `"shadow"` and
-`"off"` are reserved values: consumers MUST accept them without erroring
-(treat them as observational / passthrough), but no current code path
-emits them. Config-driven shadow/off mode lands in a later release.
+As of v1.4.0, the writer emits the resolved allowlist mode on every
+decision record (default `"enforce"`). Operators flip mode with
+`guard mode <enforce|shadow|off> [--project|--global]`, which writes a
+top-level `"mode"` field into `.claude/guard/allowlist.json`. Project
+beats global beats the default. `"shadow"` is useful for testing a new
+rule against real sessions without blocking: the writer still logs
+`decision: "deny"` with `mode: "shadow"`, but the hook exits 0 with an
+empty stdout so Claude Code's normal permission flow takes over.
 
 ### 3.2 Path discovery for consumers
 

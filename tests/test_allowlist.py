@@ -298,3 +298,50 @@ def test_sources_lists_present_files_only(isolated_homes: tuple[Path, Path]) -> 
     al = load_allowlist(cwd=cwd)
     assert len(al.sources) == 1
     assert al.sources[0].name == "allowlist.json"
+
+
+def test_mutation_preserves_mode_field(isolated_homes: tuple[Path, Path]) -> None:
+    """Adding/removing rules or commands must not strip a top-level ``mode`` field.
+
+    Regression: an earlier version of ``_read_raw`` normalised the doc to
+    only ``disable_rules`` and ``allow_commands``; calling
+    ``add_disable_rule`` on a file that had ``"mode": "shadow"`` set would
+    silently rewrite it without ``mode``, dropping the operator's
+    configured posture.
+    """
+    from guard.allowlist import (
+        add_allow_command,
+        add_disable_rule,
+        load_allowlist,
+        remove_allow_command,
+        remove_disable_rule,
+        set_mode,
+    )
+
+    _, cwd = isolated_homes
+    project_path = cwd / ".claude" / "guard" / "allowlist.json"
+
+    set_mode("shadow", scope="project", cwd=cwd)
+    assert json.loads(project_path.read_text())["mode"] == "shadow"
+
+    add_disable_rule("bash.disk_destruction", scope="project", cwd=cwd)
+    assert json.loads(project_path.read_text())["mode"] == "shadow"
+
+    add_allow_command(
+        rule="bash.disk_destruction",
+        command="dd if=/dev/zero of=/tmp/x bs=1 count=1",
+        reason="benign smoke test",
+        scope="project",
+        cwd=cwd,
+    )
+    assert json.loads(project_path.read_text())["mode"] == "shadow"
+
+    remove_disable_rule("bash.disk_destruction", scope="project", cwd=cwd)
+    remove_allow_command(
+        rule="bash.disk_destruction",
+        command="dd if=/dev/zero of=/tmp/x bs=1 count=1",
+        scope="project",
+        cwd=cwd,
+    )
+    assert json.loads(project_path.read_text())["mode"] == "shadow"
+    assert load_allowlist(cwd=cwd).mode == "shadow"
