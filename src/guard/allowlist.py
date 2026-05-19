@@ -315,25 +315,32 @@ _ALLOWLIST_FILE_TEMPLATE: dict[str, list[Any]] = {
 
 
 def _read_raw(path: Path) -> dict[str, Any]:
-    """Read+parse an allowlist file. Returns an empty template if absent."""
+    """Read+parse an allowlist file. Returns an empty template if absent.
+
+    Preserves any top-level fields outside the known schema so that a
+    mutation (e.g. ``add_disable_rule``) doesn't strip an unrelated field
+    like ``mode``. Only ``disable_rules`` and ``allow_commands`` are
+    normalised; everything else is passed through verbatim.
+    """
+    empty: dict[str, Any] = {"disable_rules": [], "allow_commands": []}
     if not path.exists():
-        return {"disable_rules": [], "allow_commands": []}
+        return empty
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
-        return {"disable_rules": [], "allow_commands": []}
+        return empty
     try:
         data = json.loads(text)
     except (json.JSONDecodeError, ValueError):
-        return {"disable_rules": [], "allow_commands": []}
+        return empty
     if not isinstance(data, dict):
-        return {"disable_rules": [], "allow_commands": []}
+        return empty
     rules = data.get("disable_rules") or []
     cmds = data.get("allow_commands") or []
-    return {
-        "disable_rules": list(rules) if isinstance(rules, list) else [],
-        "allow_commands": list(cmds) if isinstance(cmds, list) else [],
-    }
+    doc = dict(data)
+    doc["disable_rules"] = list(rules) if isinstance(rules, list) else []
+    doc["allow_commands"] = list(cmds) if isinstance(cmds, list) else []
+    return doc
 
 
 def _write_raw(path: Path, doc: dict[str, Any]) -> None:
