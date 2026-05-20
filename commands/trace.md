@@ -1,7 +1,7 @@
 ---
 description: Print every record matching a session-id, in chronological order.
-argument-hint: <session-id>
-allowed-tools: Bash(guard trace *)
+argument-hint: "<session-id>"
+allowed-tools: "Bash(guard trace *)"
 disable-model-invocation: true
 ---
 

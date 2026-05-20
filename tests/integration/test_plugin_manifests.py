@@ -100,9 +100,9 @@ def test_skill_md_exists_with_frontmatter() -> None:
     ],
 )
 def test_each_validator_referenced_in_hooks_json(hook_name: str) -> None:
-    """Every shipped validator must be wired into hooks.json — no orphan hooks."""
+    """Every shipped validator must be wired into hooks.json -- no orphan hooks."""
     raw = (REPO / "hooks" / "hooks.json").read_text()
-    assert f"src/guard/hooks/{hook_name}.py" in raw, (
+    assert f"bin/run-hook {hook_name}" in raw, (
         f"{hook_name} exists in src/ but is not wired in hooks/hooks.json"
     )
 

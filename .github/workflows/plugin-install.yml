@@ -61,6 +61,22 @@ jobs:
           fi
           echo "OK: guard installed from local manifest and enabled."
 
+      - name: Install uv (for runtime hook subprocess test)
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+
+      - name: Pin Python version
+        run: uv python pin 3.13
+
+      - name: Install project deps
+        run: uv sync --all-extras
+
+      # Catches the 1.4.1-class regression where a hook crashes at runtime
+      # because Claude Code invokes it as a bare `python3 hook.py` with no
+      # PYTHONPATH. Cheap unit-level subprocess test; the full claude --print
+      # integration can be a follow-up if/when credentials are available.
+      - name: Hook subprocess invocation regression test
+        run: uv run pytest tests/integration/test_hook_subprocess_invocation.py -v
+
   user-facing-install:
     name: Documented install path (${{ matrix.os }})
     strategy:

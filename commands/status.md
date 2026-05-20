@@ -1,6 +1,6 @@
 ---
 description: Show guard installation status, log location, line count, and last record.
-allowed-tools: Bash(guard status)
+allowed-tools: "Bash(guard status)"
 disable-model-invocation: true
 ---
 

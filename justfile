@@ -28,6 +28,10 @@ test-fast:
 test-e2e:
     uv run pytest tests/integration/test_plugin_e2e.py -v
 
+# Run the runtime subprocess invocation test (mimics Claude Code's invocation).
+test-runtime-hooks:
+    uv run pytest tests/integration/test_hook_subprocess_invocation.py -v
+
 test-cov:
     uv run pytest --cov=src/guard --cov-report=term-missing
 
