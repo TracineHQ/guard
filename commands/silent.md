@@ -1,7 +1,7 @@
 ---
 description: Rules that haven't fired in --since but have fired at some point. Defaults to 30d.
-argument-hint: [--since SPAN]
-allowed-tools: Bash(guard silent *)
+argument-hint: "[--since SPAN]"
+allowed-tools: "Bash(guard silent *)"
 disable-model-invocation: true
 ---
 

@@ -80,3 +80,9 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         files: ^(src|tests)/.*\.py$
+      - id: claude-plugin-validate
+        name: claude plugin validate (manifest + command frontmatter)
+        entry: claude plugin validate .claude-plugin/plugin.json
+        language: system
+        files: ^(\.claude-plugin/.*\.json|commands/.*\.md|agents/.*\.md|skills/.*\.md)$
+        pass_filenames: false

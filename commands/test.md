@@ -1,7 +1,7 @@
 ---
 description: In-process invocation of each hook's decide() on a given bash command.
 argument-hint: "<command>"
-allowed-tools: Bash(guard test *)
+allowed-tools: "Bash(guard test *)"
 disable-model-invocation: true
 ---
 

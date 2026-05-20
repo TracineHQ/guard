@@ -1,6 +1,6 @@
 ---
 description: Show the effective merged config (built-in defaults; user/project layers land later).
-allowed-tools: Bash(guard diff)
+allowed-tools: "Bash(guard diff)"
 disable-model-invocation: true
 ---
 

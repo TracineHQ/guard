@@ -27,10 +27,18 @@ Pattern semantics:
 
 from __future__ import annotations
 
-import fnmatch
-import json
 import sys
 from pathlib import Path
+
+# Ensure ${CLAUDE_PLUGIN_ROOT}/src is on sys.path when invoked directly.
+# Claude Code runs `python3 path/to/this/file.py` without PYTHONPATH set,
+# so the `guard` package is not importable without this bootstrap.
+_SRC = Path(__file__).resolve().parent.parent.parent
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+import fnmatch
+import json
 from typing import Any
 
 from guard._utils import emit_pretooluse_decision, log_decision, safe_main

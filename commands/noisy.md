@@ -1,7 +1,7 @@
 ---
 description: Top N rules by hit count, grouped by (hook_id, decision). Defaults to 7d / top 10.
-argument-hint: [--since SPAN] [--limit N]
-allowed-tools: Bash(guard noisy *)
+argument-hint: "[--since SPAN] [--limit N]"
+allowed-tools: "Bash(guard noisy *)"
 disable-model-invocation: true
 ---
 
