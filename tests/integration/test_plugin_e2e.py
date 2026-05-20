@@ -33,17 +33,17 @@ PLUGIN_VERSION = tomllib.loads((REPO / "pyproject.toml").read_text())["project"]
 STAGED_NAME = f"guard-{PLUGIN_VERSION}"
 
 # Constants used by structural assertions.
-EXPECTED_PRE_TOOL_USE_HOOK_FILES = {
-    "bash_command_validator.py",
-    "git_c_validator.py",
-    "commit_message_validator.py",
-    "agent_output_guard.py",
-    "credential_check.py",
-    "protected_files.py",
-    "subagent_scope.py",
+EXPECTED_PRE_TOOL_USE_HOOK_NAMES = {
+    "bash_command_validator",
+    "git_c_validator",
+    "commit_message_validator",
+    "agent_output_guard",
+    "credential_check",
+    "protected_files",
+    "subagent_scope",
 }
-EXPECTED_PERMISSION_REQUEST_HOOK_FILES = {"permission_request_logger.py"}
-EXPECTED_HOOK_FILES = EXPECTED_PRE_TOOL_USE_HOOK_FILES | EXPECTED_PERMISSION_REQUEST_HOOK_FILES
+EXPECTED_PERMISSION_REQUEST_HOOK_NAMES = {"permission_request_logger"}
+EXPECTED_HOOK_NAMES = EXPECTED_PRE_TOOL_USE_HOOK_NAMES | EXPECTED_PERMISSION_REQUEST_HOOK_NAMES
 MAX_RECORD_BYTES = 4096
 VALID_DECISIONS = {"allow", "deny", "ask", "pass", "defer"}
 
@@ -71,7 +71,16 @@ def stage_plugin(repo: Path, dest: Path) -> Path:
     staged = dest / STAGED_NAME
     staged.mkdir(parents=True, exist_ok=False)
 
-    items_to_copy = [".claude-plugin", "hooks", "src", "SKILL.md", "LICENSE", "NOTICE", "docs"]
+    items_to_copy = [
+        ".claude-plugin",
+        "hooks",
+        "src",
+        "bin",
+        "SKILL.md",
+        "LICENSE",
+        "NOTICE",
+        "docs",
+    ]
     for name in items_to_copy:
         src = repo / name
         if not src.exists():
@@ -285,8 +294,9 @@ def test_staged_layout_is_complete(staged: Path) -> None:
     assert (staged / "NOTICE").is_file()
     hooks_dir = staged / "src" / "guard" / "hooks"
     assert hooks_dir.is_dir()
-    for name in EXPECTED_HOOK_FILES:
-        assert (hooks_dir / name).is_file(), f"missing staged hook: {name}"
+    for name in EXPECTED_HOOK_NAMES:
+        assert (hooks_dir / f"{name}.py").is_file(), f"missing staged hook: {name}.py"
+    assert (staged / "bin" / "run-hook").is_file(), "missing bin/run-hook wrapper"
 
 
 def test_plugin_manifest_shape(staged: Path) -> None:
@@ -326,8 +336,10 @@ def test_hooks_manifest_shape(staged: Path) -> None:
                 assert entry["type"] == "command"
                 cmd = entry["command"]
                 assert "${CLAUDE_PLUGIN_ROOT}" in cmd, f"hook cmd missing CLAUDE_PLUGIN_ROOT: {cmd}"
-                referenced.add(cmd.rsplit("/", 1)[-1])
-    assert referenced == EXPECTED_HOOK_FILES
+                assert "bin/run-hook" in cmd, f"hook cmd not routed through wrapper: {cmd}"
+                # Command form: "python3 ${CLAUDE_PLUGIN_ROOT}/bin/run-hook <name>"
+                referenced.add(cmd.split()[-1])
+    assert referenced == EXPECTED_HOOK_NAMES
 
 
 def test_no_symlinks_under_staged(staged: Path) -> None:
@@ -375,18 +387,20 @@ def test_no_developer_absolute_paths_in_sources(staged: Path) -> None:
 
 
 def test_hook_commands_resolve_to_real_files(staged: Path) -> None:
-    """Every hook command resolves to an actual regular file under staged root."""
+    """Every hook command must resolve to bin/run-hook plus an existing hook module."""
     hooks = json.loads((staged / "hooks" / "hooks.json").read_text())
+    wrapper = staged / "bin" / "run-hook"
+    assert wrapper.is_file(), f"wrapper missing: {wrapper}"
+    wrapper.resolve().relative_to(staged.resolve())
     for matcher_block in hooks["hooks"]["PreToolUse"]:
         for entry in matcher_block["hooks"]:
             cmd = entry["command"]
-            # command form: "python3 ${CLAUDE_PLUGIN_ROOT}/src/guard/hooks/<name>.py"
-            expanded = cmd.replace("${CLAUDE_PLUGIN_ROOT}", str(staged))
-            # The script path is the last whitespace-delimited token.
-            script_path = Path(expanded.split()[-1])
-            assert script_path.is_file(), f"hook script not found: {script_path}"
-            # Must be under the staged root (no escape).
-            script_path.resolve().relative_to(staged.resolve())
+            # Command form: "python3 ${CLAUDE_PLUGIN_ROOT}/bin/run-hook <name>"
+            tokens = cmd.replace("${CLAUDE_PLUGIN_ROOT}", str(staged)).split()
+            assert tokens[1] == str(wrapper), f"wrapper path mismatch in {cmd!r}"
+            hook_module = staged / "src" / "guard" / "hooks" / f"{tokens[-1]}.py"
+            assert hook_module.is_file(), f"hook module not found: {hook_module}"
+            hook_module.resolve().relative_to(staged.resolve())
 
 
 # ---------------------------------------------------------------------------

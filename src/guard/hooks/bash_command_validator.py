@@ -27,21 +27,13 @@ Exit codes:
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-# Ensure ${CLAUDE_PLUGIN_ROOT}/src is on sys.path when invoked directly.
-# Claude Code runs `python3 path/to/this/file.py` without PYTHONPATH set,
-# so the `guard` package is not importable without this bootstrap.
-_SRC = Path(__file__).resolve().parent.parent.parent
-if str(_SRC) not in sys.path:
-    sys.path.insert(0, str(_SRC))
-
 import json
 import os
 import re
 import shlex
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:

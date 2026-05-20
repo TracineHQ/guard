@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
+"""Launch a guard hook module with the guard package importable.
+
+Claude Code invokes hooks as
+``python3 ${CLAUDE_PLUGIN_ROOT}/bin/run-hook <name>`` where ``<name>`` is
+the hook module short name (e.g. ``bash_command_validator``). This
+wrapper puts ``${CLAUDE_PLUGIN_ROOT}/src`` on sys.path so the hook's
+``from guard._utils import ...`` lines resolve, then hands off to runpy.
+
+Concentrates the path-bootstrap logic in one place so each hook file stays
+a plain importable module. The path is computed from this wrapper's own
+``__file__`` rather than ``$CLAUDE_PLUGIN_ROOT`` because that env var has
+documented propagation gaps across hook events.
+"""
+
+from __future__ import annotations
+
+import runpy
+import sys
+from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE.parent / "src"))
+
+
+_USAGE_EXIT = 2
+_MIN_ARGV = 2
+
+
+def _usage() -> int:
+    sys.stderr.write("usage: run-hook <module-short-name>\n")
+    return _USAGE_EXIT
+
+
+def main() -> int:
+    """Dispatch to the named hook module after putting src/ on sys.path."""
+    if len(sys.argv) < _MIN_ARGV or not sys.argv[1]:
+        return _usage()
+    name = sys.argv[1]
+    # Re-shape argv so the launched module sees `python3 <name>.py` semantics
+    # (argv[0] is the script name; positional args follow).
+    sys.argv = [name, *sys.argv[2:]]
+    runpy.run_module(f"guard.hooks.{name}", run_name="__main__", alter_sys=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

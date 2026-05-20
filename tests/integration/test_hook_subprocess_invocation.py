@@ -65,16 +65,18 @@ _PERMISSION_REQUEST_PAYLOAD: dict[str, Any] = {
 }
 
 
-def _strip_plugin_root(command: str) -> str:
-    """Resolve the script path from a manifest command string."""
-    # The manifest entries are: ``python3 ${CLAUDE_PLUGIN_ROOT}/src/guard/hooks/<x>.py``
-    match = re.search(r"\$\{CLAUDE_PLUGIN_ROOT\}(/[\w./-]+\.py)", command)
-    assert match, f"Could not extract script path from command: {command!r}"
-    return match.group(1).lstrip("/")
+_COMMAND_RE = re.compile(r"python3\s+\$\{CLAUDE_PLUGIN_ROOT\}/bin/run-hook\s+([\w_]+)")
+
+
+def _hook_name_from_command(command: str) -> str:
+    """Return the hook module short name from a manifest command string."""
+    match = _COMMAND_RE.search(command)
+    assert match, f"Could not extract hook name from command: {command!r}"
+    return match.group(1)
 
 
 def _collect_hook_invocations() -> list[tuple[str, str, dict[str, Any]]]:
-    """Yield ``(event, script_relpath, payload)`` for every hook in the manifest."""
+    """Yield ``(event, hook_name, payload)`` for every hook in the manifest."""
     manifest = json.loads(MANIFEST.read_text())
     out: list[tuple[str, str, dict[str, Any]]] = []
     for event, entries in manifest["hooks"].items():
@@ -89,8 +91,8 @@ def _collect_hook_invocations() -> list[tuple[str, str, dict[str, Any]]]:
                 # Bash is the most common matcher and is broadly accepted.
                 payload = _BASH_PAYLOAD
             for hook in entry["hooks"]:
-                rel = _strip_plugin_root(hook["command"])
-                out.append((event, rel, payload))
+                name = _hook_name_from_command(hook["command"])
+                out.append((event, name, payload))
     return out
 
 
@@ -104,31 +106,34 @@ def _clean_env() -> dict[str, str]:
     }
 
 
+_WRAPPER = REPO_ROOT / "bin" / "run-hook"
+
+
 @pytest.mark.parametrize(
-    ("event", "script_relpath", "payload"),
+    ("event", "hook_name", "payload"),
     _INVOCATIONS,
-    ids=[f"{event}:{rel}" for event, rel, _ in _INVOCATIONS],
+    ids=[f"{event}:{name}" for event, name, _ in _INVOCATIONS],
 )
-def test_hook_runs_without_pythonpath(
+def test_hook_runs_through_wrapper(
     event: str,
-    script_relpath: str,
+    hook_name: str,
     payload: dict[str, Any],
 ) -> None:
-    """Each manifest-registered hook must run as a bare subprocess.
+    """Each manifest-registered hook must run cleanly through bin/run-hook.
+
+    Mirrors Claude Code's invocation: ``python3 bin/run-hook <name>`` with
+    PYTHONPATH wiped and ``-S`` to suppress site-packages so the editable
+    install's .pth file does NOT add src/ to sys.path. The wrapper must
+    self-bootstrap.
 
     Asserts:
       - exit code is 0 (allow / pass) or 2 (legitimate hard deny)
       - stderr contains no Python traceback or ModuleNotFoundError
     """
-    script = REPO_ROOT / script_relpath
-    assert script.exists(), f"Manifest references missing script: {script}"
+    assert _WRAPPER.exists(), f"Wrapper missing: {_WRAPPER}"
 
-    # ``-S`` strips site-packages so the editable-install .pth file does NOT
-    # add ``src/`` to sys.path. Combined with a wiped PYTHONPATH this mirrors
-    # how Claude Code invokes the hook -- nothing extra on the import path.
-    # Without the in-file bootstrap, ``from guard._utils import ...`` fails.
     proc = subprocess.run(
-        [sys.executable, "-S", str(script)],
+        [sys.executable, "-S", str(_WRAPPER), hook_name],
         input=json.dumps(payload),
         capture_output=True,
         text=True,
@@ -137,24 +142,23 @@ def test_hook_runs_without_pythonpath(
         check=False,
     )
 
-    assert "Traceback" not in proc.stderr, f"{script_relpath} crashed: stderr=\n{proc.stderr}"
+    assert "Traceback" not in proc.stderr, f"{hook_name} crashed: stderr=\n{proc.stderr}"
     assert "ModuleNotFoundError" not in proc.stderr, (
-        f"{script_relpath} could not import its package: stderr=\n{proc.stderr}"
+        f"{hook_name} could not import its package: stderr=\n{proc.stderr}"
     )
     assert proc.returncode in (0, 2), (
-        f"{script_relpath} returned rc={proc.returncode}; "
-        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+        f"{hook_name} returned rc={proc.returncode}; stdout={proc.stdout!r} stderr={proc.stderr!r}"
     )
 
 
 def test_manifest_lists_every_hook_file() -> None:
-    """Belt-and-braces: ensure we collected at least one entry per hook file."""
-    referenced = {Path(rel).name for _, rel, _ in _INVOCATIONS}
+    """Belt-and-braces: ensure we collected at least one entry per hook module."""
+    referenced = {name for _, name, _ in _INVOCATIONS}
     # Every .py file under src/guard/hooks except dunder/underscored helpers.
     on_disk = {
-        p.name
+        p.stem
         for p in (REPO_ROOT / "src" / "guard" / "hooks").glob("*.py")
         if not p.name.startswith("_")
     }
     missing = on_disk - referenced
-    assert not missing, f"Hook files not exercised by manifest: {sorted(missing)}"
+    assert not missing, f"Hook modules not exercised by manifest: {sorted(missing)}"
