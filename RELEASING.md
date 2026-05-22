@@ -10,6 +10,11 @@ actually being prepared. No `-dev0` suffix on `main` between releases.
 
 ## 1. Pre-tag checklist
 
+**Preferred path:** trigger the `Cut release` workflow from the Actions tab
+(`Actions -> Cut release -> Run workflow`, fill in `version=X.Y.Z`). It opens
+a PR with the file edits below; merge that PR and skip to section 2.
+The manual checklist below is the operator-local fallback.
+
 - [ ] `main` is green: every required workflow on the commit you intend to
       tag is passing -- `CI`, `CodeQL`, `Scorecard`, `plugin-install`, and any
       others listed under branch protection's required checks.
