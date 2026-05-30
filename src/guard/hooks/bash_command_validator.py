@@ -4380,10 +4380,73 @@ def queue_denied_command(command: str) -> None:
     _log_debug(f"queue_denied_command: appended to {GUARD_STRICT_DENY_QUEUE_PATH}")
 
 
+def _shell_code_mask(command: str) -> str:
+    """Blank quoted-argument string literals, preserving executable regions.
+
+    Replaces the contents of single- and double-quoted argument strings with
+    spaces (length-preserving) so a credential-CLI name that merely *appears*
+    inside a string literal — a ``chrome fill`` form value, an ``echo``/doc
+    body, a ``python -c`` program string — is not mistaken for a live
+    invocation. Contents of command substitutions (``$(...)`` and backticks)
+    are kept even inside double quotes, because they execute.
+    """
+    out: list[str] = []
+    in_single = in_double = in_backtick = False
+    cmdsub_depth = 0
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        step = 1
+        if cmdsub_depth > 0:  # inside $(...): executable, preserve
+            out.append(c)
+            cmdsub_depth += (c == "(") - (c == ")")
+        elif in_backtick:  # inside `...`: executable, preserve
+            out.append(c)
+            in_backtick = c != "`"
+        elif in_single:
+            out.append(" ")
+            in_single = c != "'"
+        elif in_double:
+            if c == "\\" and i + 1 < n:
+                out.append("  ")  # backslash-escape: both chars literal
+                step = 2
+            elif command[i : i + 2] == "$(":  # command sub executes inside ""
+                out.append("$(")
+                cmdsub_depth, step = 1, 2
+            elif c == "`":
+                out.append("`")
+                in_backtick = True
+            else:
+                out.append(" ")
+                in_double = c != '"'
+        elif c == "'":
+            out.append(" ")
+            in_single = True
+        elif c == '"':
+            out.append(" ")
+            in_double = True
+        elif command[i : i + 2] == "$(":
+            out.append("$(")
+            cmdsub_depth, step = 1, 2
+        elif c == "`":
+            out.append("`")
+            in_backtick = True
+        else:
+            out.append(c)
+        i += step
+    return "".join(out)
+
+
 def get_credential_leak_deny(command: str) -> dict[str, str] | None:
-    """Return a deny dict for commands that print live credentials, else ``None``."""
+    """Return a deny dict for commands that print live credentials, else ``None``.
+
+    Matches against the shell-code view (quoted argument literals blanked) so
+    a credential CLI name only denies when it is in execution position, not
+    when it appears inside a string literal an agent is writing or filling.
+    """
+    masked = _shell_code_mask(command)
     for pattern, label in CREDENTIAL_LEAK_PATTERNS:
-        if pattern.search(command):
+        if pattern.search(masked):
             advice = CREDENTIAL_LEAK_FEEDBACK.get(label, "")
             body = (
                 f"Blocked: `{label}` would print a live credential to the "

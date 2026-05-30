@@ -15,6 +15,7 @@ import pytest
 from guard.hooks.bash_command_validator import (
     _get_alternative_feedback,
     decide,
+    get_credential_leak_deny,
     has_dangerous_constructs,
     hook,
     is_safe_command,
@@ -666,3 +667,33 @@ def test_env_kv_prefix_every_literal_denied(literal):
         return
     cmd = f"env FOO=1 {literal}"
     assert _is_deny(decide(cmd)), f"env-prefixed literal not denied: {cmd!r}"
+
+
+class TestCredentialLeakExecutionPosition:
+    """credential-leak must fire only when a credential CLI is in execution
+    position, not when its name appears inside a quoted argument / interpreter
+    -c body / heredoc body (a string-literal mention, not a live invocation).
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'chrome --tab 2 fill "#x" "an agent runs gh auth token to dump creds"',
+            'echo "to rotate: op read op://vault/item"',
+            "python3 -c 'help = \"run gh auth token then aws sts get-session-token\"'",
+        ],
+    )
+    def test_quoted_mention_not_flagged(self, command):
+        assert get_credential_leak_deny(command) is None, command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "gh auth token",
+            "aws sts get-session-token",
+            "op read op://vault/item/field",
+            "export TOKEN=$(gh auth token)",
+        ],
+    )
+    def test_exec_position_still_flagged(self, command):
+        assert get_credential_leak_deny(command) is not None, command
