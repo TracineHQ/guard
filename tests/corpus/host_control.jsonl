@@ -1,0 +1,55 @@
+{"command": "reboot", "expected": "ask", "mode": "default", "source": "curated", "note": "host power control"}
+{"command": "reboot", "expected": "deny", "mode": "auto", "source": "curated", "note": "unattended: ask-tier downgrades to deny under the same rule_id"}
+{"command": "shutdown -h now", "expected": "ask", "mode": "default", "source": "curated", "note": "host shutdown"}
+{"command": "poweroff", "expected": "ask", "mode": "default", "source": "curated", "note": "host power off"}
+{"command": "halt", "expected": "ask", "mode": "default", "source": "curated", "note": "host halt"}
+{"command": "init 0", "expected": "ask", "mode": "default", "source": "curated", "note": "runlevel 0 = halt"}
+{"command": "telinit 6", "expected": "ask", "mode": "default", "source": "curated", "note": "runlevel 6 = reboot"}
+{"command": "systemctl reboot", "expected": "ask", "mode": "default", "source": "curated", "note": "systemctl power verb"}
+{"command": "systemctl poweroff", "expected": "ask", "mode": "default", "source": "curated", "note": "systemctl power verb"}
+{"command": "systemctl suspend", "expected": "ask", "mode": "default", "source": "curated", "note": "systemctl power verb"}
+{"command": "sudo reboot", "expected": "ask", "mode": "default", "source": "curated", "note": "host control behind a sudo prefix (candidate-form peel)"}
+{"command": "systemctl isolate poweroff.target", "expected": "ask", "mode": "default", "source": "adversarial", "note": "sweep: systemctl isolate <power>.target was a host-control bypass"}
+{"command": "systemctl isolate reboot.target", "expected": "ask", "mode": "default", "source": "adversarial", "note": "sweep: isolate reboot.target bypass"}
+{"command": "systemctl isolate halt.target", "expected": "ask", "mode": "default", "source": "adversarial", "note": "sweep: isolate halt.target bypass"}
+{"command": "systemctl isolate emergency.target", "expected": "ask", "mode": "default", "source": "adversarial", "note": "sweep: isolate emergency.target drops to single-user"}
+{"command": "systemctl status reboot.target", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: status query that merely names a power target"}
+{"command": "systemctl isolate multi-user.target", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: benign runlevel switch, not a power target"}
+{"command": "systemctl restart nginx", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: service restart is not host control"}
+{"command": "init 3", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: non-power runlevel"}
+{"command": "git init", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: git init is not init(8)"}
+{"command": "shutdown -r now", "expected": "ask", "mode": "default", "source": "adversarial", "note": "variant: shutdown -r is reboot; head-anchored on 'shutdown' so flags don't matter"}
+{"command": "shutdown -P now", "expected": "ask", "mode": "default", "source": "adversarial", "note": "variant: shutdown -P poweroff form, not previously covered"}
+{"command": "shutdown +5 \"going down\"", "expected": "ask", "mode": "default", "source": "adversarial", "note": "variant: scheduled shutdown with delay+message still fires on head"}
+{"command": "shutdown -c", "expected": "ask", "mode": "default", "source": "adversarial", "note": "edge: shutdown -c cancels a pending shutdown but matcher is head-anchored with no cancel exception, so it still asks"}
+{"command": "shutdown", "expected": "ask", "mode": "default", "source": "adversarial", "note": "bare shutdown (no args) fires on head alone"}
+{"command": "systemctl halt", "expected": "ask", "mode": "default", "source": "adversarial", "note": "power verb 'halt' present in _SYSTEMCTL_POWER_VERBS but no prior row"}
+{"command": "systemctl kexec", "expected": "ask", "mode": "default", "source": "adversarial", "note": "power verb 'kexec' reboots into new kernel; covered by set, no prior row"}
+{"command": "systemctl hibernate", "expected": "ask", "mode": "default", "source": "adversarial", "note": "power verb 'hibernate' covered by set, no prior row"}
+{"command": "systemctl isolate rescue.target", "expected": "ask", "mode": "default", "source": "adversarial", "note": "isolate target rescue.target drops to single-user; in set, no prior row"}
+{"command": "timeout 5 reboot", "expected": "ask", "mode": "default", "source": "adversarial", "note": "wrapper peel: timeout duration stripped, inner reboot fires via ask-tier exec_wrapper_candidates"}
+{"command": "nohup poweroff", "expected": "ask", "mode": "default", "source": "adversarial", "note": "wrapper peel: nohup plain runner prefix, inner poweroff fires"}
+{"command": "setsid halt", "expected": "ask", "mode": "default", "source": "adversarial", "note": "wrapper peel: setsid plain runner prefix, inner halt fires"}
+{"command": "nice -n 0 reboot", "expected": "ask", "mode": "default", "source": "adversarial", "note": "wrapper peel: nice -n N timing runner stripped, inner reboot fires"}
+{"command": "env REBOOT=1 reboot", "expected": "ask", "mode": "default", "source": "adversarial", "note": "wrapper peel: env VAR=val prefix stripped, inner reboot fires"}
+{"command": "flock /tmp/lock reboot", "expected": "ask", "mode": "default", "source": "adversarial", "note": "exec-wrapper peel: flock <file> positional stripped, inner reboot fires"}
+{"command": "chroot / reboot", "expected": "ask", "mode": "default", "source": "adversarial", "note": "exec-wrapper peel: chroot <newroot> positional stripped, inner reboot fires"}
+{"command": "stdbuf -o0 poweroff", "expected": "ask", "mode": "default", "source": "adversarial", "note": "exec-wrapper peel: stdbuf flags stripped, inner poweroff fires"}
+{"command": "runuser -u root -- reboot", "expected": "ask", "mode": "default", "source": "adversarial", "note": "exec-wrapper peel: runuser -u <user> -- separator, inner reboot fires"}
+{"command": "systemctl isolate poweroff.target", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "strict: isolate poweroff.target ask-tier downgrades to deny unattended (complements default-mode row)"}
+{"command": "systemctl reboot", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "strict: systemctl power verb downgrades to deny unattended (complements default-mode row)"}
+{"command": "sudo poweroff", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "strict: sudo-peeled poweroff downgrades to deny unattended"}
+{"command": "shutdown -h now", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "strict: shutdown ask-tier downgrades to deny unattended (complements default-mode row)"}
+{"command": "systemctl status sshd", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: status query is read-only, not host control"}
+{"command": "systemctl list-units --type=service", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: listing units is read-only"}
+{"command": "systemctl is-active nginx", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: is-active is a read-only state query"}
+{"command": "systemctl isolate graphical.target", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: graphical.target is a benign runlevel, absent from isolate target set"}
+{"command": "systemctl isolate default.target", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: default.target benign runlevel switch"}
+{"command": "init 1", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: runlevel 1 not in {0,6}, not power control by this matcher"}
+{"command": "telinit 3", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: telinit 3 multi-user runlevel, not 0/6"}
+{"command": "systemctl reboot --help", "expected": "ask", "mode": "default", "source": "adversarial", "note": "edge: --help on power verb still fires since 'reboot' token is present in rest (actual behavior, no help exception)"}
+{"command": "echo reboot the server", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: 'reboot' as echo argument, head is echo not a control verb"}
+{"command": "git commit -m \"add reboot handler\"", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: power verbs inside a commit message must not fire"}
+{"command": "systemctl isolate halt.target", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "strict: isolate halt.target ask-tier downgrades to deny unattended"}
+{"command": "openrc-shutdown -p now", "expected": "ask", "mode": "default", "source": "adversarial", "note": "TH-1/openrc: openrc-shutdown powers off the host (OpenRC/Alpine/Gentoo) -- host-control ask tier"}
+{"command": "openrc-shutdown -p now", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "TH-1/openrc: strict downgrades host-control to deny"}

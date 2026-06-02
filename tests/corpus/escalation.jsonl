@@ -1,0 +1,62 @@
+{"command": "su", "expected": "ask", "mode": "default", "source": "curated", "note": "bare su drops to a root shell"}
+{"command": "su", "expected": "deny", "mode": "auto", "source": "curated", "note": "unattended: ask-tier downgrades to deny under the same rule_id"}
+{"command": "su - root", "expected": "ask", "mode": "default", "source": "curated", "note": "login shell to root"}
+{"command": "doas reboot", "expected": "ask", "mode": "default", "source": "curated", "note": "doas privilege escalation"}
+{"command": "pkexec bash", "expected": "ask", "mode": "default", "source": "curated", "note": "pkexec to an interactive shell"}
+{"command": "timeout 5 su", "expected": "ask", "mode": "default", "source": "curated", "note": "escalation behind a timeout runner wrapper"}
+{"command": "runuser root", "expected": "ask", "mode": "default", "source": "adversarial", "note": "sweep: runuser shell-drop was a silent bypass"}
+{"command": "runuser -l root", "expected": "ask", "mode": "default", "source": "adversarial", "note": "sweep: runuser login form bypass"}
+{"command": "setpriv --reuid 0 --regid 0 --init-groups /bin/bash", "expected": "ask", "mode": "default", "source": "adversarial", "note": "sweep: setpriv reuid 0 root shell bypass"}
+{"command": "machinectl shell root@.host", "expected": "ask", "mode": "default", "source": "adversarial", "note": "sweep: machinectl shell to host root bypass"}
+{"command": "chroot / su -", "expected": "ask", "mode": "default", "source": "adversarial", "note": "sweep: escalation hidden behind the chroot exec-wrapper"}
+{"command": "flock /tmp/lock su -", "expected": "ask", "mode": "default", "source": "adversarial", "note": "sweep: escalation behind the flock exec-wrapper"}
+{"command": "unshare su", "expected": "ask", "mode": "default", "source": "adversarial", "note": "sweep: escalation behind the unshare exec-wrapper"}
+{"command": "sudo su", "expected": "deny", "mode": "default", "source": "curated", "note": "sudo+shell is a both-mode hard deny (bash.sudo_escalation), not ask"}
+{"command": "machinectl list", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: machinectl read subcommand is not a shell"}
+{"command": "chroot /mnt/root ls", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: chroot wrapping a read command, no escalation"}
+{"command": "setpriv --dump", "expected": "ask", "mode": "default", "source": "curated", "note": "setpriv is uniformly asked (rare escalation tool); even --dump introspection surfaces for confirmation"}
+{"command": "flock /tmp/lock sudo bash", "expected": "deny", "mode": "default", "source": "adversarial", "note": "H1: sudo+shell behind the flock exec-wrapper denies both-mode (bash.sudo_escalation), not just ask"}
+{"command": "doas -s", "expected": "ask", "mode": "default", "source": "adversarial", "note": "doas shell-drop (-s) asks interactive; head in _ESCALATION_ASK_HEADS regardless of flag"}
+{"command": "doas -s", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "strict downgrade: doas escalation denies unattended under bash.escalation_shell (no strict doas row existed)"}
+{"command": "doas -u root bash", "expected": "ask", "mode": "default", "source": "adversarial", "note": "doas -u <user> shell-drop; head-based match fires regardless of the -u value flag"}
+{"command": "pkexec bash", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "strict counterpart of the fixture 'pkexec bash' ask row: same rule_id denies unattended"}
+{"command": "pkexec /bin/sh", "expected": "ask", "mode": "default", "source": "adversarial", "note": "pkexec to an absolute-path shell -- variant of the existing 'pkexec bash'"}
+{"command": "su -c /bin/bash", "expected": "ask", "mode": "default", "source": "adversarial", "note": "su -c command form still asks; head su matches regardless of args"}
+{"command": "su - root", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "strict downgrade of login-shell-to-root; no human to confirm in auto mode"}
+{"command": "runuser -l root", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "strict downgrade of the runuser login form; head runuser asks interactive, denies strict"}
+{"command": "runuser -u postgres -- psql", "expected": "ask", "mode": "default", "source": "adversarial", "note": "runuser -u <user> -- <cmd> run-as form asks even for a benign inner cmd: head-based, -- and inner not inspected"}
+{"command": "setpriv --reuid 0 --regid 0 --init-groups /bin/bash", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "strict downgrade of the interactive setpriv reuid-0 row: ask becomes deny under bash.escalation_shell"}
+{"command": "machinectl shell", "expected": "ask", "mode": "default", "source": "adversarial", "note": "machinectl shell with no user/host still opens a host shell -- tokens[1]=='shell' is the trigger, not a user arg"}
+{"command": "machinectl shell user@mycontainer /bin/bash", "expected": "ask", "mode": "default", "source": "adversarial", "note": "machinectl shell into a named container with explicit shell path still asks"}
+{"command": "machinectl shell root@container", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "strict counterpart: machinectl container shell-drop denies under bash.escalation_shell when unattended"}
+{"command": "machinectl status mycontainer", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP: machinectl status is read-only introspection; tokens[1] != 'shell' so no escalation"}
+{"command": "machinectl show-image fedora", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP: machinectl show-* read subcommand; second token is not 'shell'"}
+{"command": "supervisorctl status", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP: 'su' is only a substring of supervisorctl; _basename head is not in _ESCALATION_ASK_HEADS"}
+{"command": "subl /etc/hosts", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP: subl (Sublime) head starts with 'su' but is not 'su'; must not trip escalation_ask"}
+{"command": "firejail su -", "expected": "ask", "mode": "default", "source": "adversarial", "note": "su login shell behind the firejail exec-wrapper peeled to a fixpoint -> escalation_ask"}
+{"command": "bwrap su", "expected": "ask", "mode": "default", "source": "adversarial", "note": "escalation behind the bwrap exec-wrapper (flag-less form) peels to 'su' -> escalation_ask"}
+{"command": "unshare -r runuser -l root", "expected": "ask", "mode": "default", "source": "adversarial", "note": "runuser login shell behind unshare with a flag (-r) the wrapper peel skips before the inner command"}
+{"command": "chroot /mnt/root machinectl shell root@.host", "expected": "ask", "mode": "default", "source": "adversarial", "note": "machinectl shell hidden behind chroot's leading-positional exec-wrapper; chroot consumes /mnt/root then exposes the shell-drop"}
+{"command": "flock /tmp/lock doas su", "expected": "ask", "mode": "default", "source": "adversarial", "note": "doas escalation behind flock (file positional + inner doas head) asks"}
+{"command": "timeout 5 doas reboot", "expected": "ask", "mode": "default", "source": "adversarial", "note": "doas escalation behind a timeout runner (duration arg stripped) -- mirrors 'timeout 5 su' for doas"}
+{"command": "env FOO=bar pkexec bash", "expected": "ask", "mode": "default", "source": "adversarial", "note": "pkexec shell-drop behind an env K=V prefix that _candidate_forms strips before the matcher sees pkexec"}
+{"command": "nohup su -", "expected": "ask", "mode": "default", "source": "adversarial", "note": "su login shell behind the nohup plain-runner prefix -- runner-stripped, then escalation_ask"}
+{"command": "sudo -i", "expected": "deny", "mode": "default", "source": "adversarial", "note": "sudo -i opens a root login shell: both-mode hard deny via bash.sudo_escalation, not ask"}
+{"command": "sudo -i", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "sudo -i root login shell denies in strict mode too (both-mode floor, same rule_id)"}
+{"command": "sudo -s", "expected": "deny", "mode": "default", "source": "adversarial", "note": "sudo -s spawns a root shell: both-mode hard deny via bash.sudo_escalation"}
+{"command": "sudo --preserve-env=PATH bash", "expected": "deny", "mode": "default", "source": "adversarial", "note": "sudo --preserve-env=VALUE chain into a shell denies both-mode; the =VALUE form still trips startswith('--preserve-env')"}
+{"command": "sudo zsh", "expected": "deny", "mode": "default", "source": "adversarial", "note": "sudo into a non-bash DANGEROUS_SHELL_WRAPPER (zsh) is still sudo_escalation deny"}
+{"command": "sudo doas reboot", "expected": "ask", "mode": "default", "source": "adversarial", "note": "sudo strips to 'doas reboot' -> escalation_ask (ask), NOT sudo_escalation: doas is not a shell wrapper"}
+{"command": "sudo runuser -l root", "expected": "ask", "mode": "default", "source": "adversarial", "note": "sudo peels to 'runuser -l root' -> escalation_ask; runuser is not a shell wrapper so this asks rather than sudo-denies"}
+{"command": "sudo machinectl shell root@.host", "expected": "ask", "mode": "default", "source": "adversarial", "note": "sudo strips to 'machinectl shell root@.host' -> escalation_ask (ask), not a sudo shell deny"}
+{"command": "chroot /mnt/root ls -la", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP: chroot wrapping a read command with a flag; peels to 'ls -la', no escalation tool inside"}
+{"command": "chroot /mnt/root cat /etc/hostname", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP: chroot wrapping a read command; inner cat is benign"}
+{"command": "bwrap --dev-bind / / su -", "expected": "ask", "mode": "default", "source": "adversarial", "note": "FIX: bwrap --dev-bind SRC DEST space-separated values now consumed; inner su - peels and fires escalation (was allow -- bind flag misaligned the peel)"}
+{"command": "bwrap --dev-bind / / su -", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "FIX: strict downgrades the peeled escalation to deny"}
+{"command": "bwrap --ro-bind / / su", "expected": "ask", "mode": "default", "source": "adversarial", "note": "FIX: --ro-bind 2-value peel exposes inner su"}
+{"command": "bwrap --bind /a /b su -l root", "expected": "ask", "mode": "default", "source": "adversarial", "note": "FIX: --bind SRC DEST then inner su escalation"}
+{"command": "bwrap --symlink /a /b doas sh", "expected": "ask", "mode": "default", "source": "adversarial", "note": "FIX: --symlink 2-value then inner doas escalation"}
+{"command": "bwrap --unshare-all --dev-bind / / pkexec bash", "expected": "ask", "mode": "default", "source": "adversarial", "note": "FIX: bare --unshare-all (0-value) + --dev-bind (2-value) then inner pkexec"}
+{"command": "bwrap --chdir /tmp --dev-bind / / su", "expected": "ask", "mode": "default", "source": "adversarial", "note": "FIX: --chdir (1-value) + --dev-bind (2-value) then inner su"}
+{"command": "firejail --net=none su", "expected": "ask", "mode": "default", "source": "adversarial", "note": "regression guard: fused --net=value still peels to inner su escalation"}
+{"command": "bwrap --ro-bind /usr /usr ls", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP: benign sandboxed ls peels correctly; no false escalation from the value-flag table"}

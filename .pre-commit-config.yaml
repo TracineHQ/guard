@@ -6,6 +6,7 @@ repos:
     hooks:
       - id: detect-secrets
         args: ["--baseline", ".secrets.baseline"]
+        exclude: ^tests/(corpus|integration)/
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.12
     hooks:
@@ -21,6 +22,12 @@ repos:
         pass_filenames: false
         args: ["src/"]
         files: ^src/
+      - id: guard-corpus
+        name: guard corpus (bash-matcher fixture harness)
+        entry: uv run guard corpus
+        language: system
+        pass_filenames: false
+        files: ^(tests/corpus/.*\.jsonl|src/guard/(hooks/bash_command_validator|registry|_corpus)\.py)$
   - repo: https://github.com/jendrikseipp/vulture
     rev: v2.16
     hooks:

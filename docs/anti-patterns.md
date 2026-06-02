@@ -42,18 +42,21 @@ explicitly. Use `-c` (lowercase, opens an editor) or `-m "message"` instead.
 
 ```
 cat /tmp/claude-12345/tasks/some-id.output
-head -n 10000 ~/.claude/guard-decisions.jsonl
 ```
 
-**Why it's bad.** Subagent output transcripts and decision logs are large
-NDJSON files. Reading them whole burns the entire context window for a
-single tool call, often without giving the model the structure it actually
-needs.
+**Why it's bad.** Subagent output transcripts are large NDJSON files.
+Reading them whole burns the entire context window for a single tool call,
+often without giving the model the structure it actually needs.
 
 **What guard does.** `agent_output_guard` denies direct `Read` /
-`cat|head|tail` calls against agent-output paths and points the agent at the
-appropriate query CLI. For the decision log, use `tail -f | jq` or a
-proper query rather than dumping the whole file.
+`cat|head|tail` calls against agent-output paths (`tasks/*.output`) and
+points the agent at the appropriate query CLI.
+
+Guard does NOT deny reading its own decision log
+(`~/.claude/guard-decisions.jsonl`); the log is protected only against
+truncation/overwrite by write verbs. Dumping it whole still burns context,
+so prefer `tail -f | jq` or a query over `cat` -- that's advice, not
+enforcement.
 
 ## Hardcoded API keys in tool inputs
 

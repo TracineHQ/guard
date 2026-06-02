@@ -1,0 +1,37 @@
+{"command": "convo summary", "expected": "allow", "mode": "auto", "source": "curated", "note": "first-party read-only diagnostic; usable unattended"}
+{"command": "convo search \"rm -rf\" --tool Bash", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only search; quoted 'rm -rf' is an argument, not a command, and post-subcommand flags don't break the prefix match"}
+{"command": "convo stats hooks --passthrough", "expected": "allow", "mode": "auto", "source": "curated", "note": "the exact command guard blocked pre-fix (strict default-deny)"}
+{"command": "convo diff --period 7d", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only period comparison"}
+{"command": "convo inspect --latest", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only session inspection"}
+{"command": "uv run convo stats tools --by caller", "expected": "allow", "mode": "auto", "source": "curated", "note": "uv run invocation form, read-only"}
+{"command": "convo info", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only index stats"}
+{"command": "convo sessions --since 7d", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only session listing"}
+{"command": "convo projects", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only project listing"}
+{"command": "convo tools --json", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only tool listing; post-subcommand --json flag"}
+{"command": "convo snapshots", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only snapshot listing (distinct from the write-side backup/restore)"}
+{"command": "convo index", "expected": "deny", "mode": "auto", "source": "curated", "note": "fail-safe: write-side (rebuilds local DB) is intentionally not auto-allowed in strict; run interactively"}
+{"command": "convo backup", "expected": "deny", "mode": "auto", "source": "curated", "note": "fail-safe: write-side snapshot not auto-allowed in strict"}
+{"command": "uvx convo summary", "expected": "allow", "mode": "auto", "source": "curated", "note": "uvx invocation form (3rd registered prefix); read-only summary allowed unattended -- only uv-run form was covered before"}
+{"command": "uvx convo search \"git push\" --tool Bash", "expected": "allow", "mode": "auto", "source": "curated", "note": "uvx + quoted arg + post-subcommand flag; quoted 'git push' is an argument not a command, prefix match holds"}
+{"command": "uv run convo sessions --since 30d", "expected": "allow", "mode": "auto", "source": "curated", "note": "uv run invocation of sessions (read-only) with post-subcommand flag; only uv-run stats was covered"}
+{"command": "uvx convo projects --json", "expected": "allow", "mode": "auto", "source": "curated", "note": "uvx + projects read-only listing with trailing --json flag"}
+{"command": "convo inspect --session abc123 --json", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only inspect with two post-subcommand flags; flags after the subcommand never break the prefix match"}
+{"command": "convo diff --period 7d --by tool", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only diff with multiple flags after subcommand"}
+{"command": "convo restore", "expected": "deny", "mode": "auto", "source": "curated", "note": "fail-safe: write-side restore (overwrites local DB from a snapshot) deliberately NOT whitelisted -> strict default-deny; complements index/backup"}
+{"command": "convo index-guard", "expected": "deny", "mode": "auto", "source": "curated", "note": "fail-safe: write-side index-guard (rebuilds guard's index cache) not whitelisted -> strict default-deny"}
+{"command": "uv run convo index", "expected": "deny", "mode": "auto", "source": "curated", "note": "write-side index under uv run wrapper -- runner prefix doesn't launder a non-whitelisted subcommand; strict default-deny"}
+{"command": "uvx convo backup", "expected": "deny", "mode": "auto", "source": "curated", "note": "write-side backup under uvx -- still strict-denied; the invocation prefix is registered but the subcommand is not"}
+{"command": "convo restore", "expected": "allow", "mode": "default", "source": "curated", "note": "interactive passthrough: write-side restore is an unknown-but-benign command, no deny matcher fires -> passthrough -> allow (Claude Code prompts, not guard)"}
+{"command": "convo index", "expected": "allow", "mode": "default", "source": "curated", "note": "interactive passthrough of write-side index (mirror of the strict deny row); strict-vs-interactive split for the same command"}
+{"command": "convo searcher --tool Bash", "expected": "deny", "mode": "auto", "source": "curated", "note": "anti-FP token boundary: 'searcher' is NOT 'search' (prefix match requires a space after the subcommand), so this unknown subcommand strict-denies"}
+{"command": "convo summarize", "expected": "deny", "mode": "auto", "source": "curated", "note": "anti-FP token boundary: 'summarize' must not match the 'summary' prefix; strict default-deny"}
+{"command": "pipx run convo summary", "expected": "deny", "mode": "auto", "source": "curated", "note": "wrong runner: pipx run is not a registered convo invocation (only convo / uv run convo / uvx convo) -> strict default-deny even for a read-only subcommand"}
+{"command": "convo", "expected": "deny", "mode": "auto", "source": "curated", "note": "bare convo with no subcommand: SAFE_PREFIXES only registers 'convo <sub>' forms, so bare convo strict-denies"}
+{"command": "convo --help", "expected": "deny", "mode": "auto", "source": "curated", "note": "global flag before any subcommand: 'convo --help' doesn't match 'convo <read-only-sub>'; strict default-deny"}
+{"command": "convo stats hooks --passthrough", "expected": "allow", "mode": "default", "source": "curated", "note": "interactive companion to the strict allow row: read-only stats is a registered safe prefix, allowed in both modes"}
+{"command": "convo searchx", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP interactive: unknown 'searchx' subcommand passes through (no deny matcher) -> allow; pairs with the strict-deny boundary rows"}
+{"command": "env convo summary", "expected": "allow", "mode": "auto", "source": "curated", "note": "env-wrapper re-evaluates the inner against SAFE_PREFIXES; bare env wrapping a read-only convo subcommand is safe even in strict"}
+{"command": "env CONVO_DB=/tmp/x.db convo stats", "expected": "allow", "mode": "auto", "source": "curated", "note": "env K=V assignments are skipped to reach the wrapped read-only convo subcommand; still safe in strict"}
+{"command": "env -i convo summary", "expected": "deny", "mode": "auto", "source": "curated", "note": "env -i is the canonical RCE-wrapper flag; _is_safe_env rejects any env flag -> strict-deny even though the inner is read-only"}
+{"command": "env convo index", "expected": "deny", "mode": "auto", "source": "curated", "note": "env-wrapper allow path only fires when the inner is a SAFE_PREFIX; write-side index inner is not -> strict-deny"}
+{"command": "timeout 5 convo summary", "expected": "deny", "mode": "auto", "source": "curated", "note": "timeout runner prefix is not allow-unwrapped; head token timeout is not a SAFE_PREFIX -> strict-deny even for a read-only inner"}

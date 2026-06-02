@@ -95,20 +95,236 @@ def test_interpreter_help_version_not_denied(command: str) -> None:
 # ============================================================================
 
 INTERPRETER_MODULE_OR_SCRIPT_DENY = [
+    # --- network / listener / encode / archive / installer modules ---
     "python -m http.server 9000",
-    "python -m pip install requests",  # pip routes through registry-asK; this also denies as module-form
+    "python -m http.server",
+    "python -mhttp.server",  # fused unsafe
+    "python -m base64",
+    "python -m base64 -d secret.b64",
+    "python -m zipfile -e a.zip .",
+    "python -m tarfile",
+    "python -m pip install requests",
+    "python3 -m pip install foo",
+    "python -m ftplib",
+    "python -m smtplib",
+    "python -m socketserver",
+    "python -m pdb /tmp/x.py",  # debugger can exec arbitrary code
+    "python -m code",  # interactive interpreter
+    "python -m runpy /tmp/x.py",
+    # --- unknown / not-in-set modules ---
+    "python -m some_unknown_module",
+    "python -m os",
+    "python -m subprocess",
+    "python3 -msys",  # fused unknown
+    # --- submodule of a safe top-level (exact-match miss) ---
+    "python -m json.tool.foo",
+    "python -m venv.something",
+    # --- bare script paths (no -m at all) ---
     "python /tmp/attacker.py",
     "python3 /tmp/x.py",
     "node /tmp/x.js",
     "ruby /tmp/x.rb",
+    "ruby a.rb",
+    "perl /tmp/x.pl",
+    "php /tmp/x.php",
+    "python ./local_script.py",
+    # --- malformed bare -m (no module) ---
+    "python -m",
+    # --- code-executing stdlib modules: NOT in the safe set (adversarial pass) ---
+    # timeit's -s runs arbitrary setup code; unittest -m imports/runs a module.
+    # Neither has a SAFE_PREFIX backstop, so they must hard-deny like any -m RCE.
+    "python -m timeit",
+    "python -m timeit -s \"__import__('os').system('id')\" pass",
+    "python -munittest",
     "python -m unittest",
-    "python -mhttp.server",
+    "pypy3 -m unittest",
+    "python -mtimeit",
 ]
 
 
 @pytest.mark.parametrize("command", INTERPRETER_MODULE_OR_SCRIPT_DENY)
 def test_interpreter_module_or_script_denied(command: str) -> None:
     assert _is_deny(decide(command)), f"module/script bypass: {command!r}"
+
+
+# ============================================================================
+# python -m <safe stdlib module> — FP-1 safe-module allowlist
+# ============================================================================
+
+INTERPRETER_SAFE_MODULE_ALLOW = [
+    # Every member of _SAFE_INTERPRETER_MODULES, spaced form
+    "python3 -m json.tool",
+    "python -m json.tool",
+    "python -m venv .venv",  # trailing operand must not re-trigger deny
+    "python3 -m pytest",
+    "python -m site",
+    "python -m compileall .",  # trailing path operand
+    "python -m tokenize",
+    "python -m calendar",
+    "python -m calendar 2026 5",
+    "python -m this",
+    # Fused short-flag form (no space)
+    "python3 -mjson.tool",
+    "python -mvenv",
+    "python3 -mpytest",
+    # Version-suffixed and alt interpreters resolve via the same basename regex
+    "python3.12 -m json.tool",
+    "python3.11 -m pytest",
+    "pypy -m json.tool",
+    # Runner-wrapper that is NOT stripped today — regression guard (already allows)
+    "uv run python -m json.tool",
+]
+
+
+@pytest.mark.parametrize("command", INTERPRETER_SAFE_MODULE_ALLOW)
+def test_interpreter_safe_module_not_denied(command: str) -> None:
+    res = decide(command)
+    assert not _is_deny(res), f"safe-module false deny: {command!r} -> {res}"
+
+
+INTERPRETER_FP1_ADVERSARIAL_DENY = [
+    # Safe module name as a prefix of an unsafe module — must NOT match
+    "python -m json.tooling",  # not 'json.tool'
+    "python -m venvil",  # not 'venv'
+    "python -m pytestx",  # not 'pytest'
+    "python -m sitecustomize",  # not 'site'
+    "python -m thisthing",  # not 'this'
+    # Safe-module token in the wrong position (not the -m operand)
+    "python /tmp/json.tool",  # bare script literally named json.tool
+    "python json.tool",  # positional, no -m → script path
+    "python -m http.server json.tool",  # first module after -m is unsafe
+    # -m appears but eval flag also present → eval arm must still deny
+    "python -m json.tool -c 'import os'",  # -c is the operative RCE
+    "python -c 'import json.tool'",  # eval flag, not a module run
+    # Fused -m with safe-prefix-but-unsafe-full module
+    "python -mjson.tooling",
+    "python -mbase64",
+    # Double -m (only the first is the module; pathological)
+    "python -m http.server -m json.tool",  # first -m unsafe → deny
+    # env-prefixed unsafe (candidate-forms peels env → still hits matcher)
+    "env python -m http.server",
+    "env python /tmp/x.py",
+    # sudo / wrapper-stacked unsafe
+    "sudo python -m http.server",
+    # osascript -e (eval arm, listed as dangerous interpreter)
+    "osascript -e 'do shell script \"id\"'",
+]
+
+
+@pytest.mark.parametrize("command", INTERPRETER_FP1_ADVERSARIAL_DENY)
+def test_interpreter_fp1_adversarial_denied(command: str) -> None:
+    assert _is_deny(decide(command)), f"adversarial bypass: {command!r}"
+
+
+INTERPRETER_FP1_ADVERSARIAL_ALLOW = [
+    # Fused/spaced parity for the safe modules
+    "python3 -mcompileall",
+    "python3 -m compileall",
+    # env-prefixed SAFE module — candidate-forms peels env, then safe-module allows
+    "env python -m json.tool",
+    # safe flags interleaved before the -m
+    "python -V",  # (already in INTERPRETER_LEGIT; parity check)
+    # safe module with multiple trailing operands
+    "python -m venv --clear .venv",
+    "python -m compileall -q src tests",
+]
+
+
+@pytest.mark.parametrize("command", INTERPRETER_FP1_ADVERSARIAL_ALLOW)
+def test_interpreter_fp1_adversarial_not_denied(command: str) -> None:
+    res = decide(command)
+    assert not _is_deny(res), f"adversarial false deny: {command!r} -> {res}"
+
+
+# ============================================================================
+# NEW-G: POSIX test builtins `[` / `[[` must not trip bash.glob_head
+# ============================================================================
+# A bare ``[`` (the ``test`` builtin) or ``[[`` (bash conditional) head token
+# matches _GLOB_HEAD_RE because ``[`` is a glob metacharacter, but it is never
+# a filename glob — a real glob head has additional characters (``[abc]*``).
+
+GLOB_HEAD_TEST_BUILTIN_ALLOW = [
+    "[ -f /tmp/x ]",
+    '[ -n "$x" ]',
+    "[ 1 -eq 1 ]",
+    "[ -d /tmp/foo ]",
+    "[[ -d /tmp ]]",
+    '[[ -n "$HOME" ]]',
+    "[[ a == b ]]",
+    "test -f /tmp/x",  # no glob char at all — sanity
+]
+
+
+@pytest.mark.parametrize("command", GLOB_HEAD_TEST_BUILTIN_ALLOW)
+def test_test_builtin_not_glob_head_denied(command: str) -> None:
+    res = decide(command)
+    assert not _is_deny(res), f"test-builtin false deny: {command!r} -> {res}"
+
+
+GLOB_HEAD_REAL_GLOB_DENY = [
+    "*.sh",  # bare glob as command head
+    "?cmd arg",
+    "[abc]* foo",  # bracket glob with trailing chars — real glob, still deny
+    "/usr/bin/*sh",
+    "[a-z]*.py",
+]
+
+
+@pytest.mark.parametrize("command", GLOB_HEAD_REAL_GLOB_DENY)
+def test_real_glob_head_still_denied(command: str) -> None:
+    assert _is_deny(decide(command)), f"real glob head must still deny: {command!r}"
+
+
+# ============================================================================
+# NEW-C: read-only diagnostics must be allowed in strict mode
+# ============================================================================
+# These are genuinely read-only and were hard-denied by strict default-deny
+# (not on SAFE_PREFIXES). `fd` is intentionally EXCLUDED (it has --exec/-x, an
+# RCE sink like find -exec); sed/awk stay out (write/exec sinks -> FP-3).
+
+STRICT_READONLY_DIAGNOSTIC_ALLOW = [
+    "hostname",
+    "whoami",
+    "id",
+    "id -u",
+    "uname",
+    "uname -a",
+    "diff a.txt b.txt",
+    "cmp a.bin b.bin",
+    "basename /a/b/c",
+    "dirname /a/b/c",
+    "realpath ./x",
+    "comm a.txt b.txt",
+    "column -t data.txt",
+    "printenv PATH",
+    "printenv",
+    "yq '.a.b' config.yaml",
+    # POSIX test builtins reach strict default-deny once glob_head exempts them
+    "[ -f /tmp/x ]",
+    "[[ -d /tmp ]]",
+]
+
+
+@pytest.mark.parametrize("command", STRICT_READONLY_DIAGNOSTIC_ALLOW)
+def test_strict_readonly_diagnostic_allowed(command: str) -> None:
+    res = decide(command, permission_mode="dontAsk")
+    assert not _is_deny(res), f"read-only diagnostic false deny in strict: {command!r} -> {res}"
+
+
+# fd must NOT become a blanket allow — --exec is an RCE sink.
+FD_EXEC_STILL_DENY = [
+    "fd -x rm {}",
+    "fd --exec rm",
+    "fd -e py -x python {}",
+]
+
+
+@pytest.mark.parametrize("command", FD_EXEC_STILL_DENY)
+def test_fd_exec_not_allowed_in_strict(command: str) -> None:
+    # fd is deliberately unregistered; strict mode denies it (no exec sink slips through).
+    assert _is_deny(decide(command, permission_mode="dontAsk")), (
+        f"fd exec must not allow: {command!r}"
+    )
 
 
 # ============================================================================
@@ -1086,6 +1302,11 @@ GIT_HISTORY_DENY = [
     "git worktree add -b exploit /etc/systemd/system HEAD",
     "git worktree add -B branch /usr/local/wt HEAD",
     "git worktree add --reason hold /var/lib/wt HEAD",
+    # -b/-B create a new branch ref -> denied even on a SAFE path (same class as
+    # `git branch <name>`). The non-creating `worktree add <path> <branch>` form
+    # stays in the legit list above.
+    "git worktree add -b feature /Users/dev/develop/repo/wt HEAD",
+    "git worktree add -B feature /tmp/wt main",
 ]
 
 GIT_REMOTE_MUTATION_DENY = [
@@ -1138,8 +1359,7 @@ GIT_HISTORY_LEGIT = [
     "git worktree add ./local-wt HEAD",
     "git worktree add /Users/dev/develop/repo/wt HEAD",
     "git worktree add /home/dev/projects/repo/wt HEAD",
-    # Flag with value, then legitimate path
-    "git worktree add -b feature /Users/dev/develop/repo/wt HEAD",
+    # --track on an existing branch creates no new ref -> still allowed.
     "git worktree add --track /tmp/wt HEAD",
     "git reflog show",
     "git gc",  # bare gc (no prune=now) — slower but recoverable
@@ -1726,6 +1946,12 @@ DENY_REASON_FORMAT_CASES = [
     # bash.credential_leak — credential scanner.
     # NB: the literal below is a synthetic test fixture, not a real key.
     ("aws " + "iam " + "create-access-key --user-name root", "bash.credential_leak"),
+    # bash.secret_value — generic entropy arm (gated on a credential-ish NAME).
+    ("export SECRET_KEY=Xy9kL2mNp7qR4sT8vW1zA6bC3dE5fG0hJ", "bash.secret_value"),
+    # bash.conditional_denied_flag — find's -delete denied-flag sink.
+    ("find . -delete", "bash.conditional_denied_flag"),
+    # bash.function_definition — inline function def (the ':' fork-bomb idiom).
+    (":(){ :|:& };:", "bash.function_definition"),
 ]
 
 

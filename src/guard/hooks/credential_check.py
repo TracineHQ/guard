@@ -200,6 +200,11 @@ _ASK_REASON_VAR = (
 )
 
 
+# Write-class tools whose credential subject is the DESTINATION path, not paths
+# mentioned in the content body (see ``decide``).
+_WRITE_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+
+
 def _expand(path: str) -> str:
     """Expand ``~`` and resolve ``..`` segments lexically (no FS lookup).
 
@@ -406,10 +411,25 @@ def decide(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(tool_input, dict):
         return None
 
+    is_bash = tool_name == "Bash"
+
+    # Write-class tools: the credential subject is the file being WRITTEN, not
+    # paths merely mentioned in the body. A doc / test fixture / source file that
+    # references ~/.ssh or ~/.aws is not touching the credential, so scanning the
+    # content would ASK on every such edit -- a false positive that buries the
+    # real signal. Check only the destination path: writing TO a credential file
+    # still ASKs; credential MATERIAL in the body is the secret-value detector's
+    # job (it matches key contents, not path mentions).
+    if tool_name in _WRITE_TOOLS:
+        for field in ("file_path", "notebook_path"):
+            target = tool_input.get(field, "")
+            if isinstance(target, str) and _hits_credential(target):
+                return emit_pretooluse_decision("ask", _ASK_REASON)
+        return None
+
     # Tier 1 + Tier 4 + Tier 6: any path-like token in any field. For Bash the
     # tokens come from a command string, where the filename-keyword heuristic
     # over-fires on grep patterns / args — use the path+extension matcher only.
-    is_bash = tool_name == "Bash"
     for raw in all_paths_in(tool_input):
         hit = _hits_credential_strict(raw) if is_bash else _hits_credential(raw)
         if hit:

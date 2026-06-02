@@ -66,7 +66,7 @@ section is the contract. Consumers can opt-in by reading the env var directly
 | `command_excerpt` | string \| null | optional | truncated to 4096 chars; only set for Bash-related decisions. Secret-shapes are redacted at write time. |
 | `session_id` | string | yes (decision) | from Claude Code stdin |
 | `cwd` | string | optional | from Claude Code stdin |
-| `unknown_flags` | array of strings | optional | long flags an admin CLI verb matcher could not classify against the spec's `known_flags`; capped at 8 entries. Populated only on `bash.admin_*` decisions and when the offending segment is for a CLI with a known-flags spec (currently: AWS). |
+| `unknown_flags` | array of strings | optional | long flags an admin CLI verb matcher could not classify against the spec's `known_flags`; capped at 8 entries. Populated only on `bash.admin_*` decisions and when the offending segment is for a CLI with a non-empty `known_flags` spec (currently aws, gcloud, az, kubectl; launchctl has no known-flags spec, so it never populates this field). See `ADMIN_CLI_SPECS` in `hooks/_admin_specs.py`. |
 
 ### 3.1 Mode semantics
 
@@ -215,9 +215,9 @@ so operators see prompt frequency alongside deny frequency. Pass
 ## 7. Examples
 
 ```json
-{"v":1,"schema_version":1,"mode":"enforce","timestamp":"2026-04-29T14:32:11.123456Z","hook_id":"guard.bash_command_validator","event":"PreToolUse","tool_name":"Bash","decision":"allow","reason":"Read-only command","command_excerpt":"ls -la","session_id":"abc-123","cwd":"/home/alice/project"}
-{"v":1,"schema_version":1,"mode":"enforce","timestamp":"2026-04-29T14:32:12.987654Z","hook_id":"guard.bash_command_validator","event":"PreToolUse","tool_name":"Bash","decision":"deny","reason":"git add -A is denied: stages all files indiscriminately","command_excerpt":"git add -A","session_id":"abc-123","cwd":"/home/alice/project"}
-{"v":1,"schema_version":1,"mode":"enforce","timestamp":"2026-04-29T14:32:13.456789Z","hook_id":"guard.protected_files","event":"PreToolUse","tool_name":"Edit","decision":"ask","reason":"Edit to .env requires user confirmation","session_id":"abc-123","cwd":"/home/alice/project"}
+{"type":"decision","v":1,"schema_version":1,"mode":"enforce","timestamp":"2026-04-29T14:32:11.123456Z","hook_id":"guard.bash_command_validator","event":"PreToolUse","tool_name":"Bash","decision":"allow","reason":"Read-only command","command_excerpt":"ls -la","session_id":"abc-123","cwd":"/home/alice/project"}
+{"type":"decision","v":1,"schema_version":1,"mode":"enforce","timestamp":"2026-04-29T14:32:12.987654Z","hook_id":"guard.bash_command_validator","event":"PreToolUse","tool_name":"Bash","decision":"deny","reason":"git add -A is denied: stages all files indiscriminately","command_excerpt":"git add -A","session_id":"abc-123","cwd":"/home/alice/project"}
+{"type":"decision","v":1,"schema_version":1,"mode":"enforce","timestamp":"2026-04-29T14:32:13.456789Z","hook_id":"guard.protected_files","event":"PreToolUse","tool_name":"Edit","decision":"ask","reason":"Edit to .env requires user confirmation","session_id":"abc-123","cwd":"/home/alice/project"}
 ```
 
 ## 8. Reference implementation

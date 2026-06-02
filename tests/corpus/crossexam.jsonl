@@ -1,0 +1,56 @@
+{"command": "bwrap --ro-bind / / --remount-ro /dev rm -rf /", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-B/F3: --remount-ro (1-value) consumed so inner rm -rf / is seen and denied (was allow -- flag defaulted to arity 0, /dev became the head)"}
+{"command": "bwrap --ro-bind / / --remount-ro /dev rm -rf /", "expected": "deny", "mode": "auto", "source": "crossexam", "note": "R-B/F3: strict counterpart"}
+{"command": "bwrap --ro-bind /usr /usr --overlay-src /data rm -rf /home", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-B/F3: --overlay-src (1-value) overlay family"}
+{"command": "bwrap --ro-bind / / --tmp-overlay /opt rm -rf /etc", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-B/F3: --tmp-overlay (1-value)"}
+{"command": "bwrap --ro-bind / / --ro-overlay /var rm -rf /home", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-B/F3: --ro-overlay (1-value)"}
+{"command": "bwrap --ro-bind / / --overlay-src /data su -", "expected": "ask", "mode": "default", "source": "crossexam", "note": "R-B/F3: overlay-src consumed, inner su - escalation surfaces as ask"}
+{"command": "bwrap --ro-bind / / --overlay-src /data su -", "expected": "deny", "mode": "auto", "source": "crossexam", "note": "R-B/F3: strict downgrades the escalation to deny"}
+{"command": "bwrap --overlay /rw /work /dest rm -rf /", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-B/F3: --overlay (3-value) consumed, inner rm -rf /"}
+{"command": "stdbuf -o0 sudo find . -delete", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-C/F4: stacked exec-wrapper(stdbuf)+runner(sudo) now fully peels to find -delete (was allow -- runner peel not re-applied to exec-wrapper inner)"}
+{"command": "stdbuf -o0 sudo find . -delete", "expected": "deny", "mode": "auto", "source": "crossexam", "note": "R-C/F4: strict counterpart"}
+{"command": "stdbuf -o0 timeout 5 find . -delete", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-C/F4: stdbuf+timeout stack"}
+{"command": "flock /tmp/l timeout 5 sudo find . -delete", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-C/F4: triple stack flock+timeout+sudo"}
+{"command": "watch sudo find . -delete", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-C/F4: watch+sudo stack"}
+{"command": "unshare timeout 5 find . -delete", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-C/F4: unshare+timeout stack"}
+{"command": "firejail sudo find . -delete", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-C/F4: firejail+sudo stack"}
+{"command": "chroot /tmp sudo find . -delete", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-C/F4: chroot+sudo stack"}
+{"command": "stdbuf -o0 env FOO=1 find . -delete", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-C/F4: stdbuf+env K=V stack"}
+{"command": "stdbuf -o0 timeout 5 sudo find . -delete", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-C/F4: stdbuf+timeout+sudo triple stack"}
+{"command": "bwrap --ro-bind /usr /usr ls", "expected": "allow", "mode": "default", "source": "crossexam", "note": "anti-FP R-B: benign sandboxed ls stays allow"}
+{"command": "bwrap --overlay-src /data ls -la", "expected": "allow", "mode": "default", "source": "crossexam", "note": "anti-FP R-B: benign overlay-src + ls not over-denied"}
+{"command": "stdbuf -o0 ls", "expected": "allow", "mode": "default", "source": "crossexam", "note": "anti-FP R-C: benign stdbuf ls"}
+{"command": "watch sudo ls", "expected": "allow", "mode": "default", "source": "crossexam", "note": "anti-FP R-C: watch+sudo peels but benign ls is not dangerous"}
+{"command": "\"gh\" auth token", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-A: quoted command head no longer blanks the CLI name out of the masked credential-leak view (was allow)"}
+{"command": "\"gh\" auth token", "expected": "deny", "mode": "auto", "source": "crossexam", "note": "R-A: credential leak is a both-mode floor"}
+{"command": "'gh' auth token", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-A: single-quoted head"}
+{"command": "gh auth \"token\"", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-A: quoted subcommand"}
+{"command": "g\"h\" auth token", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-A: split-quoted head g\"h\" folds to gh"}
+{"command": "echo \"gh auth token\"", "expected": "allow", "mode": "default", "source": "crossexam", "note": "anti-FP R-A: quoted PHRASE (has whitespace) stays masked -- echoing text is not execution position"}
+{"command": "echo \"$(gh auth token)\"", "expected": "deny", "mode": "default", "source": "crossexam", "note": "anti-regression R-A: $() command-sub is left for the masker, still executes -> still denies"}
+{"command": "yq --inplace=true '.a=1' file.yaml", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-D/F6: =-joined long flag --inplace=true (flag part before = matches dangerous set; was allow)"}
+{"command": "yq --inplace=true '.a=1' file.yaml", "expected": "deny", "mode": "auto", "source": "crossexam", "note": "R-D/F6: strict"}
+{"command": "yq --in-place=true '.a=1' file.yaml", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-D/F6: --in-place=true hyphenated long form"}
+{"command": "yq --inplace=1 '.a=1' file.yaml", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-D/F6: --inplace=1 numeric value"}
+{"command": "sudo yq --inplace=true '.a=1' file.yaml", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-D/F6: wrapped --inplace=true"}
+{"command": "yq eval --inplace=true '.a=1' file.yaml", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-D/F6: eval subcommand + --inplace=true"}
+{"command": "yq -i.bak '.a=1' file.yaml", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-D/F6: -i.bak leading-letter short flag carries the -i in-place bit"}
+{"command": "yq -i9 '.a=1' file.yaml", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-D/F6: -i9 leading -i + digit suffix, denied for consistency"}
+{"command": "yq -I4 '.a' config.yaml", "expected": "allow", "mode": "default", "source": "crossexam", "note": "anti-FP R-D: -I4 uppercase indent is not the lowercase -i in-place flag"}
+{"command": "find . -name '-delete'", "expected": "allow", "mode": "default", "source": "crossexam", "note": "R-F: -delete as a -name search VALUE is not the destructive action flag (was a false-positive deny)"}
+{"command": "find . -name '-delete'", "expected": "allow", "mode": "auto", "source": "crossexam", "note": "R-F: strict conditional-safe"}
+{"command": "sudo find . -name '-delete'", "expected": "allow", "mode": "default", "source": "crossexam", "note": "R-F: wrapped find, -delete is the -name value"}
+{"command": "timeout 5 find . -iname '-delete'", "expected": "allow", "mode": "default", "source": "crossexam", "note": "R-F: -iname value variant"}
+{"command": "find . -empty -delete", "expected": "deny", "mode": "default", "source": "crossexam", "note": "anti-regression R-F: -empty is a 0-value primary -- it must NOT skip the real -delete action that follows"}
+{"command": "find . -name '*.log' -delete", "expected": "deny", "mode": "default", "source": "crossexam", "note": "anti-regression R-F: real -delete after a -name value still denies"}
+{"command": ":() ( :|:& )", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-F/F5: fork bomb with SUBSHELL body, func-def opener ( not {"}
+{"command": ":() ( :|:& )", "expected": "deny", "mode": "auto", "source": "crossexam", "note": "R-F/F5: subshell-body fork bomb strict"}
+{"command": "bomb() ( rm -rf / )", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-F/F5: named func subshell body hides inner rm -rf /"}
+{"command": "function bomb { rm -rf / ; }", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-F/F5: function-keyword form brace body"}
+{"command": "function bomb() { rm -rf / ; }", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-F/F5: function-keyword + () + brace body"}
+{"command": "function : { :|:& }", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-F/F5: function-keyword fork bomb name is colon"}
+{"command": "function bomb { rm -rf / ; }", "expected": "deny", "mode": "auto", "source": "crossexam", "note": "R-F/F5: function-keyword form strict"}
+{"command": "grep -rn \"foo() {\" .", "expected": "allow", "mode": "default", "source": "crossexam", "note": "anti-FP R-F/F5: func-def text as a grep search pattern is not a definition"}
+{"command": "grep -rn \"function bar\" src/", "expected": "allow", "mode": "default", "source": "crossexam", "note": "anti-FP R-F/F5: the word function in a search pattern is not the keyword form"}
+{"command": "function echo 'has { brace in arg'", "expected": "allow", "mode": "default", "source": "crossexam", "note": "anti-FP R-F/F5: { inside a quoted arg is not a function body opener"}
+{"command": "function foo", "expected": "allow", "mode": "default", "source": "crossexam", "note": "anti-FP R-F/F5: function NAME with no body opener is not a definition"}
+{"command": "function foo bar baz {qux}", "expected": "allow", "mode": "default", "source": "crossexam", "note": "anti-FP R-F/F5: body opener must follow the name; intervening words mean not a def"}

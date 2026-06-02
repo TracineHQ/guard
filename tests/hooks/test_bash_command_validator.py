@@ -228,9 +228,12 @@ class TestSubprocessIntegration:
         decision, _ = _run("# search\nfind . -name '*.py' -type f", tmp_path)
         assert decision == "allow"
 
-    def test_xargs_in_pipe_denied(self, tmp_path):
+    def test_xargs_read_only_pipe_advisory(self, tmp_path):
+        # FP-3: `xargs grep` is a read; the tool-preference nudge is advisory,
+        # not a hard deny (a destructive `xargs rm -rf /` still denies via the
+        # always-deny matcher — see test_fp3_course_correction.py).
         decision, _ = _run("find . -name '*.py' | xargs grep foo", tmp_path)
-        assert decision == "deny"
+        assert decision != "deny"
 
     def test_make_behind_comment_allowed(self, tmp_path):
         decision, _ = _run("# build\nmake test", tmp_path)
@@ -693,7 +696,63 @@ class TestCredentialLeakExecutionPosition:
             "aws sts get-session-token",
             "op read op://vault/item/field",
             "export TOKEN=$(gh auth token)",
+            # B4: bare unquoted prose, no heredoc -> mask leaves it visible.
+            "echo gh auth token",
         ],
     )
     def test_exec_position_still_flagged(self, command):
         assert get_credential_leak_deny(command) is not None, command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "tee docs/runbook.md <<'EOF'\nTo rotate, run gh auth token and paste the value.\nEOF",
+            "cat > runbook.md <<EOF\nFor temp creds run aws sts get-session-token here.\nEOF",
+            "cat <<EOF > notes.txt\nUse op read op://vault/item to fetch the secret.\nEOF",
+            "tee -a docs/SECURITY.md <<'EOF'\nNever paste the output of gh auth token into a PR.\nEOF",
+            "tee docs/aws.md <<-'EOF'\n\tDo not run aws iam create-access-key in CI.\n\tEOF",
+            "cat > playbook.md <<'EOF'\nStep 1: gh auth token. Step 2: op read op://v/i.\nEOF",
+            "tee docs/x.md <<'EOF'\nThe EOFENDING note: run gh auth token only locally.\nEOF",
+        ],
+    )
+    def test_writedoc_heredoc_body_not_flagged(self, command):
+        # Write/doc-sink heredoc bodies are blanked by the mask, so a credential
+        # CLI named in the prose is not read as a live invocation.
+        assert get_credential_leak_deny(command) is None, command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "bash <<EOF\ngh auth token\nEOF",
+            "sh <<'EOF'\naws sts get-session-token\nEOF",
+            "cat <<EOF | sh\nop read op://vault/item\nEOF",
+            'eval "$(cat <<EOF\ngh auth token\nEOF\n)"',
+        ],
+    )
+    def test_evalsink_heredoc_body_still_flagged(self, command):
+        # Eval/shell-sink heredoc bodies are NEVER blanked, so the credential CLI
+        # stays in execution position and the leak deny still fires.
+        assert get_credential_leak_deny(command) is not None, command
+
+    @pytest.mark.parametrize(
+        ("command", "expect_flagged"),
+        [
+            ("tee doc.md <<-'EOF'\n\trun gh auth token\n\tEOF", False),
+            ("bash <<-EOF\n\tgh auth token\n\tEOF", True),
+            ("tee a.md <<'EOF'\ngh auth token\nEOF", False),
+            ("tee a.md <<EOF\ngh auth token\nEOF", False),
+            ("tee out.md <<'A' <<'B'\ngh auth token\nA\nop read op://v/i\nB", False),
+            ("cat <<EOF > x.md | sh\ngh auth token\nEOF", True),
+            ("tee n.md <<'END'\nEND_OF_SECTION mentions gh auth token here\nEND", False),
+            ("gh auth token | tee log.md <<'EOF'\nnotes\nEOF", True),
+            ("tee f.md <<'EOF'\nnotes\nEOF\n$(gh auth token)", True),
+            ("tee f.md <<'EOF'\ngh auth token", True),
+            ("mycmd <<'EOF'\ngh auth token\nEOF", True),
+        ],
+    )
+    def test_heredoc_masking_edge_cases(self, command, expect_flagged):
+        result = get_credential_leak_deny(command)
+        if expect_flagged:
+            assert result is not None, command
+        else:
+            assert result is None, command
