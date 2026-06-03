@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-06-03
+
+- Reduce bash-matcher friction, add corpus harness (#64)
+- Use client-id for plugins dispatcher App auth (#59)
+- Pass App credentials to cut-release reusable and bump SHA (#58)
+- Bump plugins cut-release-reusable SHA for changelog filter fixes (#57)
+- Bump plugins cut-release-reusable SHA for auto-changelog (#56)
+- Notify plugins via GitHub App token instead of long-lived PAT (#55)
+- Add cut-release dispatcher + plugins notify (#54)
+- Hook sys.path bootstrap + claude plugin validate wiring (#53)
+
 ## [1.4.1] - 2026-05-19
 
 ### Fixed
