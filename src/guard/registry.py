@@ -186,34 +186,12 @@ COMMANDS: list[CommandRule] = [
         "git-write",
         strict_feedback="Queue cherry-pick for session end.",
     ),
-    CommandRule(
-        "git branch -d",
-        Safety.ASK,
-        "Deletes branch (safe)",
-        "git-branch",
-        strict_feedback="Queue branch deletion for session end.",
-    ),
-    CommandRule(
-        "git branch -m",
-        Safety.ASK,
-        "Renames branch",
-        "git-branch",
-        strict_feedback="Queue branch rename for session end.",
-    ),
-    CommandRule(
-        "git tag -a",
-        Safety.ASK,
-        "Creates annotated tag",
-        "git-branch",
-        strict_feedback="Queue tag creation for session end.",
-    ),
-    CommandRule(
-        "git tag -d",
-        Safety.ASK,
-        "Deletes tag",
-        "git-branch",
-        strict_feedback="Queue tag deletion for session end.",
-    ),
+    # git branch -d/-m and git tag -a/-d (and bare ``tag/branch <name>`` creation,
+    # remote write-actions) are denied in BOTH modes by the ``git_ref_violation``
+    # predicate via the ``bash.git_ref_mutation`` synthetic matcher -- a ref
+    # mutation under a read-only listing prefix. They are intentionally NOT ASK
+    # rules: a local ref write should not auto-run unattended, nor silently in an
+    # interactive agent session.
     # --- Git DENY ---
     CommandRule("git add -A", Safety.DENY, "Adds all files indiscriminately", "git-deny"),
     CommandRule("git add --all", Safety.DENY, "Adds all files indiscriminately", "git-deny"),
@@ -345,6 +323,25 @@ COMMANDS: list[CommandRule] = [
     CommandRule("bc", Safety.ALLOW, "Calculator", "util"),
     CommandRule("cd", Safety.ALLOW, "Change directory", "util"),
     CommandRule("mkdir -p", Safety.ALLOW, "Create directory", "util"),
+    # --- Read-only diagnostics (ALLOW) ---
+    # Genuinely read-only; previously hard-denied by strict default-deny. `fd`
+    # is intentionally absent (it has --exec/-x, an RCE sink like find -exec).
+    CommandRule("hostname", Safety.ALLOW, "Hostname", "util"),
+    CommandRule("whoami", Safety.ALLOW, "Current user", "util"),
+    CommandRule("id", Safety.ALLOW, "User/group ids", "util"),
+    CommandRule("uname", Safety.ALLOW, "System info", "util"),
+    CommandRule("diff", Safety.ALLOW, "Compare files", "file-read", pipe_safe=True),
+    CommandRule("cmp", Safety.ALLOW, "Compare files", "file-read"),
+    CommandRule("basename", Safety.ALLOW, "Strip path", "util"),
+    CommandRule("dirname", Safety.ALLOW, "Path directory", "util"),
+    CommandRule("realpath", Safety.ALLOW, "Resolve path", "util"),
+    CommandRule("comm", Safety.ALLOW, "Compare sorted files", "text"),
+    CommandRule("column", Safety.ALLOW, "Columnate text", "text", pipe_safe=True),
+    CommandRule("printenv", Safety.ALLOW, "Print env var", "util"),
+    # POSIX test builtin (`[`) and bash conditional (`[[`) — read-only
+    # predicates, peers of the already-allowed `test`.
+    CommandRule("[", Safety.ALLOW, "Test expression", "util"),
+    CommandRule("[[", Safety.ALLOW, "Conditional expression", "util"),
     # --- Python (ALLOW) ---
     # Bare `python`/`python3` are routed through `_is_safe_interpreter` because
     # `python -c '...'` / `-m <module>` re-exec arbitrary code; bare prefix
@@ -952,10 +949,76 @@ COMMANDS: list[CommandRule] = [
 ]
 
 
+# === Guard's own read-only CLI subcommands (auto-registered, drift-tested) ===
+# These guard subcommands are dry-run / read-only by construction: they print or
+# inspect state, and ``guard test <cmd>`` analyzes a command string WITHOUT
+# executing it. Registering them keeps strict mode (auto/dontAsk/bypass) from
+# default-denying guard's own diagnostic tooling -- the friction that made
+# ``uv run guard test`` itself undeniable in an unattended session. WRITE
+# subcommands (``mode``, ``migrate-log``, and the ``allowlist`` mutators) are
+# excluded: they change guard's config and must not be blanket-allowed. The
+# allowlist's read-only sub-subcommands (``list`` / ``rules``) are registered
+# explicitly. Drift-proof: a CLI-introspection test asserts every subcommand is
+# classified in exactly one of the read-only / write sets, so a new subcommand
+# cannot silently ship unclassified.
+GUARD_READ_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
+    {"status", "healthcheck", "noisy", "silent", "trace", "test", "diff", "corpus"}
+)
+GUARD_WRITE_SUBCOMMANDS: frozenset[str] = frozenset({"allowlist", "migrate-log", "mode"})
+_GUARD_READ_ONLY_SUBPREFIXES: frozenset[str] = GUARD_READ_ONLY_SUBCOMMANDS | {
+    "allowlist list",
+    "allowlist rules",
+}
+# Invocation forms: bare (on PATH) and via uv/uvx, since guard is typically run
+# as ``uv run guard`` from a project venv.
+_GUARD_INVOCATIONS: tuple[str, ...] = ("guard", "uv run guard", "uvx guard")
+_GUARD_SAFE_PREFIXES: frozenset[str] = frozenset(
+    f"{inv} {sub}" for inv in _GUARD_INVOCATIONS for sub in _GUARD_READ_ONLY_SUBPREFIXES
+)
+
+
+# === convo: first-party read-only conversation-history CLI ===
+# convo (TracineHQ/convo) is guard's sibling diagnostic -- it queries an index of
+# Claude Code transcripts. Its query subcommands print analytics and mutate no
+# repo or system state, so registering them keeps strict mode from default-denying
+# the agent's (and the control plane's) own introspection tooling -- the same
+# friction guard's own ``test`` / ``corpus`` subcommands hit before they were
+# registered. Unlike GUARD_READ_ONLY_SUBCOMMANDS, this list is NOT drift-tested
+# against a live parser (guard cannot import convo's CLI), so it is deliberately
+# fail-safe: write-side subcommands (``backup`` / ``restore`` / ``index`` /
+# ``index-guard``, which rebuild or restore convo's local DB cache) and any
+# future convo subcommand are simply
+# absent, which means strict mode still denies them (passthrough interactive) --
+# drift can only under-permit, never silently auto-allow something new. The
+# behavior is pinned by tests/corpus/convo.jsonl.
+CONVO_READ_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
+    {
+        "summary",
+        "search",
+        "stats",
+        "diff",
+        "inspect",
+        "info",
+        "snapshots",
+        "projects",
+        "tools",
+        "sessions",
+    }
+)
+_CONVO_INVOCATIONS: tuple[str, ...] = ("convo", "uv run convo", "uvx convo")
+_CONVO_SAFE_PREFIXES: frozenset[str] = frozenset(
+    f"{inv} {sub}" for inv in _CONVO_INVOCATIONS for sub in CONVO_READ_ONLY_SUBCOMMANDS
+)
+
+
 # === Derived Data Structures ===
 
-SAFE_PREFIXES: frozenset[str] = frozenset(
-    cmd.prefix for cmd in COMMANDS if cmd.safety == Safety.ALLOW and not cmd.requires_classifier
+SAFE_PREFIXES: frozenset[str] = (
+    frozenset(
+        cmd.prefix for cmd in COMMANDS if cmd.safety == Safety.ALLOW and not cmd.requires_classifier
+    )
+    | _GUARD_SAFE_PREFIXES
+    | _CONVO_SAFE_PREFIXES
 )
 
 SAFE_PIPE_COMMANDS: frozenset[str] = frozenset(cmd.prefix for cmd in COMMANDS if cmd.pipe_safe)
@@ -999,10 +1062,10 @@ DANGEROUS_INTERPRETERS: frozenset[str] = frozenset(
 # DANGEROUS_INTERPRETERS binary.
 INTERPRETER_EVAL_FLAGS: frozenset[str] = frozenset({"-c", "-e", "--eval", "eval"})
 
-# Wrapper runners that exec a tool from a downloaded environment. The
-# validator unwraps these and re-runs the dangerous-interpreter check on
-# the inner command.
-INTERPRETER_RUNNER_WRAPPERS: frozenset[str] = frozenset({"uvx", "pipx"})
+# Wrapper runners that exec a tool from a downloaded or project environment.
+# The validator unwraps these and re-runs the dangerous-interpreter check on
+# the inner command (``uvx <tool>``, ``pipx run <tool>``, ``uv run <tool>``).
+INTERPRETER_RUNNER_WRAPPERS: frozenset[str] = frozenset({"uvx", "pipx", "uv"})
 
 # Catastrophic operands for recursive ``rm``. Any of these as an operand to
 # a recursive ``rm`` form is denied regardless of flag ordering. Top-level
@@ -1198,6 +1261,185 @@ GIT_CONFIG_EXEC_SINK_GLOBS: tuple[tuple[str, str], ...] = (
     # transport (RCE on fetch). Match ``protocol.<scheme>.allow``.
     ("protocol.", ".allow"),
 )
+
+
+# --- Read-only git subcommands coerced into write/exec/ref-mutation ----------
+#
+# The read-only git allowlist (status/log/diff/show/branch/tag/grep/remote ...)
+# matches on the bare subcommand. But several of those subcommands write a file,
+# exec an external program, or create/mutate a ref when given certain flags or a
+# positional. Two severity tiers, two predicates -- each the SINGLE source of
+# truth shared by the bash matcher and git_c_validator so they cannot drift:
+#   git_read_exec_violation -- RCE-class file-write/exec flags. Hard-deny.
+#   git_ref_violation       -- low-severity local ref create/mutate. Strict-gated.
+
+# diff-like subcommands: ``--output[=path]`` writes a file; ``--ext-diff`` runs
+# the configured external diff (GIT_EXTERNAL_DIFF / diff.external) = exec.
+_GIT_DIFFLIKE_SUBCOMMANDS: frozenset[str] = frozenset({"log", "show", "diff", "whatchanged"})
+
+# branch/tag are read-only when listing but mutate a ref with a positional name
+# or any of these flags. ``-l``/``--list`` (and the other list/query flags) keep
+# them in read mode -- with one of those present a positional is a pattern.
+_GIT_BRANCH_MUTATING_FLAGS: frozenset[str] = frozenset(
+    {
+        "-d",
+        "-D",
+        "-m",
+        "-M",
+        "-c",
+        "-C",
+        "--delete",
+        "--move",
+        "--copy",
+        "--force",
+        "-f",
+        "--edit-description",
+        "--set-upstream-to",
+        "-u",
+        "--unset-upstream",
+        "--track",
+    }
+)
+_GIT_TAG_MUTATING_FLAGS: frozenset[str] = frozenset(
+    {
+        "-d",
+        "--delete",
+        "-a",
+        "--annotate",
+        "-s",
+        "--sign",
+        "-u",
+        "--local-user",
+        "-m",
+        "--message",
+        "-F",
+        "--file",
+        "-f",
+        "--force",
+        "--create-reflog",
+        "-e",
+        "--edit",
+    }
+)
+_GIT_REF_LIST_FLAGS: frozenset[str] = frozenset(
+    {
+        "-l",
+        "--list",
+        "-a",
+        "--all",
+        "-r",
+        "--remotes",
+        "-v",
+        "-vv",
+        "--verbose",
+        "--contains",
+        "--no-contains",
+        "--merged",
+        "--no-merged",
+        "--points-at",
+        "--sort",
+        "--format",
+        "--color",
+        "--no-color",
+        "--column",
+        "--no-column",
+        "--show-current",
+        "-i",
+        "--ignore-case",
+        "-n",
+        "--omit-empty",
+    }
+)
+# ``git remote <action>`` actions that write config (vs. bare/``-v``/``show``/
+# ``get-url`` which are read-only).
+_GIT_REMOTE_WRITE_ACTIONS: frozenset[str] = frozenset(
+    {"add", "remove", "rm", "rename", "set-url", "set-head", "set-branches", "prune", "update"}
+)
+
+
+def _git_difflike_exec_violation(args: list[str]) -> str | None:
+    """diff-like helper: ``--output[=path]`` writes a file, ``--ext-diff`` execs."""
+    for tok in args:
+        if tok in {"--output", "--ext-diff"} or tok.startswith("--output="):
+            return tok
+    return None
+
+
+def _git_grep_exec_violation(args: list[str]) -> str | None:
+    """Grep helper: ``--open-files-in-pager``/``-O<cmd>``/``--output`` exec a pager."""
+    for tok in args:
+        if tok in {"--open-files-in-pager", "--output", "-O"}:
+            return tok
+        if tok.startswith(("--open-files-in-pager=", "--output=")):
+            return tok
+        if tok.startswith("-O") and tok != "-O":
+            return tok
+    return None
+
+
+def git_read_exec_violation(subcommand: str, args: list[str]) -> str | None:
+    """Offending token if a read-only git subcommand is coerced into a write/exec.
+
+    RCE-class (``git log --output=<path>`` writes anywhere, ``--ext-diff`` /
+    ``git grep --open-files-in-pager`` run an external program). ``args`` are the
+    tokens AFTER the subcommand. Shared by the bash matcher (hard-deny, both
+    modes) and git_c_validator so the two cannot drift. Distinct from
+    :func:`git_ref_violation` -- ref creation is a low-severity local write, not
+    an exec, and is gated separately.
+    """
+    if subcommand in _GIT_DIFFLIKE_SUBCOMMANDS:
+        return _git_difflike_exec_violation(args)
+    if subcommand == "grep":
+        return _git_grep_exec_violation(args)
+    # ``git stash show`` forwards diff options to ``git diff`` -- the same
+    # ``--output=<path>`` (file write) and ``--ext-diff`` (external program)
+    # vectors. ``git stash show`` is on the read-only allowlist, so its diff
+    # flags must be vetoed too, scanning the tokens after the ``show`` word.
+    if subcommand == "stash" and args[:1] == ["show"]:
+        return _git_difflike_exec_violation(args[1:])
+    return None
+
+
+def _git_ref_mutation(
+    args: list[str], mutating_flags: frozenset[str], *, include_creation: bool
+) -> str | None:
+    """branch/tag helper: offending token if the args mutate/create a ref."""
+    for tok in args:
+        if tok.split("=", 1)[0] in mutating_flags:
+            return tok
+    if not include_creation:
+        return None
+    if any(tok.split("=", 1)[0] in _GIT_REF_LIST_FLAGS for tok in args):
+        return None  # a list/query flag is present -> positionals are patterns
+    for tok in args:
+        if not tok.startswith("-"):
+            return tok  # bare positional = ref name to create
+    return None
+
+
+def git_ref_violation(
+    subcommand: str, args: list[str], *, include_creation: bool = True
+) -> str | None:
+    """Offending token if a read-only-listing git subcommand mutates a ref.
+
+    Low-severity local writes (``git tag <name>``, ``git branch -d``,
+    ``git remote add``). ``include_creation=True`` (bash strict allow-path veto)
+    also flags bare ref *creation*; ``include_creation=False`` (interactive
+    ``git -C`` deny) flags only destructive flags/actions and lets bare creation
+    fall through to an ASK prompt. Returns ``None`` for any subcommand it does
+    not model.
+    """
+    if subcommand == "branch":
+        return _git_ref_mutation(
+            args, _GIT_BRANCH_MUTATING_FLAGS, include_creation=include_creation
+        )
+    if subcommand == "tag":
+        return _git_ref_mutation(args, _GIT_TAG_MUTATING_FLAGS, include_creation=include_creation)
+    if subcommand == "remote":
+        if args and not args[0].startswith("-") and args[0] in _GIT_REMOTE_WRITE_ACTIONS:
+            return args[0]
+        return None
+    return None
 
 
 def get_rules_by_safety(safety: Safety) -> list[CommandRule]:

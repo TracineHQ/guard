@@ -1,0 +1,36 @@
+{"command": "chown -R root:root ~/.ssh/id_rsa", "expected": "deny", "mode": "default", "source": "curated", "note": "ownership change on an ssh private key"}
+{"command": "chown -R root:root ~/.ssh/id_rsa", "expected": "deny", "mode": "auto", "source": "curated", "note": "both-mode floor, like chmod on a sensitive target"}
+{"command": "chown root /etc/sudoers", "expected": "deny", "mode": "default", "source": "curated", "note": "ownership change on sudoers"}
+{"command": "chgrp wheel ~/.aws/credentials", "expected": "deny", "mode": "default", "source": "curated", "note": "group change on aws credentials"}
+{"command": "chattr +i /etc/sudoers", "expected": "deny", "mode": "default", "source": "curated", "note": "immutable bit on sudoers (lock out repair)"}
+{"command": "chattr -i ~/.ssh/authorized_keys", "expected": "deny", "mode": "default", "source": "curated", "note": "clearing immutable on authorized_keys"}
+{"command": "setfacl -m u:bob:rwx /etc/shadow", "expected": "deny", "mode": "default", "source": "curated", "note": "ACL grant on the shadow file"}
+{"command": "chown -R root ~/.gnupg", "expected": "deny", "mode": "default", "source": "curated", "note": "ownership change on the gnupg directory"}
+{"command": "chown deploy:deploy /var/www/app", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: ownership change on a non-sensitive web root"}
+{"command": "chmod 600 ~/.ssh/id_rsa", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: ssh hardening via chmod (no group/other grant), not an fs-attr deny"}
+{"command": "setfacl -m u:bob:rwx ./build", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: ACL on a project build dir"}
+{"command": "flock /tmp/lock chown root /etc/sudoers", "expected": "deny", "mode": "default", "source": "adversarial", "note": "H1: ownership change behind the flock exec-wrapper now denies in interactive mode"}
+{"command": "stdbuf -oL chattr +i /etc/sudoers", "expected": "deny", "mode": "default", "source": "adversarial", "note": "H1: immutable-bit set behind the stdbuf exec-wrapper"}
+{"command": "sudo chown root:root /etc/shadow", "expected": "deny", "mode": "default", "source": "adversarial", "note": "sudo runner prefix peeled by candidate-forms; chown on shadow still denies"}
+{"command": "env LC_ALL=C chgrp wheel ~/.ssh/id_ed25519", "expected": "deny", "mode": "default", "source": "adversarial", "note": "env K=V prefix peeled; chgrp on ed25519 key (id_ed25519 under .ssh/) denies"}
+{"command": "timeout 5 setfacl -m u:eve:rwx /etc/sudoers.d/00-evil", "expected": "deny", "mode": "default", "source": "adversarial", "note": "timeout runner peeled; ACL grant under /etc/sudoers.d/ denies"}
+{"command": "nice -n 10 chattr -i ~/.aws/credentials", "expected": "deny", "mode": "default", "source": "adversarial", "note": "nice runner peeled; clearing immutable on aws credentials denies"}
+{"command": "chroot /mnt chown root /etc/passwd", "expected": "deny", "mode": "default", "source": "adversarial", "note": "chroot exec-wrapper (positional arg) peeled; chown on /etc/passwd denies"}
+{"command": "runuser -u dev -- setfacl -m u:bob:rwx ~/.gnupg", "expected": "deny", "mode": "default", "source": "adversarial", "note": "runuser -u <user> -- exec-wrapper peeled; ACL on gnupg dir denies"}
+{"command": "unshare -m chown root:root /etc/ssh/sshd_config", "expected": "deny", "mode": "default", "source": "adversarial", "note": "unshare exec-wrapper peeled; chown under /etc/ssh/ denies"}
+{"command": "firejail chattr +i /etc/ld.so.preload", "expected": "deny", "mode": "default", "source": "adversarial", "note": "firejail exec-wrapper peeled; immutable bit on ld.so.preload (preload hijack lock) denies"}
+{"command": "chown -R me:me ~/.config/gh", "expected": "deny", "mode": "default", "source": "curated", "note": "home tail .config/gh/ (gh OAuth token store) is in CHMOD_HOME_SENSITIVE_TAILS; ownership change denies"}
+{"command": "setfacl -m u:ci:rwx ~/.docker/config.json", "expected": "deny", "mode": "default", "source": "curated", "note": "home tail .docker/ (registry creds in config.json) sensitive; ACL grant denies"}
+{"command": "chgrp staff $HOME/.ssh/config", "expected": "deny", "mode": "default", "source": "adversarial", "note": "$HOME notation normalized to ~/ before tail match; chgrp on ssh config denies"}
+{"command": "chattr +i ${HOME}/.aws/config", "expected": "deny", "mode": "default", "source": "adversarial", "note": "${HOME} notation normalized; immutable bit on aws config denies"}
+{"command": "chown root:root /Library/LaunchDaemons/com.evil.plist", "expected": "deny", "mode": "default", "source": "curated", "note": "system tail /Library/LaunchDaemons/ (root-launched persistence) sensitive; ownership change denies"}
+{"command": "setfacl -m u:web:rwx /var/run/docker.sock", "expected": "deny", "mode": "default", "source": "curated", "note": "ACL grant on docker socket (root-equivalent) denies"}
+{"command": "chown root /usr/local/bin/kubectl", "expected": "deny", "mode": "default", "source": "curated", "note": "system tail /usr/local/bin/ (PATH binary dir) sensitive; ownership change denies"}
+{"command": "chown root:root /etc/shadow", "expected": "deny", "mode": "auto", "source": "curated", "note": "both-mode floor: fs-attr sensitive denies identically in strict (auto) mode"}
+{"command": "chattr +i ~/.ssh/authorized_keys", "expected": "deny", "mode": "auto", "source": "curated", "note": "both-mode floor: immutable on authorized_keys denies in strict mode too"}
+{"command": "chown me:me ~/.bashrc", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP: ~/.bashrc not in CHMOD_HOME_SENSITIVE_TAILS (narrower than dest-home set); fs-attr verbs do not fire on it"}
+{"command": "chgrp staff ./node_modules", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: group change on a project dependency dir, not sensitive"}
+{"command": "setfacl -m u:dev:rwx ./ssh-keys", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP: dir literally named ssh-keys but not under .ssh/; substring guard, no match"}
+{"command": "chown -R app:app /tmp/build-cache", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: recursive ownership on a tmp build cache, benign"}
+{"command": "chmod 700 ~/.gnupg", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP: chmod is NOT an fs-attr head; 700 grants no group/other, benign gnupg hardening, must not deny"}
+{"command": "chattr +i ./dist/bundle.js", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP: immutable bit on a build artifact (cache-pinning), non-sensitive path"}

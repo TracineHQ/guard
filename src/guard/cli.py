@@ -14,6 +14,12 @@ Subcommands:
   chronological.
 - ``guard test "<command>" ...`` — invokes ``decide()`` on each relevant
   hook in-process; no log access, no subprocess. Accepts multiple commands.
+- ``guard corpus`` — adjudicate every fixture in ``tests/corpus/*.jsonl``
+  through ``decide()`` in one process; exit 1 on any mismatch. The
+  whitelisted, strict-mode-safe test harness — agents run this instead of
+  spraying ad-hoc ``guard test`` strings. ``guard corpus add '<cmd>'
+  --expect <d>`` appends one fixture row (into a bare ``tests/corpus`` file)
+  and adjudicates it, so a found bypass becomes a permanent regression row.
 - ``guard diff`` — print the effective runtime config (registered hook ids,
   decisions-log path, schema version, mode). Today this is built-in
   defaults only; the 3-way user/project/builtin merge view lands in a
@@ -60,6 +66,9 @@ from guard.allowlist import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
+
+    from guard._corpus import CorpusReport
+
 
 # === since-parser ===
 
@@ -706,6 +715,93 @@ def cmd_test(commands: list[str]) -> tuple[dict[str, Any], str]:
     return payload, "\n".join(lines) + "\n"
 
 
+def _corpus_payload(report: CorpusReport) -> tuple[dict[str, Any], str]:
+    """Build the ``(json payload, pretty text)`` pair for a corpus report."""
+    failures = [
+        {
+            "command": f.row.command,
+            "mode": f.row.mode,
+            "expected": f.row.expected,
+            "actual": f.actual,
+            "file": f.row.file,
+            "note": f.row.note,
+        }
+        for f in report.failures
+    ]
+    payload: dict[str, Any] = {
+        "total": report.total,
+        "passed": report.passed,
+        "failed": len(report.failures),
+        "ok": report.ok,
+        "failures": failures,
+    }
+    lines = [f"guard corpus: {report.passed}/{report.total} fixtures classified as expected"]
+    lines.extend(
+        f"  MISMATCH [{f['mode']}] {f['file']}: "
+        f"expected {f['expected']}, got {f['actual']} :: {f['command']}"
+        for f in failures
+    )
+    if not report.ok:
+        lines.append(f"{len(failures)} mismatch(es) -- see above")
+    return payload, "\n".join(lines) + "\n"
+
+
+def cmd_corpus() -> tuple[dict[str, Any], str]:
+    """Adjudicate every fixture in ``tests/corpus/*.jsonl`` and report mismatches.
+
+    The whitelisted, strict-mode-safe harness: one process runs ``decide()`` over
+    the whole fixture corpus, so agents stop spraying ad-hoc ``guard test '<cmd>'``
+    strings (blocked in strict mode, and lost the moment the shell call returns).
+    A newly found bypass or false positive becomes a one-line fixture row picked
+    up here and in CI. The caller sets the exit code from ``payload['ok']``.
+    """
+    from guard._corpus import run_corpus  # noqa: PLC0415 -- lazy: pulls in decide()
+
+    return _corpus_payload(run_corpus())
+
+
+def cmd_corpus_add(  # noqa: PLR0913 -- thin CLI delegator mirroring the corpus row fields
+    command: str,
+    *,
+    expected: str,
+    mode: str = "default",
+    note: str = "",
+    source: str | None = None,
+    file: str = "crossexam.jsonl",
+) -> tuple[dict[str, Any], str]:
+    """Append one fixture row to the corpus and adjudicate it in one step.
+
+    The durable replacement for ad-hoc ``guard test '<cmd>'`` probing and /tmp
+    scratch fixtures: the case is written into ``tests/corpus/<file>`` (a bare
+    name -- no custom paths) and immediately run through ``decide()``. ``ok`` is
+    true only when the live decision matches ``expected``, so a not-yet-fixed
+    bypass lands as a failing fixture that drives the fix and then stays as a
+    permanent regression guard.
+    """
+    from guard._corpus import append_row  # noqa: PLC0415 -- lazy: pulls in decide()
+
+    outcome = append_row(command, expected, mode=mode, note=note, source=source or "", file=file)
+    payload: dict[str, Any] = {
+        "command": command,
+        "expected": expected,
+        "mode": mode,
+        "actual": outcome.actual,
+        "matched": outcome.matched,
+        "added": outcome.added,
+        "file": outcome.row.file,
+        "ok": outcome.matched,
+    }
+    verb = "added" if outcome.added else "already present"
+    status = "OK" if outcome.matched else "MISMATCH"
+    lines = [
+        f"guard corpus add: {status} [{mode}] {outcome.row.file} ({verb})",
+        f"  expected {expected}, got {outcome.actual} :: {command}",
+    ]
+    if not outcome.matched:
+        lines.append("  fixture does not yet hold -- fix the matcher until `guard corpus` is green")
+    return payload, "\n".join(lines) + "\n"
+
+
 def _test_specs(command: str) -> Iterable[dict[str, Any]]:
     """Yield ``{hook_id, decision, reason}`` dicts from each Bash-surface hook.
 
@@ -1141,7 +1237,7 @@ def _resolve_scope(args: argparse.Namespace) -> str:
     return "global" if getattr(args, "scope_global", False) else "project"
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915 -- flat subparser wiring, one block per subcommand
     parser = argparse.ArgumentParser(
         prog="guard",
         description="guard read-side CLI: query the JSONL decision log.",
@@ -1250,6 +1346,53 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
+    p_corpus = sub.add_parser(
+        "corpus",
+        help="Adjudicate every tests/corpus/*.jsonl fixture; exit 1 on any mismatch.",
+        epilog=(
+            "Examples:\n"
+            "  guard corpus                 # run the whole fixture corpus\n"
+            "  guard --json corpus | jq     # machine-readable pass/fail + mismatches\n"
+            "  guard corpus add 'gh auth token' --expect deny --note 'credential leak'"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_corpus_sub = p_corpus.add_subparsers(dest="corpus_cmd")
+    p_corpus_add = p_corpus_sub.add_parser(
+        "add",
+        help="Append one fixture row to tests/corpus and adjudicate it.",
+        epilog=(
+            "Examples:\n"
+            "  guard corpus add 'gh auth token' --expect deny\n"
+            "  guard corpus add 'yq -I4 x.yaml' --expect allow --mode auto\n"
+            "  guard corpus add '\"gh\" auth token' --expect deny --file crossexam.jsonl"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_corpus_add.add_argument("command", help="The bash command string to fixture.")
+    p_corpus_add.add_argument(
+        "--expect",
+        required=True,
+        choices=("allow", "ask", "deny"),
+        help="The decision guard must reach for this command.",
+    )
+    p_corpus_add.add_argument(
+        "--mode",
+        default="default",
+        help="Permission mode to adjudicate under (default: default; e.g. auto for strict).",
+    )
+    p_corpus_add.add_argument(
+        "--note", default="", help="Why this case exists / what bypass or FP it guards against."
+    )
+    p_corpus_add.add_argument(
+        "--file",
+        default="crossexam.jsonl",
+        help="Corpus file to append to: a bare name under tests/corpus (default: crossexam.jsonl).",
+    )
+    p_corpus_add.add_argument(
+        "--source", default=None, help="Provenance tag (default: the file's stem)."
+    )
+
     p_allow = sub.add_parser(
         "allowlist",
         help="Manage the project + global allowlist (disable_rules / allow_commands).",
@@ -1354,7 +1497,7 @@ def _emit(payload: dict[str, Any], pretty: str, *, as_json: bool) -> None:
         sys.stdout.write(pretty)
 
 
-def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 -- linear command-dispatch ladder, one branch per subcommand
+def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0911 -- linear command-dispatch ladder, one branch per subcommand
     """CLI entry point. Returns the exit code."""
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -1401,6 +1544,20 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 -- linear
             )
         elif cmd == "test":
             payload, pretty = cmd_test(args.commands)
+        elif cmd == "corpus":
+            if getattr(args, "corpus_cmd", None) == "add":
+                payload, pretty = cmd_corpus_add(
+                    args.command,
+                    expected=args.expect,
+                    mode=args.mode,
+                    note=args.note,
+                    source=args.source,
+                    file=args.file,
+                )
+            else:
+                payload, pretty = cmd_corpus()
+            _emit(payload, pretty, as_json=as_json)
+            return 0 if payload.get("ok") else 1
         elif cmd == "diff":
             payload, pretty = cmd_diff()
         elif cmd == "migrate-log":

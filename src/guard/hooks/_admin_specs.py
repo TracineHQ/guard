@@ -51,6 +51,12 @@ class AdminCliSpec:
     forbidden_subcommands: frozenset[tuple[str, ...]] = frozenset()
     known_flags: frozenset[str] = frozenset()
     sensitive_env_vars: frozenset[str] = frozenset()
+    # Value-taking SHORT flags (``-n``, ``-o``). Used only to bound the
+    # clustered-short-flag scan in ``_check_admin_forbidden_flag``: such a flag
+    # consumes the rest of a ``-Xy...`` token as its VALUE, so the scan stops
+    # there and a forbidden letter sitting inside that value (``-ojson`` has an
+    # ``s``) is not mistaken for a fused ``-s``.
+    value_short_flags: frozenset[str] = frozenset()
 
 
 _GCLOUD_READ_ONLY_VERBS: frozenset[tuple[str, ...]] = frozenset(
@@ -1469,6 +1475,20 @@ _AWS_SENSITIVE_ENV_VARS: frozenset[str] = frozenset(
         "AWS_SHARED_CREDENTIALS_FILE",
         "AWS_CONFIG_FILE",
         "AWS_PROFILE",
+        # AWS_PROFILE's synonym -- botocore honors AWS_DEFAULT_PROFILE identically
+        # for profile selection, so omitting it left an open foreign-profile swap.
+        "AWS_DEFAULT_PROFILE",
+        # Alternate credential PROVIDERS that point the CLI at an attacker-served
+        # credential source without touching the profile chain. The container and
+        # IMDS endpoints are HTTP-fetched, so a redirect delivers forged creds the
+        # CLI then signs with; the web-identity pair assumes an arbitrary role.
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+        "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "AWS_ROLE_ARN",
         # Inline-assignment of literal credentials. Lets an attacker run an
         # allowlisted read verb against a foreign account without touching
         # the local profile chain.
@@ -1534,6 +1554,11 @@ _GCLOUD_SENSITIVE_ENV_VARS: frozenset[str] = frozenset(
         "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
         "CLOUDSDK_CORE_PROJECT",
         "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE",
+        # Env equivalents of the forbidden --impersonate-service-account and
+        # --account flags: gcloud honors these on every command, so omitting
+        # them left the flag denial trivially bypassable via env prefix.
+        "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT",
+        "CLOUDSDK_CORE_ACCOUNT",
     }
 )
 
@@ -1583,6 +1608,16 @@ _AZ_SENSITIVE_ENV_VARS: frozenset[str] = frozenset(
         "AZURE_CONFIG_DIR",
         "AZURE_CLI_DISABLE_CONNECTION_VERIFICATION",
         "REQUESTS_CA_BUNDLE",
+        # Non-interactive auth credentials: az honors these to authenticate as a
+        # foreign service principal / user with no `az login`, so an allowlisted
+        # read runs against an attacker-chosen identity. Same class as AWS
+        # inline-credential assignment.
+        "AZURE_CLIENT_ID",
+        "AZURE_CLIENT_SECRET",
+        "AZURE_TENANT_ID",
+        "AZURE_CLIENT_CERTIFICATE_PATH",
+        "AZURE_USERNAME",
+        "AZURE_PASSWORD",
     }
 )
 
@@ -1761,6 +1796,10 @@ _KUBECTL_SPEC = AdminCliSpec(
     global_bare_flags=_KUBECTL_GLOBAL_BARE_FLAGS,
     forbidden_flags=_KUBECTL_FORBIDDEN_FLAGS,
     known_flags=_KUBECTL_KNOWN_FLAGS,
+    # Value-taking shorts. ``-s``/``-v`` are forbidden (caught first); ``-n``/
+    # ``-o``/``-l`` are safe value flags whose glued value must not be re-scanned
+    # for a fused forbidden short (so ``-ojson`` / ``-lapp=x`` stay allowed).
+    value_short_flags=frozenset({"-n", "-o", "-l", "-s", "-v"}),
 )
 
 _LAUNCHCTL_SPEC = AdminCliSpec(

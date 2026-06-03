@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from guard.allowlist import _BASH_MATCHER_RULE_IDS
@@ -14,8 +15,10 @@ from guard.hooks._admin_specs import (
     ADMIN_CLI_SPECS,
     RULE_ID,
 )
+from guard.hooks.bash_command_validator import _PER_FORM_MATCHERS
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+_VALIDATOR_SRC = _REPO_ROOT / "src" / "guard" / "hooks" / "bash_command_validator.py"
 
 
 def test_cli_names_unique() -> None:
@@ -31,6 +34,58 @@ def test_no_verb_in_both_read_only_and_deny_overrides() -> None:
 
 def test_rule_id_in_bash_matcher_rule_ids() -> None:
     assert RULE_ID in _BASH_MATCHER_RULE_IDS, f"{RULE_ID} missing from _BASH_MATCHER_RULE_IDS"
+
+
+def test_guard_cli_subcommands_all_classified() -> None:
+    """Drift guard: every guard CLI subcommand is classified read-only OR write.
+
+    The safe-prefix auto-registration of guard's own read-only subcommands is
+    derived from ``GUARD_READ_ONLY_SUBCOMMANDS``; a new subcommand added to the
+    CLI without classifying it here fails this test instead of silently being
+    unregistered (strict-mode friction) or wrongly blanket-allowed.
+    """
+    import argparse
+
+    from guard.cli import _build_parser
+    from guard.registry import GUARD_READ_ONLY_SUBCOMMANDS, GUARD_WRITE_SUBCOMMANDS
+
+    # argparse exposes no public API for listing subcommand choices.
+    subactions = [
+        a
+        for a in _build_parser()._actions  # noqa: SLF001
+        if isinstance(a, argparse._SubParsersAction)  # noqa: SLF001
+    ]
+    cli_subcommands = {choice for a in subactions for choice in a.choices}
+    classified = GUARD_READ_ONLY_SUBCOMMANDS | GUARD_WRITE_SUBCOMMANDS
+    unclassified = cli_subcommands - classified
+    assert not unclassified, (
+        f"guard CLI subcommands not classified read-only/write in registry.py: {unclassified}"
+    )
+    overlap = GUARD_READ_ONLY_SUBCOMMANDS & GUARD_WRITE_SUBCOMMANDS
+    assert not overlap, f"subcommand in both read-only and write sets: {overlap}"
+
+
+def test_per_form_matcher_rule_ids_registered() -> None:
+    """Every rule_id in the synthetic dispatch table is allowlistable."""
+    missing = [rid for _pred, _body, rid in _PER_FORM_MATCHERS if rid not in _BASH_MATCHER_RULE_IDS]
+    assert not missing, (
+        f"_PER_FORM_MATCHERS rule_ids missing from _BASH_MATCHER_RULE_IDS: {missing}"
+    )
+
+
+def test_no_emitted_rule_id_is_unregistered() -> None:
+    """Drift guard: any ``bash.*`` rule_id literal the validator emits must be in
+    _BASH_MATCHER_RULE_IDS, so the CLI lists it and a user can allowlist it.
+
+    A new deny matcher that forgets to register its rule_id fails here instead
+    of silently shipping an un-allowlistable, un-listed rule.
+    """
+    emitted = set(re.findall(r'"(bash\.[a-z0-9_]+)"', _VALIDATOR_SRC.read_text()))
+    registered = set(_BASH_MATCHER_RULE_IDS)
+    unregistered = sorted(emitted - registered)
+    assert not unregistered, (
+        f"validator emits rule_ids absent from _BASH_MATCHER_RULE_IDS: {unregistered}"
+    )
 
 
 def test_all_cli_names_in_skill_md() -> None:

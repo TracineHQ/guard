@@ -127,6 +127,8 @@ pydocstyle.convention = "google"
   "PLR2004",   # magic value (token-count constants are obvious in context)
   "PLR0911",   # too many return statements (each matcher is a chain of detect-and-deny)
   "PLR0912",   # too many branches (matcher dispatchers)
+  "PLR0913",   # too many arguments (segment evaluators thread parsed state)
+  "PLR0915",   # too many statements (char-walk parsers: split/mask token loops)
   "C901",      # cyclomatic complexity (matchers cover many shapes)
   "SIM102",    # nested ifs are clearer for matcher dispatch
   "SIM103",    # explicit return is clearer than `return cond`

@@ -1,0 +1,55 @@
+{"command": "yq '.a.b' config.yaml", "expected": "allow", "mode": "default", "source": "curated", "note": "yq read is conditional-safe (no in-place flag), passthrough in interactive mode"}
+{"command": "yq '.a.b' config.yaml", "expected": "allow", "mode": "auto", "source": "curated", "note": "BS-1 anti-FP: yq read stays allowed in strict via CONDITIONAL_SAFE, not the dropped blanket ALLOW"}
+{"command": "yq eval '.metadata.name' deploy.yaml", "expected": "allow", "mode": "auto", "source": "curated", "note": "yq eval read form, conditional-safe in strict"}
+{"command": "yq -i '.version = 2' config.yaml", "expected": "deny", "mode": "default", "source": "adversarial", "note": "BS-1: yq -i mutates a file in place (bash.conditional_denied_flag)"}
+{"command": "yq -i '.version = 2' config.yaml", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "BS-1: in-place write denied both-mode; previously rode the blanket yq ALLOW into strict"}
+{"command": "yq --inplace '.x = 1' ~/.bashrc", "expected": "deny", "mode": "default", "source": "adversarial", "note": "BS-1: --inplace long form mutating a shell rc file"}
+{"command": "yq --split-exp '.a' big.yaml", "expected": "deny", "mode": "default", "source": "adversarial", "note": "BS-1: --split-exp writes multiple files out of one input"}
+{"command": "find . -name '*.py' -exec rm {} \\;", "expected": "deny", "mode": "default", "source": "adversarial", "note": "find -exec is an arbitrary-command sink; conditional_denied_flag fires pre-eval in interactive"}
+{"command": "find . -name '*.py' -exec rm {} \\;", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "find -exec denied both modes; pre-eval floor runs before the strict path"}
+{"command": "find /tmp -type f -execdir sh -c 'cat {}' \\;", "expected": "deny", "mode": "default", "source": "adversarial", "note": "find -execdir per-directory exec variant; denied conditional_denied_flag"}
+{"command": "find /var/log -mtime +30 -delete", "expected": "deny", "mode": "default", "source": "adversarial", "note": "find -delete bulk-removes matched files; denied flag interactive"}
+{"command": "find /var/log -mtime +30 -delete", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "find -delete denied in strict too via pre-eval floor"}
+{"command": "find . -name secret -ok rm {} \\;", "expected": "deny", "mode": "default", "source": "adversarial", "note": "find -ok is the prompting exec sink; still a denied flag"}
+{"command": "find . -type d -okdir chmod 777 {} \\;", "expected": "deny", "mode": "default", "source": "adversarial", "note": "find -okdir per-directory prompting exec variant; denied flag"}
+{"command": "find . -type f -name '*.log'", "expected": "allow", "mode": "default", "source": "curated", "note": "find read form (no denied flag) passes through in interactive"}
+{"command": "find . -type f -name '*.log'", "expected": "allow", "mode": "auto", "source": "curated", "note": "find read form stays allowed in strict via _is_safe_base_cmd conditional-safe path"}
+{"command": "find src -maxdepth 2 -newer Makefile -printf '%p\\n'", "expected": "allow", "mode": "auto", "source": "curated", "note": "anti-FP: -printf/-newer/-maxdepth are read-only find primitives, allowed strict"}
+{"command": "find . -newermt '2024-01-01' -type f", "expected": "allow", "mode": "auto", "source": "curated", "note": "anti-FP: -newermt time predicate is read-only, not a denied flag; allow strict"}
+{"command": "find . -name '*-delete-me*.txt'", "expected": "allow", "mode": "auto", "source": "curated", "note": "anti-FP: literal '-delete' substring inside a glob value must not match the bare -delete token"}
+{"command": "find . -path '*/-exec/*' -print", "expected": "allow", "mode": "auto", "source": "curated", "note": "anti-FP: '-exec' appears only inside a quoted -path glob, not as a bare token; must not fire"}
+{"command": "find . -path './build' -prune -o -name '*.c' -print", "expected": "allow", "mode": "auto", "source": "curated", "note": "anti-FP: -prune/-print read traversal not in denied set, allowed strict"}
+{"command": "yq eval '.spec.replicas' deploy.yaml", "expected": "allow", "mode": "auto", "source": "curated", "note": "yq eval read form conditional-safe in strict (extra coverage beyond existing .metadata case)"}
+{"command": "yq eval-all '. as $i' a.yaml b.yaml", "expected": "allow", "mode": "auto", "source": "curated", "note": "yq eval-all read across files carries no in-place flag; allow strict"}
+{"command": "yq -P '.a.b' config.yaml", "expected": "allow", "mode": "auto", "source": "curated", "note": "anti-FP: yq -P (pretty-print) is read-only, not -i; allow strict"}
+{"command": "yq --in-place '.a = 1' config.yaml", "expected": "deny", "mode": "default", "source": "adversarial", "note": "yq --in-place hyphenated long-form mutates in place; denied-flag variant not in existing fixture"}
+{"command": "yq --in-place '.a = 1' config.yaml", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "yq --in-place denied in strict too via pre-eval floor"}
+{"command": "yq --split-exp '.docs[]' multi.yaml", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "yq --split-exp writes multiple files; denied in strict (existing fixture only tests default)"}
+{"command": "make build", "expected": "allow", "mode": "default", "source": "curated", "note": "make has empty denied-flag set; any non-install target is conditional-safe, allowed interactive"}
+{"command": "make test", "expected": "allow", "mode": "auto", "source": "curated", "note": "make test conditional-safe (empty denied set) allowed in strict via base-cmd check"}
+{"command": "make -j4 all", "expected": "allow", "mode": "auto", "source": "curated", "note": "make with parallel flag still conditional-safe (no denied flags defined)"}
+{"command": "make install", "expected": "allow", "mode": "default", "source": "adversarial", "note": "nuance: 'make install' is a registered ASK rule, but conditional-safe make passes it through as allow in interactive (ASK shadowed)"}
+{"command": "make install", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "nuance: 'make install' ASK rule denies in strict (Package install requires confirmation) -- diverges from other make targets"}
+{"command": "echo hello world", "expected": "allow", "mode": "auto", "source": "curated", "note": "echo conditional-safe (empty denied set), allowed in strict"}
+{"command": "echo -delete", "expected": "allow", "mode": "auto", "source": "curated", "note": "anti-FP: echo's denied set is empty so a '-delete' arg is harmless and allowed in strict"}
+{"command": "printf '%s\\n' alpha beta", "expected": "allow", "mode": "auto", "source": "curated", "note": "printf conditional-safe read form allowed in strict (anti-FP for the redirect matcher)"}
+{"command": "echo data > /tmp/out.txt", "expected": "deny", "mode": "default", "source": "adversarial", "note": "echo with > output redirect is a dangerous construct; deny both modes despite echo being conditional-safe"}
+{"command": "printf '%s' x >> ~/.bashrc", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "printf append redirect to an rc file is a dangerous-construct deny in strict"}
+{"command": "sudo find . -delete", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "sudo-wrapped find -delete denies in strict (strict default-deny floor catches the unwrapped-but-unsafelisted form)"}
+{"command": "timeout 10 yq -i '.x = 1' f.yaml", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "timeout-wrapped yq -i in-place write denies in strict via default-deny"}
+{"command": "env FOO=1 find . -delete", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "env K=V-wrapped find -delete denies in strict; env-safe path returns False then strict floor denies"}
+{"command": "sudo yq -i '.x=1' f.yaml", "expected": "deny", "mode": "default", "source": "adversarial", "note": "sudo-wrapped yq -i denies in interactive; F4's wrapper-peel conditional_denied_flag check now catches wrapped find/yq symmetrically too"}
+{"command": "sudo find . -delete", "expected": "deny", "mode": "default", "source": "adversarial", "note": "FIX F4: sudo-wrapped find -delete denies interactive too (was allow -- denied-flag check keyed on the sudo wrapper, not the peeled find)"}
+{"command": "timeout 10 yq -i '.x = 1' f.yaml", "expected": "deny", "mode": "default", "source": "adversarial", "note": "FIX F4: timeout-runner-wrapped yq -i denies interactive (peeled form re-checked against CONDITIONAL_SAFE)"}
+{"command": "env FOO=1 find . -delete", "expected": "deny", "mode": "default", "source": "adversarial", "note": "FIX F4: env K=V-wrapped find -delete denies interactive (candidate-form peel strips the assignment)"}
+{"command": "nice find . -delete", "expected": "deny", "mode": "default", "source": "adversarial", "note": "FIX F4: nice-runner-wrapped find -delete denies interactive"}
+{"command": "stdbuf -oL find . -delete", "expected": "deny", "mode": "default", "source": "adversarial", "note": "FIX F4: stdbuf exec-wrapper find -delete denies interactive (peeled via _exec_wrapper_candidates fixpoint)"}
+{"command": "flock /tmp/lock find . -delete", "expected": "deny", "mode": "default", "source": "adversarial", "note": "FIX F4: flock exec-wrapper find -delete denies interactive"}
+{"command": "stdbuf -oL find . -name '*.log'", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP F4: stdbuf-wrapped benign find (no denied flag) not falsely denied by the wrapper-peel check"}
+{"command": "timeout 10 yq '.x' f.yaml", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP F4: timeout-wrapped yq READ form stays allowed interactive"}
+{"command": "yq -iP '.a = 1' config.yaml", "expected": "deny", "mode": "default", "source": "adversarial", "note": "FIX F6: yq -iP clusters -i (inplace) with -P (pretty); clustered short-flag normalization denies the in-place write (was a bypass)"}
+{"command": "yq -iP '.a = 1' config.yaml", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "FIX F6: clustered -iP denies in strict too via the conditional-safe path"}
+{"command": "yq -Pi '.a = 1' config.yaml", "expected": "deny", "mode": "default", "source": "adversarial", "note": "FIX F6: order-independent -- -Pi (pretty before inplace) still denies"}
+{"command": "yq -i=true '.a = 1' config.yaml", "expected": "deny", "mode": "default", "source": "adversarial", "note": "FIX F6: =-joined -i=true denies (split on '=' isolates the -i short flag)"}
+{"command": "yq -P '.a' config.yaml", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "anti-FP F6: yq -P pretty-print read cluster (no -i letter) stays allowed in strict"}
+{"command": "yq -I4 '.a' config.yaml", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP F6: yq -I4 (indent, uppercase I + digit) is not the lowercase -i inplace flag; case-sensitive + non-alpha cluster guard keeps it allowed"}

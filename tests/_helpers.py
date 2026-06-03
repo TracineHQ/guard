@@ -78,6 +78,14 @@ def run_hook(  # noqa: PLR0913 -- kw-only flags, all optional and orthogonal
     env["PYTHONPATH"] = str(REPO_ROOT / "src")
     if decisions_path is not None:
         env["GUARD_DECISIONS_PATH"] = str(decisions_path)
+    else:
+        # Defense in depth: if no test-scoped decision log is active (the
+        # autouse fixture normally sets one), sink decisions to devnull so a
+        # run_hook call outside that fixture can never append to the developer's
+        # real ~/.claude/guard-decisions.jsonl. setdefault preserves an already
+        # isolated path from the inherited environment.
+        env.setdefault("GUARD_DECISIONS_PATH", os.devnull)
+    env.setdefault("GUARD_STRICT_DENY_QUEUE_PATH", os.devnull)
     if env_extra:
         env.update(env_extra)
     mode = permission_mode if permission_mode is not None else ("dontAsk" if strict else "default")

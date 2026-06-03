@@ -21,6 +21,7 @@ from typing import Any
 
 from guard._utils import emit_pretooluse_decision, log_decision, safe_main
 from guard.allowlist import hook_bypass_reason, load_allowlist
+from guard.registry import git_read_exec_violation, git_ref_violation
 
 _HOOK_ID = "guard.git_c_validator"
 
@@ -56,15 +57,12 @@ ALLOWED_SUBCOMMANDS: frozenset[str] = frozenset(
 # Destructive subcommands — hard deny with -C
 DENIED_SUBCOMMANDS: frozenset[str] = frozenset({"clean", "reset"})
 
-# Subcommands that are read-only by default but become destructive with these
-# flags. ``branch -D feature`` deletes a branch; ``tag -d v1`` deletes a tag;
-# ``remote remove origin`` removes a remote. The presence of any flag in the
-# matching set on the otherwise-allowed subcommand flips the decision to deny.
-_DESTRUCTIVE_SUBCOMMAND_FLAGS: dict[str, frozenset[str]] = {
-    "branch": frozenset({"-d", "-D", "-m", "-M", "--delete", "--move", "--force"}),
-    "tag": frozenset({"-d", "--delete"}),
-    "remote": frozenset({"remove", "rm", "rename", "set-url"}),
-}
+# Read-only-by-default subcommands that become destructive with certain flags or
+# flags (branch -D, tag -d, remote add/remove, log --output=, grep
+# --open-files-in-pager) are classified by the shared ``git_read_exec_violation``
+# (RCE-class -> deny) and ``git_ref_violation`` (ref mutation -> deny; bare
+# creation -> ASK) predicates in registry.py -- one source of truth with the bash
+# matcher, so the strict and interactive paths cannot drift.
 
 # Stash sub-subcommands that are destructive
 DENIED_STASH_ACTIONS: frozenset[str] = frozenset({"pop", "drop", "clear"})
@@ -167,17 +165,6 @@ def _decide_stash(remaining: list[str]) -> dict[str, Any] | None:
     return None
 
 
-def _has_destructive_subcommand_flag(subcommand: str, remaining: list[str]) -> str | None:
-    """Return the destructive flag/operand that flips an allowed subcommand to deny."""
-    flags = _DESTRUCTIVE_SUBCOMMAND_FLAGS.get(subcommand)
-    if not flags:
-        return None
-    for tok in remaining:
-        if tok in flags:
-            return tok
-    return None
-
-
 def _classify_subcommand(subcommand: str, remaining: list[str]) -> dict[str, Any]:
     """Classify a parsed subcommand into an allow/deny/ask envelope."""
     if subcommand == "config":
@@ -190,11 +177,23 @@ def _classify_subcommand(subcommand: str, remaining: list[str]) -> dict[str, Any
         return emit_pretooluse_decision(
             "deny", f"git -C: '{subcommand}' is destructive and blocked"
         )
-    destructive_flag = _has_destructive_subcommand_flag(subcommand, remaining)
-    if destructive_flag is not None:
+    # Read-only subcommands coerced into a file write or external-program exec
+    # (git log --output=, git grep --open-files-in-pager). RCE-class -> deny.
+    exec_violation = git_read_exec_violation(subcommand, remaining)
+    if exec_violation is not None:
         return emit_pretooluse_decision(
             "deny",
-            f"git -C: '{subcommand} {destructive_flag}' is destructive and blocked",
+            f"git -C: '{subcommand} {exec_violation}' writes a file or execs and is blocked",
+        )
+    # Ref create/mutate: branch/tag <name> creation, branch -d/-D/-m, tag -a/-d,
+    # remote add/.... ``include_creation=True`` -- a ref write is denied in
+    # interactive ``-C`` too, matching the bash ``bash.git_ref_mutation`` floor.
+    # Shared predicate so the two paths cannot drift.
+    ref_violation = git_ref_violation(subcommand, remaining, include_creation=True)
+    if ref_violation is not None:
+        return emit_pretooluse_decision(
+            "deny",
+            f"git -C: '{subcommand} {ref_violation}' creates or mutates a ref and is blocked",
         )
     if subcommand in ALLOWED_SUBCOMMANDS:
         return emit_pretooluse_decision("allow", f"git -C: '{subcommand}' is read-only")

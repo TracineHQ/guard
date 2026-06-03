@@ -177,6 +177,12 @@ _VAR_ARG_RE = re.compile(
     r"(?:^|[^\\])(?:\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9])"
 )
 
+# awk field/builtin references (``$0``, ``$1``, ``$NF``, ``$NR`` ...) are NOT
+# shell variables — they're part of the awk program. Stripped before the
+# reader-var-arg check when the head verb is ``awk`` so they don't read as
+# credential-path indirection.
+_AWK_FIELD_RE = re.compile(r"\$(?:[0-9]+|NF|NR|FNR|FS|OFS|RS|ORS)\b")
+
 _ASK_REASON = (
     "Credential file access — confirm intent. "
     "Touching credential material (AWS/SSH/.env/*.pem/*.key/etc.) requires "
@@ -192,6 +198,11 @@ _ASK_REASON_VAR = (
     "If the variable expands to a credential file (e.g. $HOME/.aws/credentials), "
     "the contents would leak into the agent transcript. Confirm intent."
 )
+
+
+# Write-class tools whose credential subject is the DESTINATION path, not paths
+# mentioned in the content body (see ``decide``).
+_WRITE_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 
 
 def _expand(path: str) -> str:
@@ -239,23 +250,36 @@ def _path_is_credential(file_path: str) -> bool:
     return False
 
 
-def _is_heuristic_credential(file_path: str) -> bool:
-    """Tier 6: filename-keyword / sensitive-extension heuristic.
-
-    Case-insensitive on the basename only — directory portions don't trigger
-    so a normal file inside a ``keystore/`` directory doesn't false-match.
-    """
+def _has_sensitive_extension(file_path: str) -> bool:
+    """Tier 6a: basename carries a sensitive extension (.pem/.p12/.gpg/...)."""
     if not file_path:
         return False
     for candidate in _candidate_paths(file_path):
         base = token_basename(candidate)
-        if not base:
-            continue
-        # Sensitive extensions (use Path.suffix on the basename string).
-        if Path(base).suffix.lower() in _HEURISTIC_EXTENSIONS:
+        if base and Path(base).suffix.lower() in _HEURISTIC_EXTENSIONS:
             return True
-        # Filename keywords
-        if _HEURISTIC_NAME_RE.search(base):
+    return False
+
+
+def _is_heuristic_credential(file_path: str) -> bool:
+    """Tier 6: sensitive extension OR credential filename keyword.
+
+    Case-insensitive on the basename only — directory portions don't trigger
+    so a normal file inside a ``keystore/`` directory doesn't false-match.
+
+    The filename-keyword arm is intentionally NOT applied to tokens pulled out
+    of a Bash command string (see ``_hits_credential_strict``): in a shell
+    command a ``secret``/``token``/``key`` token is almost always a grep
+    pattern, a source filename, or a subcommand argument that merely mentions
+    the word, not a credential file being read.
+    """
+    if not file_path:
+        return False
+    if _has_sensitive_extension(file_path):
+        return True
+    for candidate in _candidate_paths(file_path):
+        base = token_basename(candidate)
+        if base and _HEURISTIC_NAME_RE.search(base):
             return True
     return False
 
@@ -295,15 +319,17 @@ def _is_credential_copy_source(command: str) -> bool:
     if head in _COPY_HEAD_VERBS:
         positional = [t for t in tokens[1:] if not t.startswith("-")]
         sources = positional[:-1] if len(positional) > 1 else positional
-        return any(_hits_credential(s) for s in sources)
+        return any(_hits_credential_strict(s) for s in sources)
 
     if head == "dd":
         return any(
-            _hits_credential(tok[len("if=") :]) for tok in tokens[1:] if tok.startswith("if=")
+            _hits_credential_strict(tok[len("if=") :])
+            for tok in tokens[1:]
+            if tok.startswith("if=")
         )
 
     if head == "tar" and _tar_is_create(tokens):
-        return any(_hits_credential(t) for t in tokens[1:] if not t.startswith("-"))
+        return any(_hits_credential_strict(t) for t in tokens[1:] if not t.startswith("-"))
 
     return False
 
@@ -332,12 +358,27 @@ def _is_reader_with_var_arg(command: str) -> bool:
 
     if head not in _READER_HEAD_VERBS:
         return False
+    if head == "awk":
+        # Drop awk field refs ($0/$NF/...) before looking for shell variables,
+        # so ``awk '{print $1, $NF}' file`` isn't read as var indirection.
+        return any(_VAR_ARG_RE.search(_AWK_FIELD_RE.sub("", tok)) for tok in tokens[1:])
     return any(_VAR_ARG_RE.search(tok) for tok in tokens[1:])
 
 
 def _hits_credential(path: str) -> bool:
     """Tier 1 + Tier 6: literal credential match or heuristic match."""
     return _path_is_credential(path) or _is_heuristic_credential(path)
+
+
+def _hits_credential_strict(path: str) -> bool:
+    """Bash-context matcher: credential path or sensitive extension only.
+
+    Excludes the filename-keyword heuristic, which over-fires on grep
+    patterns / source filenames / subcommand args that merely *mention* a
+    credential keyword. Path- and extension-based signals remain
+    (``~/.aws/credentials``, ``.env``, ``*.pem``).
+    """
+    return _path_is_credential(path) or _has_sensitive_extension(path)
 
 
 def _decide_bash(command: str) -> dict[str, Any] | None:
@@ -350,7 +391,7 @@ def _decide_bash(command: str) -> dict[str, Any] | None:
     for tok in _tokenize(command):
         if not tok or tok.startswith("-"):
             continue
-        if _hits_credential(tok):
+        if _hits_credential_strict(tok):
             return emit_pretooluse_decision("ask", _ASK_REASON)
     if _is_credential_copy_source(command):
         return emit_pretooluse_decision("ask", _ASK_REASON_COPY)
@@ -370,12 +411,31 @@ def decide(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(tool_input, dict):
         return None
 
-    # Tier 1 + Tier 4 + Tier 6: any path-like token in any field
+    is_bash = tool_name == "Bash"
+
+    # Write-class tools: the credential subject is the file being WRITTEN, not
+    # paths merely mentioned in the body. A doc / test fixture / source file that
+    # references ~/.ssh or ~/.aws is not touching the credential, so scanning the
+    # content would ASK on every such edit -- a false positive that buries the
+    # real signal. Check only the destination path: writing TO a credential file
+    # still ASKs; credential MATERIAL in the body is the secret-value detector's
+    # job (it matches key contents, not path mentions).
+    if tool_name in _WRITE_TOOLS:
+        for field in ("file_path", "notebook_path"):
+            target = tool_input.get(field, "")
+            if isinstance(target, str) and _hits_credential(target):
+                return emit_pretooluse_decision("ask", _ASK_REASON)
+        return None
+
+    # Tier 1 + Tier 4 + Tier 6: any path-like token in any field. For Bash the
+    # tokens come from a command string, where the filename-keyword heuristic
+    # over-fires on grep patterns / args — use the path+extension matcher only.
     for raw in all_paths_in(tool_input):
-        if _hits_credential(raw):
+        hit = _hits_credential_strict(raw) if is_bash else _hits_credential(raw)
+        if hit:
             return emit_pretooluse_decision("ask", _ASK_REASON)
 
-    if tool_name == "Bash":
+    if is_bash:
         cmd = tool_input.get("command", "")
         if isinstance(cmd, str):
             return _decide_bash(cmd)

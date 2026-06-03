@@ -369,3 +369,70 @@ class TestSubprocessIntegration:
         )
         assert result.returncode == 0
         assert result.stdout.strip() == ""
+
+
+class TestExecutionPositionNarrowing:
+    """Matchers must fire on credential material in execution position, not on
+    keyword/filename mentions in command arguments. These shapes were the
+    dominant false positives in real guard-decision logs.
+    """
+
+    # --- name-keyword heuristic must not fire on Bash arg tokens ---
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "pytest tests/hooks/test_credential_check.py",
+            "grep -iE 'api[_-]?key|secret|token|password|bearer' app.plist",
+            "git ls-files | grep -iE 'secret|credential'",
+            "ruff check src/guard/secrets_scanner.py",
+        ],
+    )
+    def test_name_keyword_mention_in_bash_arg_does_not_ask(self, command):
+        assert decide("Bash", {"command": command}) is None, command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat ~/.aws/credentials",
+            "cat .env",
+            "cat /tmp/server.pem",
+        ],
+    )
+    def test_real_credential_path_in_bash_still_asks(self, command):
+        assert _is_ask(decide("Bash", {"command": command})), command
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/var/data/passwords.json",
+            "/var/data/my_token.txt",
+        ],
+    )
+    def test_name_keyword_still_asks_for_file_path_input(self, path):
+        # The heuristic stays for real file_path tool inputs (Read/Edit/Write).
+        assert _is_ask(decide("Read", {"file_path": path})), path
+
+    # --- reader-var-arg must not read awk field refs as shell variables ---
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "awk 'NR==287 {print length($0)}' src/guard/cli.py",
+            "awk '{print $1, $NF}' data.txt",
+        ],
+    )
+    def test_awk_field_ref_does_not_ask(self, command):
+        assert decide("Bash", {"command": command}) is None, command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat $P",
+            "cat $CRED_PATH",
+            "head ${SECRET_FILE}",
+        ],
+    )
+    def test_genuine_reader_var_arg_still_asks(self, command):
+        # Deliberate design: an opaque reader target is asked to be safe.
+        assert _is_ask(decide("Bash", {"command": command})), command

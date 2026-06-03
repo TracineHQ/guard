@@ -1,0 +1,83 @@
+{"command": "git status", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only git"}
+{"command": "git diff --stat", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only git"}
+{"command": "git log --oneline -20", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only git"}
+{"command": "ls -la src/guard", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only listing"}
+{"command": "cat pyproject.toml", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only"}
+{"command": "rg -n \"def decide\" src", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only search"}
+{"command": "uv run pytest -q tests/", "expected": "allow", "mode": "auto", "source": "curated", "note": "test runner"}
+{"command": "uv run ruff check", "expected": "allow", "mode": "auto", "source": "curated", "note": "linter"}
+{"command": "jq -rR 'fromjson? | select(.decision)' guard-decisions.jsonl", "expected": "allow", "mode": "auto", "source": "convo:session", "note": "jq read filter; pipe inside quotes must not trip pipe_to_shell"}
+{"command": "cat f.jsonl | grep -vE \"python3? -c|node -e|--eval\"", "expected": "allow", "mode": "auto", "source": "convo:session", "note": "interpreter words inside grep pattern, not a pipe-to-shell"}
+{"command": "sed -n '150,250p' src/guard/cli.py", "expected": "allow", "mode": "default", "source": "convo:session", "note": "read-only line paging"}
+{"command": "find . -name '*.py' | xargs grep -l index-guard", "expected": "allow", "mode": "default", "source": "convo:session", "note": "read-only discovery; no -exec"}
+{"command": "awk -F'\\t' '{print $2}' data.tsv", "expected": "allow", "mode": "default", "source": "convo:session", "note": "read-only field extraction"}
+{"command": "grep -rn noqa src tests | tee /tmp/noqa.txt | wc -l", "expected": "allow", "mode": "default", "source": "convo:session", "note": "pipe-tee pass-through; Write tool cannot sit mid-pipe"}
+{"command": "uv run guard status", "expected": "allow", "mode": "auto", "source": "convo:session", "note": "guard read-only diagnostic"}
+{"command": "git -C /repo status", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only git -C: parity with bare git status"}
+{"command": "git -C /repo log --oneline -5", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only git -C"}
+{"command": "git -C /repo diff HEAD~1", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only git -C"}
+{"command": "git -C/repo branch", "expected": "allow", "mode": "auto", "source": "curated", "note": "fused -C/path read-only git"}
+{"command": "git -C /repo show HEAD", "expected": "allow", "mode": "auto", "source": "curated", "note": "read-only git -C"}
+{"command": "git tag", "expected": "allow", "mode": "auto", "source": "curated", "note": "bare tag listing -- read-only"}
+{"command": "git tag -l 'v1.*'", "expected": "allow", "mode": "auto", "source": "curated", "note": "tag list with pattern -- read-only"}
+{"command": "git tag --list", "expected": "allow", "mode": "auto", "source": "curated", "note": "tag listing"}
+{"command": "git branch", "expected": "allow", "mode": "auto", "source": "curated", "note": "bare branch listing"}
+{"command": "git branch -a", "expected": "allow", "mode": "auto", "source": "curated", "note": "list all branches"}
+{"command": "git branch -v", "expected": "allow", "mode": "auto", "source": "curated", "note": "verbose branch listing"}
+{"command": "git branch --list 'feat/*'", "expected": "allow", "mode": "auto", "source": "curated", "note": "branch list with pattern"}
+{"command": "git branch --contains HEAD", "expected": "allow", "mode": "auto", "source": "curated", "note": "list flag with operand -- read-only"}
+{"command": "git log -p", "expected": "allow", "mode": "auto", "source": "curated", "note": "patch log -- read-only, not --output"}
+{"command": "git show HEAD", "expected": "allow", "mode": "auto", "source": "curated", "note": "show a commit -- positional is a rev, not a ref to create"}
+{"command": "git grep -n TODO src", "expected": "allow", "mode": "auto", "source": "curated", "note": "plain grep -- read-only"}
+{"command": "git remote -v", "expected": "allow", "mode": "auto", "source": "curated", "note": "list remotes"}
+{"command": "git remote show origin", "expected": "allow", "mode": "auto", "source": "curated", "note": "remote show is a read action"}
+{"command": "git diff --output-indicator-new=X HEAD~1", "expected": "allow", "mode": "auto", "source": "curated", "note": "--output-indicator-* is a display flag, NOT --output file write"}
+{"command": "git -C /repo branch -a", "expected": "allow", "mode": "default", "source": "curated", "note": "interactive -C read-only branch listing stays allowed"}
+{"command": "git branch --merged main", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "list flag + operand -- main is a filter, not a ref to create"}
+{"command": "git branch --sort=-committerdate", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "fused list flag; no positional -> not creation"}
+{"command": "git tag --points-at HEAD", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "list/query flag -- HEAD is the query target, not a tag name"}
+{"command": "git tag -n5", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "-n5 annotation-line count is a listing flag, must not read as creation"}
+{"command": "git remote get-url origin", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "get-url is a read action, not a write action"}
+{"command": "git log --output-indicator-old=Y HEAD~1", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "--output-indicator-* display flag, NOT --output file write"}
+{"command": "git show --stat HEAD", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "diff-like read flag; --stat is not --output/--ext-diff"}
+{"command": "git worktree add /tmp/wt main", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "worktree on EXISTING branch (no -b) creates no ref -- stays allowed"}
+{"command": "git worktree list", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "worktree read subcommand stays allowed"}
+{"command": "git rev-parse HEAD", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "git rev-parse registered read-only; rev resolution, no write -- strict-mode anti-FP backbone"}
+{"command": "git rev-parse --abbrev-ref HEAD", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "git rev-parse --abbrev-ref current-branch query; read-only flag, must stay allowed in strict"}
+{"command": "git describe --tags", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "git describe registered read-only; tag-derived name lookup, no ref creation"}
+{"command": "git blame README.md", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "git blame registered read-only; line-authorship view"}
+{"command": "git config --get user.email", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "git config --get is read-only (distinct from bare git config set); registered ALLOW prefix"}
+{"command": "git shortlog -sn", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "git shortlog registered read-only; -sn contributor summary is a display filter"}
+{"command": "git ls-files -m", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "git ls-files registered read-only; -m lists modified, an index query not a write"}
+{"command": "find . -name '*.py' -type f", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "find without -exec/-delete is CONDITIONAL_SAFE; pure discovery stays allowed in strict"}
+{"command": "find . -name '*.log' -delete", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "anti-bypass: -delete is in find's CONDITIONAL_SAFE deny set; benign-looking find must deny"}
+{"command": "echo hello", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "echo is CONDITIONAL_SAFE with empty deny set; plain echo stays allowed in strict"}
+{"command": "printf '%s' x", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "printf CONDITIONAL_SAFE; format-string emit is read-only"}
+{"command": "diff a.txt b.txt", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "diff registered file-read; two-file comparison is read-only"}
+{"command": "uname -a", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "uname registered read-only diagnostic; -a is the full-info flag"}
+{"command": "id -u", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "id registered read-only; -u uid lookup"}
+{"command": "[ -f pyproject.toml ]", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "POSIX test builtin [ ... ]; read-only predicate peer of test, registered ALLOW"}
+{"command": "[[ -d src ]]", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "bash conditional [[ ... ]]; read-only predicate, registered ALLOW"}
+{"command": "env FOO=bar git status", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "env K=V prefix over benign git status: _is_safe_env skips assignment, inner is SAFE_PREFIX"}
+{"command": "env FOO=bar cat pyproject.toml", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "env K=V prefix over benign cat: assignment skipped, inner file-read matches SAFE_PREFIX"}
+{"command": "convo search foo", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "convo read-only query subcommand registered via _CONVO_SAFE_PREFIXES; first-party diagnostic"}
+{"command": "convo stats", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "convo stats read-only analytics subcommand; registered safe prefix"}
+{"command": "convo index-guard", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "anti-bypass: convo write subcommand (rebuilds DB) is deliberately UNregistered -> strict default-deny"}
+{"command": "npm view react version", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "npm view registered read-only; registry metadata query, no install side-effect"}
+{"command": "npm outdated", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "npm outdated registered read-only; dependency-staleness report"}
+{"command": "printenv PATH", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "printenv registered util; single-var env lookup is read-only"}
+{"command": "realpath ./src", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "realpath registered util; path canonicalization is read-only"}
+{"command": "git stash list", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP: git stash list is read-only; allowed in both modes (longest-prefix-wins: git stash list ALLOW beats the broader git stash ASK feedback)"}
+{"command": "timeout 5 rm -rf /tmp/x", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "anti-bypass: timeout-wrapped rm -rf still denies in strict (wrapper prefix not on safe-prefix allowlist)"}
+{"command": "git stash list", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "FP fix: read-only git stash list now allowed in strict (was shadowed into deny by the git stash ASK feedback prefix)"}
+{"command": "git stash show", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "FP fix: read-only git stash show allowed in strict via longest-prefix-wins"}
+{"command": "git stash show -p stash@{0}", "expected": "allow", "mode": "auto", "source": "adversarial", "note": "anti-FP: git stash show with -p/stash ref stays a read-only allow"}
+{"command": "RUN_ID=a1b2c3d4-e5f6-7890-abcd-ef1234567890 make", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP fp-3: high-entropy UUID assigned to a non-credential name (RUN_ID) is an identifier, not a secret; entropy arm now gated on the var NAME"}
+{"command": "OUTPUT=builds/2026-05-30T12-00-00Z-abc123def456 sh", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP fp-3: build-path value on a plain name (OUTPUT) no longer scans as a secret"}
+{"command": "git stash show -p", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP R-E: -p patch view of a stash is benign, no write/exec flag"}
+{"command": "git stash show stash@{0}", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP R-E: showing a specific stash ref is benign"}
+{"command": "git stash show -p stash@{1}", "expected": "allow", "mode": "auto", "source": "curated", "note": "anti-FP R-E: -p plus specific stash, strict, still allow"}
+{"command": "DB_URL=postgres://localhost:5432/dev", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP R-G: credential-less DSN (host:port, no user:pass@) must not match the inline-creds pattern"}
+{"command": "REPO=ssh://git@github.com/org/repo.git", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP R-G: ssh URL has user@ but no :password, no match"}
+{"command": "RUN_ID=550e8400-e29b-41d4-a716-446655440000", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP R-G: UUID run-id under a plain name stays allow (name-gated entropy arm unchanged)"}
+{"command": "OUT=/tmp/build/artifacts-20260101-final", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP R-G: build path is not a secret value"}
