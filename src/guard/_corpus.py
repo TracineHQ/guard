@@ -81,14 +81,34 @@ class CorpusReport:
 
 
 def default_corpus_dir() -> Path:
-    """``tests/corpus`` resolved from this package's location (dev checkout).
+    """Locate ``tests/corpus`` in the guard source tree.
 
     ``guard corpus`` is a development / CI harness: it expects a guard source
-    tree, where fixtures live under ``tests/corpus``. A pip-installed guard (no
-    ``tests/``) yields a path that won't exist; ``load_corpus`` then raises a
-    clear error rather than silently passing on an empty corpus.
+    tree, where fixtures live under ``tests/corpus``. Resolve in two steps so the
+    harness works whether guard is imported editable OR from a wheel while run
+    from a checkout -- the install-smoke CI job installs the built wheel into a
+    venv, then runs the full suite (incl. the FP/FN ratchet) from the repo root
+    to fence the *shipped* matcher, not just the source:
+
+    1. package-relative -- correct for an editable / source install, where this
+       module sits at ``<repo>/src/guard/_corpus.py``;
+    2. a walk up from the current directory -- finds the checkout's corpus when
+       guard itself is installed elsewhere (site-packages).
+
+    Neither is a user-supplied path knob; both are fixed source-tree lookups. A
+    pip-installed guard with no checkout in scope yields the package-relative
+    path, which won't exist, so ``load_corpus`` raises a clear error rather than
+    silently passing on an empty corpus.
     """
-    return Path(__file__).resolve().parents[2] / "tests" / "corpus"
+    pkg_relative = Path(__file__).resolve().parents[2] / "tests" / "corpus"
+    if pkg_relative.is_dir():
+        return pkg_relative
+    cwd = Path.cwd().resolve()
+    for base in (cwd, *cwd.parents):
+        candidate = base / "tests" / "corpus"
+        if candidate.is_dir():
+            return candidate
+    return pkg_relative
 
 
 def load_corpus() -> list[CorpusRow]:
