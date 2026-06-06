@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS LaunchDaemon for the guard integrity monitor.
+
+  Install (as root): copy to /Library/LaunchDaemons/com.tracinehq.guard-integrity.plist
+  (root:wheel, 0644), then `launchctl bootstrap system <path>`. Runs as root,
+  out of band from Claude Code, so a hook that fails OPEN cannot stop it.
+
+  The /opt/guard paths below are the documented defaults from the install runbook
+  (docs/integrity-runbook.md); adjust both here and the manifest root if you
+  install elsewhere.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.tracinehq.guard-integrity</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>/opt/guard/bin/guard-integrity-monitor</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>GUARD_INTEGRITY_ROOT</key>
+    <string>/opt/guard/integrity</string>
+    <key>GUARD_INTEGRITY_LOG</key>
+    <string>/var/log/guard-integrity.log</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>StandardOutPath</key>
+  <string>/var/log/guard-integrity.daemon.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/guard-integrity.daemon.log</string>
+</dict>
+</plist>

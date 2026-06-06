@@ -1,0 +1,31 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
+#
+# guard integrity monitor -- out-of-band periodic integrity check.
+#
+# Invoked on a schedule by a root LaunchDaemon (macOS) or systemd timer
+# (Linux/WSL), INDEPENDENT of Claude Code hooks -- which fail OPEN, so a broken
+# or removed SessionStart hook silently stops protecting. This runs as root,
+# reuses the same dependency-free guard-sentinel heal logic, and appends a
+# timestamped advisory line to an append-only log. Tampering is therefore
+# reverted and recorded even between agent sessions.
+#
+# Config:
+#   GUARD_INTEGRITY_ROOT  root-owned dir holding `manifest` + `canonical/` (required)
+#   GUARD_INTEGRITY_LOG   append-only advisory log (default: $GUARD_INTEGRITY_ROOT/monitor.log)
+set -eu
+
+root="${GUARD_INTEGRITY_ROOT:?GUARD_INTEGRITY_ROOT not set}"
+here=$(dirname -- "$0")
+sentinel="$here/guard-sentinel"
+log="${GUARD_INTEGRITY_LOG:-$root/monitor.log}"
+
+ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+out=$(sh "$sentinel" 2>&1) && rc=0 || rc=$?
+
+# One advisory per line: flatten any multi-line sentinel output for the log.
+flat=$(printf '%s' "$out" | tr '\n' ' ')
+printf '%s rc=%s %s\n' "$ts" "$rc" "$flat" >> "$log"
+
+exit "$rc"

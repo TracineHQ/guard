@@ -955,8 +955,9 @@ COMMANDS: list[CommandRule] = [
 # executing it. Registering them keeps strict mode (auto/dontAsk/bypass) from
 # default-denying guard's own diagnostic tooling -- the friction that made
 # ``uv run guard test`` itself undeniable in an unattended session. WRITE
-# subcommands (``mode``, ``migrate-log``, and the ``allowlist`` mutators) are
-# excluded: they change guard's config and must not be blanket-allowed. The
+# subcommands (``mode``, ``migrate-log``, ``integrity``, and the ``allowlist``
+# mutators) are excluded: they change guard's config (``integrity build`` writes
+# the root-owned manifest) and must not be blanket-allowed. The
 # allowlist's read-only sub-subcommands (``list`` / ``rules``) are registered
 # explicitly. Drift-proof: a CLI-introspection test asserts every subcommand is
 # classified in exactly one of the read-only / write sets, so a new subcommand
@@ -964,7 +965,9 @@ COMMANDS: list[CommandRule] = [
 GUARD_READ_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
     {"status", "healthcheck", "noisy", "silent", "trace", "test", "diff", "corpus"}
 )
-GUARD_WRITE_SUBCOMMANDS: frozenset[str] = frozenset({"allowlist", "migrate-log", "mode"})
+GUARD_WRITE_SUBCOMMANDS: frozenset[str] = frozenset(
+    {"allowlist", "migrate-log", "mode", "integrity", "trust-script"}
+)
 _GUARD_READ_ONLY_SUBPREFIXES: frozenset[str] = GUARD_READ_ONLY_SUBCOMMANDS | {
     "allowlist list",
     "allowlist rules",

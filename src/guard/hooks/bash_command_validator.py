@@ -27,6 +27,7 @@ Exit codes:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
 
 from guard._utils import (
     GUARD_STRICT_DENY_QUEUE_PATH,
+    SENSITIVE_DEST_HOME_PATTERNS,
     STRICT_PERMISSION_MODES,
     _log_debug,
     append_jsonl,
@@ -1709,6 +1711,25 @@ _SAFE_INTERPRETER_MODULES = frozenset(
 )
 
 
+# Interpreter flags that take no script operand. Shared by the detection walk
+# (_interpreter_runs_module_or_script) and the extraction walk
+# (_interpreter_script_token) so the two can never drift — a flag the detector
+# skips must be the same flag the extractor skips, or a trusted-script lookup
+# could hash the wrong token.
+_INTERPRETER_SAFE_FLAGS = frozenset(
+    {
+        "--version",
+        "-V",
+        "--help",
+        "-h",
+        "-?",
+        "-VV",
+        "--check",
+        "--no-site-packages",
+    }
+)
+
+
 def _interpreter_runs_module_or_script(tokens: list[str]) -> bool:
     """Return True if the interpreter is invoked with ``-m <mod>`` or a script.
 
@@ -1726,16 +1747,7 @@ def _interpreter_runs_module_or_script(tokens: list[str]) -> bool:
     """
     if len(tokens) < 2:
         return False
-    safe_flags = {
-        "--version",
-        "-V",
-        "--help",
-        "-h",
-        "-?",
-        "-VV",
-        "--check",
-        "--no-site-packages",
-    }
+    safe_flags = _INTERPRETER_SAFE_FLAGS
     head = _basename(tokens[0])
     # Bun package-manager subcommands: ``bun add <pkg>`` / ``bun run dev`` etc.
     # bun acts as both interpreter and pkgmgr; pkg routes go through the
@@ -1870,6 +1882,103 @@ def _is_dangerous_interpreter(normalized: str) -> bool:
     if _AUX_INTERPRETER_BASENAME_RE.match(head):
         return _interpreter_uses_eval_flag(tokens) or _interpreter_runs_module_or_script(tokens)
     return False
+
+
+def _interpreter_script_token(itoks: list[str]) -> str | None:
+    """Return the bare-script-path operand of a direct interpreter call, or None.
+
+    ``itoks[0]`` is the interpreter binary. Mirrors the positional walk in
+    ``_interpreter_runs_module_or_script`` (sharing ``_INTERPRETER_SAFE_FLAGS``)
+    but returns the script token instead of a bool. Returns ``None`` for forms
+    with no script file to content-pin: eval flags (``-c``/``-e``), ``-m``
+    modules, and bun/deno (whose subcommand surface needs bespoke parsing —
+    deliberately excluded from trust in v1).
+    """
+    if len(itoks) < 2:
+        return None
+    if _basename(itoks[0]) in {"bun", "deno"}:
+        return None
+    if _interpreter_uses_eval_flag(itoks):
+        return None
+    i = 1
+    n = len(itoks)
+    while i < n:
+        tok = itoks[i]
+        if tok in _INTERPRETER_SAFE_FLAGS:
+            i += 1
+            continue
+        # ``-mmod`` (fused) or ``-m mod`` (spaced): a module, not a file.
+        if tok == "-m" or (tok.startswith("-m") and len(tok) > 2 and tok[2] != "-"):
+            return None
+        if tok.startswith("-"):
+            i += 1
+            continue
+        return tok  # first non-flag positional → the script path
+    return None
+
+
+def _extract_interpreter_script_path(segment: str) -> str | None:
+    """Return the script path a dangerous-interpreter segment would execute, or None.
+
+    Mirrors ``_is_dangerous_interpreter``'s interpreter/wrapper dispatch, then
+    delegates to ``_interpreter_script_token``. Only the bare-script-path form
+    yields a path; eval / ``-m`` / bun / deno forms return ``None`` and are
+    therefore never trust-rescuable.
+    """
+    tokens = segment.split()
+    if not tokens:
+        return None
+    head = _basename(tokens[0])
+    if head in INTERPRETER_RUNNER_WRAPPERS:
+        start: int | None = None
+        if head == "uvx" and len(tokens) >= _UVX_MIN_TOKENS:
+            start = 1
+        elif head == "pipx" and len(tokens) >= _PIPX_RUN_MIN_TOKENS and tokens[1] == "run":
+            start = 2
+        elif head == "uv" and tokens[1:3] == ["tool", "run"]:
+            start = 3
+        elif head == "uv" and len(tokens) >= _UV_RUN_MIN_TOKENS and tokens[1] == "run":
+            start = 2
+        if start is None:
+            return None
+        for j in range(start, len(tokens)):
+            inner = _basename(tokens[j])
+            if _INTERPRETER_BASENAME_RE.match(inner) or _AUX_INTERPRETER_BASENAME_RE.match(inner):
+                return _interpreter_script_token(tokens[j:])
+        return None
+    if _INTERPRETER_BASENAME_RE.match(head) or _AUX_INTERPRETER_BASENAME_RE.match(head):
+        return _interpreter_script_token(tokens)
+    return None
+
+
+def _maybe_allow_trusted_script(allowlist: Allowlist, segments: list[str]) -> dict[str, str] | None:
+    """Allow a single-segment interpreter command iff it runs a content-pinned trusted script.
+
+    Gated to one segment (no pipes / chaining) so an allow can never rescue an
+    otherwise-dangerous pipeline. The script path is resolved relative to the
+    cwd and its bytes are hashed; an allow is returned only when the
+    ``(resolved path, sha256)`` pair matches a ``trusted_scripts`` entry.
+    Missing / unreadable files and non-bare-script forms return ``None`` so the
+    ``bash.dangerous_interpreter`` floor deny stands. The pin is on the script
+    bytes, not the command line, so operands vary freely; editing the script
+    changes its hash and revokes the trust.
+    """
+    if len(segments) != 1 or not allowlist.trusted_scripts:
+        return None
+    raw_path = _extract_interpreter_script_path(segments[0])
+    if raw_path is None:
+        return None
+    try:
+        resolved = str(Path(raw_path).resolve())
+        data = Path(resolved).read_bytes()
+    except OSError:
+        return None
+    entry = allowlist.find_trusted_script(resolved, hashlib.sha256(data).hexdigest())
+    if entry is None:
+        return None
+    return _allow(
+        f"trusted script: {entry.reason} (content-pinned sha256, rule=bash.dangerous_interpreter)"
+    )
 
 
 # === Dangerous rm shapes ===
@@ -3134,39 +3243,10 @@ _SENSITIVE_DEST_PATTERNS = (
     "/Library/LaunchDaemons/",
     "/var/run/docker.sock",
 )
-_SENSITIVE_DEST_HOME_PATTERNS = (
-    ".ssh/authorized_keys",
-    ".ssh/authorized_keys2",
-    ".ssh/config",
-    ".ssh/known_hosts",
-    ".ssh/id_rsa",
-    ".ssh/id_ed25519",
-    ".bashrc",
-    ".bash_profile",
-    ".bash_login",
-    ".bash_logout",
-    ".zshrc",
-    ".zshenv",
-    ".zprofile",
-    ".profile",
-    ".inputrc",
-    ".config/fish/",
-    ".config/autostart/",
-    ".aws/credentials",
-    ".aws/config",
-    ".gnupg/",
-    "Library/LaunchAgents/",
-    "Library/LaunchDaemons/",
-    ".local/bin/",
-    # Guard's own audit log + strict-deny queue. Without this, an agent
-    # can ``> ~/.claude/guard-decisions.jsonl`` to truncate the audit trail
-    # or ``echo > ~/.claude/guard-strict-deny-queue.jsonl`` to forge entries.
-    # The append-side writer already uses O_NOFOLLOW + O_APPEND for symlink
-    # safety; this closes the truncate/overwrite vector via WRITE_HEAD verbs.
-    ".claude/guard-decisions.jsonl",
-    ".claude/guard-strict-deny-queue.jsonl",
-    ".claude/guard/",
-)
+# Canonical source lives in guard._utils (shared with protected_files so the
+# bash gate and the Edit/Write gate cannot drift). Aliased to the original
+# private name to keep this module's internal references unchanged.
+_SENSITIVE_DEST_HOME_PATTERNS = SENSITIVE_DEST_HOME_PATTERNS
 _WRITE_HEAD_VERBS = {
     "tee",
     "cp",
@@ -5805,8 +5885,20 @@ _AGENT_GUIDANCE_STRICT = (
     "operator's later review."
 )
 
+# Override footer for a bare-script interpreter deny. Unlike the generic
+# allow-command footer (which exact-matches the whole command line and so
+# breaks the moment an operand changes), content-pinning survives varying
+# operands because it pins the script's bytes, not the command string.
+_INTERPRETER_TRUST_OVERRIDE = (
+    "Override: for a vetted script you re-run, content-pin it (survives varying "
+    "operands, unlike an exact allow-command): `guard trust-script {script} "
+    "--reason '...'` -- a human reads the script and pins its exact bytes "
+    "(editing the script revokes the trust). Blunter alternative: "
+    "`guard allowlist disable-rule bash.dangerous_interpreter`."
+)
 
-def _format_deny_reason(rule_id: str, body: str) -> str:
+
+def _format_deny_reason(rule_id: str, body: str, *, override: str | None = None) -> str:
     """Append the unified rule_id + override-path footer to a deny ``body``.
 
     Every allowlist-routed deny surfaces the rule_id and the two CLI verbs
@@ -5825,11 +5917,12 @@ def _format_deny_reason(rule_id: str, body: str) -> str:
     mode = _REQUEST_CONTEXT.get("permission_mode") or "default"
     is_strict = mode in STRICT_PERMISSION_MODES
     guidance = _AGENT_GUIDANCE_STRICT if is_strict else _AGENT_GUIDANCE_INTERACTIVE
-    return (
-        f"guard [permission_mode={mode}] denied: {rule_id}. {body}. "
-        f"Override: `guard allowlist allow-command {rule_id} '<command>' --reason '...'` "
-        f"or `guard allowlist disable-rule {rule_id}`. {guidance}"
-    )
+    if override is None:
+        override = (
+            f"Override: `guard allowlist allow-command {rule_id} '<command>' --reason '...'` "
+            f"or `guard allowlist disable-rule {rule_id}`."
+        )
+    return f"guard [permission_mode={mode}] denied: {rule_id}. {body}. {override} {guidance}"
 
 
 _AGENT_GUIDANCE_ASK = (
@@ -6055,6 +6148,65 @@ def _match_harness_steering(segments: list[str]) -> str | None:
     return _CORPUS_STEER_BODY
 
 
+# === Inert ``guard corpus add`` registration ===
+# ``guard corpus add '<X>'`` stores X as a fixture string and runs it through
+# decide() IN-PROCESS; X is never handed to a shell. So registering a deny-fixture
+# for ANY command (including interpreter / credential forms the floor would
+# otherwise deny) is safe -- the payload is data, not an instruction. The carve-out
+# below refuses anything that would execute BEFORE guard runs, so the allowance
+# can never be used to smuggle a live command past the floor.
+_SHELL_SUBST_MARKERS: tuple[str, ...] = ("$(", "`", "${", "<(", ">(")
+# Well-formed single- or double-quoted span. ``sub("")`` leaves only the
+# UNquoted remainder, so a ``>`` / ``<`` in the leftovers is a real redirect.
+_QUOTED_SPAN_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def _has_redirect_outside_quotes(segment: str) -> bool:
+    """True if a redirect operator sits OUTSIDE every quoted span.
+
+    A ``>`` / ``<`` inside the corpus payload quotes (``add 'echo x > f'``) is
+    fixture data; one in the bare remainder (``add 'x' > f``) is a real redirect.
+    Malformed quoting leaves its bytes in the remainder, so it fails safe (treated
+    as a redirect -> not inert).
+    """
+    bare = _QUOTED_SPAN_RE.sub("", segment)
+    return ">" in bare or "<" in bare
+
+
+def _is_inert_corpus_add(command: str) -> bool:
+    """True if ``command`` is a clean, literal ``guard corpus add`` registration.
+
+    Inert means: the shell would run exactly one process, ``guard``, with
+    ``corpus add`` and quoted-literal arguments -- no substitution, no chaining,
+    no redirect outside the payload quotes. Such a command cannot execute its own
+    payload, so allowing it (over the dangerous floor) is safe regardless of what
+    the payload string contains.
+
+    Conservative by construction: a shell-substitution marker (``$(``, backtick,
+    ``${``, process substitution) ANYWHERE in the raw string is a hard reject --
+    cheaper and unspoofable versus reasoning about whether it sits inside quotes.
+    """
+    if any(marker in command for marker in _SHELL_SUBST_MARKERS):
+        return False
+    cleaned = strip_comments(command)
+    seg_pairs = split_pipeline_with_ops(cleaned) if cleaned else []
+    if len(seg_pairs) != 1:  # any chaining / pipe -> more than one segment
+        return False
+    segment = seg_pairs[0][1]
+    if _has_redirect_outside_quotes(segment):
+        return False
+    toks = _strip_guard_global_flags(segment).split()
+    if toks[:1] == ["guard"]:
+        gi = 0
+    elif toks[:3] == ["uv", "run", "guard"]:
+        gi = 2
+    elif toks[:2] == ["uvx", "guard"]:
+        gi = 1
+    else:
+        return False
+    return toks[gi + 1 : gi + 3] == ["corpus", "add"]
+
+
 def decide(
     command: str,
     original_command: str | None = None,
@@ -6129,6 +6281,20 @@ def decide(
         _log_local(command, "deny", "command-too-long-post-canon")
         return deny
 
+    # === Inert corpus-add (precedence over the dangerous floor) ===
+    # ``guard corpus add '<X>'`` adjudicates X in-process and never shells it out,
+    # so registering a deny-fixture for a dangerous command must not be floor-denied
+    # on the strength of its own payload. Ordered FIRST among the matchers, but the
+    # carve-out in ``_is_inert_corpus_add`` refuses any form that would execute
+    # before guard runs (substitution, chaining, redirect outside the payload
+    # quotes), so nothing live can ride this allowance past the floor.
+    if _is_inert_corpus_add(command):
+        _log_local(command, "allow", "inert-corpus-add")
+        return _allow(
+            "guard corpus add: inert fixture registration "
+            "(payload is adjudicated in-process, never executed)"
+        )
+
     leak = get_credential_leak_deny(command)
     if leak is not None:
         bypass = _maybe_allow_via_allowlist(
@@ -6162,6 +6328,33 @@ def decide(
         bypass = _maybe_allow_via_allowlist(allowlist, rule_id, original_command, deny)
         if bypass is not None:
             return bypass
+        # Content-pinned trusted-script override: a human has vetted these exact
+        # script bytes via `guard trust-script`. Unlike the command-string
+        # allowlist above, this survives varying operands (the script is pinned,
+        # not the command line) and can't be self-granted by an agent (the trust
+        # store is a protected file, and adding to it is a human action).
+        if rule_id == "bash.dangerous_interpreter":
+            trusted = _maybe_allow_trusted_script(allowlist, segments)
+            if trusted is not None:
+                _log_local(command, "allow", "trusted-script")
+                return trusted
+            # Bare-script form (a file we could content-pin): rebuild the deny so
+            # its override footer points at `guard trust-script <path>` — the safe,
+            # operand-stable override — instead of the generic exact-allow footer.
+            if len(segments) == 1:
+                script = _extract_interpreter_script_path(segments[0])
+                if script is not None:
+                    body = (
+                        f"Blocked: `{segments[0][:_SEGMENT_DISPLAY_TRUNC]}` — "
+                        f"{_SYNTH_DENY_REASONS[_SYNTH_INTERPRETER_DENY]}"
+                    )
+                    deny = _deny(
+                        _format_deny_reason(
+                            rule_id,
+                            body,
+                            override=_INTERPRETER_TRUST_OVERRIDE.format(script=script),
+                        )
+                    )
         _log_local(command, "deny", f"always-deny ({rule_id})")
         return deny
 

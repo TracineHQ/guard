@@ -38,6 +38,7 @@ Output: structured JSON by default; pretty-printed when stdout is a TTY.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -49,7 +50,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from guard import __version__
+from guard import __version__, _integrity
 from guard._utils import (
     _SCHEMA_V,
     GUARD_DECISIONS_PATH,
@@ -59,6 +60,7 @@ from guard.allowlist import (
     _resolve_scope_path,
     add_allow_command,
     add_disable_rule,
+    add_trusted_script,
     load_allowlist,
     remove_allow_command,
     remove_disable_rule,
@@ -1237,6 +1239,65 @@ def _resolve_scope(args: argparse.Namespace) -> str:
     return "global" if getattr(args, "scope_global", False) else "project"
 
 
+def cmd_integrity_build(root: Path, files: list[Path]) -> tuple[dict[str, Any], str]:
+    """Record sha256 + a canonical copy of each protected file under ``root``.
+
+    Run as root so the manifest + canonical copies the sentinel heals from sit
+    outside the agent's write surface.
+    """
+    entries = _integrity.build(root, files)
+    payload: dict[str, Any] = {
+        "root": str(root),
+        "count": len(entries),
+        "entries": [
+            {"path": e.path, "sha256": e.sha256, "canonical": e.canonical} for e in entries
+        ],
+    }
+    noun = "entry" if len(entries) == 1 else "entries"
+    return payload, f"guard integrity: built {len(entries)} {noun} under {root}\n"
+
+
+def cmd_integrity_verify(root: Path) -> tuple[dict[str, Any], str]:
+    """Non-healing diagnostic: report per-file drift against the manifest anchor."""
+    entries = _integrity.verify(root)
+    ok = all(e.status == "clean" for e in entries)
+    payload: dict[str, Any] = {
+        "root": str(root),
+        "ok": ok,
+        "entries": [{"path": e.path, "status": e.status} for e in entries],
+    }
+    drifted = [e for e in entries if e.status != "clean"]
+    status_label = "OK" if ok else f"DRIFT ({len(drifted)}/{len(entries)})"
+    return payload, f"guard integrity verify: {status_label}\n"
+
+
+def cmd_trust_script(path: str, *, reason: str, scope: str) -> tuple[dict[str, Any], str]:
+    """Content-pin a vetted script so its bare-interpreter invocation is allowed.
+
+    Hashes the script's CURRENT bytes and records a ``trusted_scripts`` entry
+    keyed on the resolved absolute path + that sha256. Operands may vary at run
+    time (the script is pinned, not the command line); editing the script
+    changes the hash and revokes the trust. The file must exist and be readable
+    now -- a missing file raises and the CLI exits non-zero.
+    """
+    resolved = str(Path(path).resolve())
+    data = Path(resolved).read_bytes()
+    sha = hashlib.sha256(data).hexdigest()
+    added = add_trusted_script(path=resolved, sha256=sha, reason=reason, scope=scope)
+    al_path = _resolve_scope_path(scope, None)
+    payload = {
+        "path": resolved,
+        "sha256": sha,
+        "reason": reason,
+        "scope": scope,
+        "added": added,
+        "allowlist": str(al_path),
+    }
+    verb = "trusted" if added else "already trusted"
+    pretty = f"trust-script: {resolved} {verb} (sha256={sha[:12]}..., {scope}: {al_path})\n"
+    return payload, pretty
+
+
 def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915 -- flat subparser wiring, one block per subcommand
     parser = argparse.ArgumentParser(
         prog="guard",
@@ -1393,6 +1454,30 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915 -- flat subpars
         "--source", default=None, help="Provenance tag (default: the file's stem)."
     )
 
+    p_integrity = sub.add_parser(
+        "integrity",
+        help="Build/verify the root-owned integrity manifest the sentinel heals from.",
+        epilog=(
+            "Examples:\n"
+            "  sudo guard integrity build --root /opt/guard/integrity "
+            "~/.claude/settings.json\n"
+            "  guard integrity verify --root /opt/guard/integrity  # exit 1 on any drift"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_integrity_sub = p_integrity.add_subparsers(dest="integrity_cmd")
+    p_int_build = p_integrity_sub.add_parser(
+        "build", help="Record sha256 + a canonical copy for each protected file (run as root)."
+    )
+    p_int_build.add_argument(
+        "--root", required=True, help="Root-owned dir to hold `manifest` and `canonical/`."
+    )
+    p_int_build.add_argument("files", nargs="+", help="Absolute paths of the files to protect.")
+    p_int_verify = p_integrity_sub.add_parser(
+        "verify", help="Report per-file drift (non-healing); exit 1 on any drift."
+    )
+    p_int_verify.add_argument("--root", required=True, help="Root-owned integrity dir to verify.")
+
     p_allow = sub.add_parser(
         "allowlist",
         help="Manage the project + global allowlist (disable_rules / allow_commands).",
@@ -1487,6 +1572,26 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915 -- flat subpars
     )
     _add_scope_args(p_mode)
 
+    p_trust = sub.add_parser(
+        "trust-script",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help=(
+            "Content-pin a vetted script so its bare-interpreter invocation "
+            "(python3 scan.py ...) is allowed despite the dangerous_interpreter floor."
+        ),
+        epilog=(
+            "Pins the sha256 of the script's CURRENT bytes. Operands may vary at "
+            "run time (the script is pinned, not the command line); editing the "
+            "script changes its hash and revokes the trust. Read the script first "
+            "-- this is a human trust decision, not an agent one."
+        ),
+    )
+    p_trust.add_argument(
+        "path", help="Path to the script file to trust (resolved to an absolute path)."
+    )
+    p_trust.add_argument("--reason", required=True, help="Written justification (audit-logged).")
+    _add_scope_args(p_trust)
+
     return parser
 
 
@@ -1497,7 +1602,7 @@ def _emit(payload: dict[str, Any], pretty: str, *, as_json: bool) -> None:
         sys.stdout.write(pretty)
 
 
-def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0911 -- linear command-dispatch ladder, one branch per subcommand
+def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0911, PLR0915 -- linear command-dispatch ladder, one branch per subcommand
     """CLI entry point. Returns the exit code."""
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -1558,6 +1663,19 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0911 
                 payload, pretty = cmd_corpus()
             _emit(payload, pretty, as_json=as_json)
             return 0 if payload.get("ok") else 1
+        elif cmd == "integrity":
+            integrity_cmd = getattr(args, "integrity_cmd", None)
+            if integrity_cmd == "build":
+                payload, pretty = cmd_integrity_build(
+                    Path(args.root), [Path(f) for f in args.files]
+                )
+            elif integrity_cmd == "verify":
+                payload, pretty = cmd_integrity_verify(Path(args.root))
+                _emit(payload, pretty, as_json=as_json)
+                return 0 if payload.get("ok") else 1
+            else:
+                sys.stderr.write("guard integrity: specify a subcommand (build|verify)\n")
+                return 2
         elif cmd == "diff":
             payload, pretty = cmd_diff()
         elif cmd == "migrate-log":
@@ -1568,6 +1686,10 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0911 
             )
         elif cmd == "mode":
             payload, pretty = cmd_mode(args.value, scope=_resolve_scope(args))
+        elif cmd == "trust-script":
+            payload, pretty = cmd_trust_script(
+                args.path, reason=args.reason, scope=_resolve_scope(args)
+            )
         elif cmd == "allowlist":
             dispatched = _dispatch_allowlist(args, parser)
             if dispatched is None:

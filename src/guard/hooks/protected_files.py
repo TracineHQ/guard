@@ -19,7 +19,15 @@ from pathlib import Path
 from typing import Any
 
 from guard._safe_io import safe_read_text_capped
-from guard._utils import all_paths_in, emit_pretooluse_decision, log_decision, safe_main
+from guard._utils import (
+    SENSITIVE_DEST_HOME_PATTERNS,
+    STRICT_PERMISSION_MODES,
+    all_paths_in,
+    emit_pretooluse_decision,
+    log_decision,
+    read_permission_mode,
+    safe_main,
+)
 from guard.allowlist import hook_bypass_reason, load_allowlist
 
 _HOOK_ID = "guard.protected_files"
@@ -219,6 +227,31 @@ def _effective_patterns(cwd: Path | None = None) -> tuple[str, ...]:
     return (*PROTECTED_PATTERNS, *_extra_patterns(cwd))
 
 
+def _home_protected_match(resolved: Path) -> str | None:
+    """Return ``~/<pattern>`` when ``resolved`` is a ``$HOME`` sensitive target.
+
+    Home-anchored (only paths under ``$HOME`` match) and derived from
+    ``SENSITIVE_DEST_HOME_PATTERNS`` so the Edit/Write gate stays in lockstep
+    with the bash gate. Matching mirrors the bash side: the ``$HOME``-relative
+    tail ``startswith`` a pattern (a pattern ending in ``/`` covers a whole
+    directory). Shell-rc, ``~/.local/bin``, ``~/Library/LaunchAgents``, keys,
+    ``~/.gnupg`` and friends are the passive-escalation / persistence vectors.
+    """
+    try:
+        home = Path.home().resolve()
+    except (RuntimeError, OSError):
+        return None
+    try:
+        tail = resolved.relative_to(home)
+    except ValueError:
+        return None  # not under $HOME
+    tail_s = _normcase(tail.as_posix())
+    for pat in SENSITIVE_DEST_HOME_PATTERNS:
+        if tail_s.startswith(_normcase(pat)):
+            return "~/" + pat
+    return None
+
+
 def is_protected(file_path: str) -> str | None:
     """Return the matched protected pattern for ``file_path``, else ``None``.
 
@@ -255,7 +288,9 @@ def is_protected(file_path: str) -> str | None:
         last_segment = pattern.rsplit("/", 1)[-1]
         if "." not in last_segment and "/" + pat_lc + "/" in resolved_lc:
             return pattern
-    return None
+    # Fall through to the $HOME-anchored sensitive-target set (shared with the
+    # bash gate) so shell-rc / ~/.local/bin / LaunchAgents / keys are covered.
+    return _home_protected_match(resolved)
 
 
 def is_protected_parent_dir(dir_path: str) -> str | None:
@@ -800,18 +835,29 @@ def _match_for_tool(tool_name: str, tool_input: dict[str, Any]) -> tuple[str | N
     return matched, _excerpt_for_fallthrough(tool_input)
 
 
-def decide(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any] | None:
-    """Return an ``ask`` envelope when a protected path is being touched.
+def decide(
+    tool_name: str, tool_input: dict[str, Any], permission_mode: str = "default"
+) -> dict[str, Any] | None:
+    """Return a decision envelope when a protected path is being touched.
 
-    Pure decision logic — no logging, no allowlist consultation. Both
+    Pure decision logic -- no logging, no allowlist consultation. Both
     ``hook()`` (production entry, orchestrates logging + allowlist) and the
     registry adapter (``guard test``, no side effects) call this. Splitting
     the match logic out of ``hook()`` is what stops the two from drifting.
+
+    Mode-aware floor: in interactive modes (default/acceptEdits/plan) a match
+    is ``ask`` so the human confirms; in unattended modes
+    (auto/dontAsk/bypassPermissions) there is no human to answer, so ``ask``
+    would be a silent bypass -- it becomes ``deny`` instead.
     """
     matched, _ = _match_for_tool(tool_name, tool_input)
     if matched is None:
         return None
-    return emit_pretooluse_decision("ask", f"Protected file: {matched} — confirm edit")
+    if permission_mode in STRICT_PERMISSION_MODES:
+        return emit_pretooluse_decision(
+            "deny", f"Protected file: {matched} -- blocked (unattended mode)"
+        )
+    return emit_pretooluse_decision("ask", f"Protected file: {matched} -- confirm edit")
 
 
 def hook(payload: dict[str, Any]) -> None:
@@ -847,19 +893,29 @@ def hook(payload: dict[str, Any]) -> None:
             )
             return
 
-    reason = f"Protected file: {matched} — confirm edit"
-    envelope = emit_pretooluse_decision("ask", reason)
+    # Reuse decide() so the mode-aware floor (ask interactive / deny strict)
+    # lives in exactly one place. matched is non-None here, so decide() is too.
+    permission_mode = read_permission_mode(payload)
+    envelope = decide(tool_name, tool_input, permission_mode)
+    if envelope is None:  # defensive: can't happen given the match above
+        return
+    hso = envelope["hookSpecificOutput"]
+    decision = hso["permissionDecision"]
     log_decision(
         hook_id=_HOOK_ID,
         event="PreToolUse",
         tool_name=tool_name,
-        decision="ask",
-        reason=reason,
+        decision=decision,
+        reason=hso["permissionDecisionReason"],
         command_excerpt=excerpt,
         session_id=session_id,
         cwd=cwd_str,
     )
     sys.stdout.write(json.dumps(envelope))
+    # Only exit code 2 is fail-closed under bypassPermissions; a JSON deny with
+    # a zero exit would be advisory there. ask stays advisory (no exit).
+    if decision == "deny":
+        sys.exit(2)
 
 
 if __name__ == "__main__":

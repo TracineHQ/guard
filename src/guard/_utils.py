@@ -85,6 +85,47 @@ def _log_debug(msg: str) -> None:
 STRICT_PERMISSION_MODES: frozenset[str] = frozenset({"auto", "dontAsk", "bypassPermissions"})
 
 
+# Home-relative paths that are privilege-escalation / persistence / credential
+# sinks. Canonical source shared by BOTH enforcement gates: the bash validator
+# (write-target matching) and protected_files (Edit/Write matching), so a shell
+# redirect and a direct file edit to the same target are judged consistently.
+# Patterns ending in "/" are directories (protect everything inside); the rest
+# are files. Matched against the $HOME-relative tail via ``str.startswith``.
+SENSITIVE_DEST_HOME_PATTERNS: tuple[str, ...] = (
+    ".ssh/authorized_keys",
+    ".ssh/authorized_keys2",
+    ".ssh/config",
+    ".ssh/known_hosts",
+    ".ssh/id_rsa",
+    ".ssh/id_ed25519",
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".bash_logout",
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".profile",
+    ".inputrc",
+    ".config/fish/",
+    ".config/autostart/",
+    ".aws/credentials",
+    ".aws/config",
+    ".gnupg/",
+    "Library/LaunchAgents/",
+    "Library/LaunchDaemons/",
+    ".local/bin/",
+    # Guard's own audit log + strict-deny queue. Without this, an agent
+    # can ``> ~/.claude/guard-decisions.jsonl`` to truncate the audit trail
+    # or ``echo > ~/.claude/guard-strict-deny-queue.jsonl`` to forge entries.
+    # The append-side writer already uses O_NOFOLLOW + O_APPEND for symlink
+    # safety; this closes the truncate/overwrite vector via WRITE_HEAD verbs.
+    ".claude/guard-decisions.jsonl",
+    ".claude/guard-strict-deny-queue.jsonl",
+    ".claude/guard/",
+)
+
+
 _CLAUDE_AUTONOMOUS_TRUTHY = frozenset({"1", "true", "yes", "on"})
 _CLAUDE_AUTONOMOUS_WARNED: dict[str, bool] = {"once": False}
 

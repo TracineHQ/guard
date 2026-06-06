@@ -104,6 +104,7 @@ pydocstyle.convention = "google"
   "PLR2004",   # magic numbers in test fixtures are normal
   "ANN",       # don't require type annotations on test fns
   "D",         # don't require docstrings on test fns
+  "PLR0913",   # test setup helpers legitimately thread many fixture params
   "S603",      # subprocess-without-shell: every hook test spawns the hook script
   "S108",      # /tmp string literals are payloads, not real fs operations
   "PLC0415",   # local imports inside test fns / lazy hook imports

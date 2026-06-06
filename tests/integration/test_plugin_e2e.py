@@ -412,7 +412,7 @@ def test_hook_commands_resolve_to_real_files(staged: Path) -> None:
     ("description", "hook_filename", "payload", "expected"),
     [pytest.param(d, h, p, e, id=d) for d, h, p, e in CASES],
 )
-def test_hook_behavior(  # noqa: PLR0913 -- pytest fixtures + matrix params unavoidable
+def test_hook_behavior(
     description: str,
     hook_filename: str,
     payload: dict[str, object],
