@@ -64,6 +64,28 @@ def test_trust_script_idempotent(project_cwd: Path) -> None:
     assert payload["added"] is False
 
 
+def test_trust_script_repin_after_edit_replaces(project_cwd: Path) -> None:
+    """Re-pinning an edited file replaces the stale pin, leaving exactly one
+    entry for the path (the new bytes) — not a second, stale-sha entry."""
+    from guard.cli import cmd_trust_script
+
+    script = project_cwd / "scan.py"
+    script.write_text("v1\n", encoding="utf-8")
+    cmd_trust_script("scan.py", reason="v1", scope="project")
+
+    script.write_text("v2\n", encoding="utf-8")
+    new_sha = hashlib.sha256(b"v2\n").hexdigest()
+    payload, _ = cmd_trust_script("scan.py", reason="v2", scope="project")
+    assert payload["added"] is True
+
+    doc = json.loads(
+        (project_cwd / ".claude" / "guard" / "allowlist.json").read_text(encoding="utf-8")
+    )
+    entries = [e for e in doc["trusted_scripts"] if e["path"] == str(script.resolve())]
+    assert len(entries) == 1
+    assert entries[0]["sha256"] == new_sha
+
+
 def test_trust_script_missing_file_errors(project_cwd: Path) -> None:
     from guard.cli import cmd_trust_script
 

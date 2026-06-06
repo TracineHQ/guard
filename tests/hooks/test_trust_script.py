@@ -184,3 +184,39 @@ def test_agent_cannot_self_trust_in_strict(tmp_path, monkeypatch):
     d = decide("guard trust-script scan.py --reason pwn", permission_mode="dontAsk")
     assert d is not None
     assert d["permissionDecision"] == "deny"
+
+
+def test_agent_cannot_self_untrust_in_strict(tmp_path, monkeypatch):
+    """`untrust-script` mutates the trust store too — it must also be off the
+    safe-prefix and default-deny for an unattended agent."""
+    _setup(tmp_path, monkeypatch, trust=False)
+    d = decide("guard untrust-script scan.py", permission_mode="dontAsk")
+    assert d is not None
+    assert d["permissionDecision"] == "deny"
+
+
+def test_repin_after_edit_allows_again(tmp_path, monkeypatch):
+    """Full recovery round-trip: a trusted script, edited (deny via sha mismatch),
+    is re-pinned to its new bytes and allows again — with operands still free."""
+    from guard.allowlist import add_trusted_script
+
+    project = _setup(tmp_path, monkeypatch, content="new payload\n", trust_sha=_sha("old bytes\n"))
+    # Edited bytes don't match the stale pin → deny.
+    assert decide("python3 scan.py", permission_mode="default")["permissionDecision"] == "deny"
+
+    # Human re-reads and re-pins the current bytes.
+    resolved = str((project / "scan.py").resolve())
+    add_trusted_script(
+        path=resolved,
+        sha256=_sha("new payload\n"),
+        reason="re-vetted",
+        scope="project",
+        cwd=project,
+    )
+
+    assert decide("python3 scan.py", permission_mode="default")["permissionDecision"] == "allow"
+    # Operands still vary freely after re-pin.
+    assert (
+        decide("python3 scan.py a b --json", permission_mode="default")["permissionDecision"]
+        == "allow"
+    )

@@ -543,15 +543,18 @@ def add_trusted_script(
     if not isinstance(trusted, list):
         trusted = []
     sha_norm = sha256.lower()
+    kept: list[Any] = []
     for e in trusted:
-        if (
-            isinstance(e, dict)
-            and e.get("path") == path
-            and str(e.get("sha256", "")).lower() == sha_norm
-        ):
+        if not isinstance(e, dict) or e.get("path") != path:
+            kept.append(e)
+            continue
+        # Same path: an exact (path, sha) match is idempotent (no write); a
+        # stale-sha entry for this path is dropped so re-pinning an edited
+        # script replaces it -- one path == one trusted version.
+        if str(e.get("sha256", "")).lower() == sha_norm:
             return False
-    trusted.append({"path": path, "sha256": sha_norm, "reason": reason})
-    doc["trusted_scripts"] = trusted
+    kept.append({"path": path, "sha256": sha_norm, "reason": reason})
+    doc["trusted_scripts"] = kept
     _write_raw(al_path, doc)
     return True
 

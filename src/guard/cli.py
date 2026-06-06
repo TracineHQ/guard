@@ -64,6 +64,7 @@ from guard.allowlist import (
     load_allowlist,
     remove_allow_command,
     remove_disable_rule,
+    remove_trusted_script,
 )
 
 if TYPE_CHECKING:
@@ -1298,6 +1299,26 @@ def cmd_trust_script(path: str, *, reason: str, scope: str) -> tuple[dict[str, A
     return payload, pretty
 
 
+def cmd_untrust_script(path: str, *, scope: str) -> tuple[dict[str, Any], str]:
+    """Revoke a content pin: remove all ``trusted_scripts`` entries for ``path``.
+
+    Resolves the path but never reads the file, so trust can be revoked even
+    after the script has been edited or deleted.
+    """
+    resolved = str(Path(path).resolve())
+    removed = remove_trusted_script(path=resolved, scope=scope)
+    al_path = _resolve_scope_path(scope, None)
+    payload = {
+        "path": resolved,
+        "scope": scope,
+        "removed": removed,
+        "allowlist": str(al_path),
+    }
+    verb = "untrusted" if removed else "no trusted entry to remove"
+    pretty = f"untrust-script: {resolved} {verb} ({scope}: {al_path})\n"
+    return payload, pretty
+
+
 def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915 -- flat subparser wiring, one block per subcommand
     parser = argparse.ArgumentParser(
         prog="guard",
@@ -1592,6 +1613,15 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915 -- flat subpars
     p_trust.add_argument("--reason", required=True, help="Written justification (audit-logged).")
     _add_scope_args(p_trust)
 
+    p_untrust = sub.add_parser(
+        "untrust-script",
+        help="Revoke a content pin added by trust-script (removes all pins for the path).",
+    )
+    p_untrust.add_argument(
+        "path", help="Path to the script to untrust (resolved to an absolute path)."
+    )
+    _add_scope_args(p_untrust)
+
     return parser
 
 
@@ -1690,6 +1720,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0911,
             payload, pretty = cmd_trust_script(
                 args.path, reason=args.reason, scope=_resolve_scope(args)
             )
+        elif cmd == "untrust-script":
+            payload, pretty = cmd_untrust_script(args.path, scope=_resolve_scope(args))
         elif cmd == "allowlist":
             dispatched = _dispatch_allowlist(args, parser)
             if dispatched is None:

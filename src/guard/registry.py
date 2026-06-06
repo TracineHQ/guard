@@ -966,7 +966,7 @@ GUARD_READ_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
     {"status", "healthcheck", "noisy", "silent", "trace", "test", "diff", "corpus"}
 )
 GUARD_WRITE_SUBCOMMANDS: frozenset[str] = frozenset(
-    {"allowlist", "migrate-log", "mode", "integrity", "trust-script"}
+    {"allowlist", "migrate-log", "mode", "integrity", "trust-script", "untrust-script"}
 )
 _GUARD_READ_ONLY_SUBPREFIXES: frozenset[str] = GUARD_READ_ONLY_SUBCOMMANDS | {
     "allowlist list",

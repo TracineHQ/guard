@@ -106,13 +106,16 @@ This records the sha256 of the file's *current* bytes. Then:
 - `python3 scripts/scan.py <anything>` is allowed -- operands vary freely,
   because the **script** is pinned, not the command line.
 - Editing the script changes its hash and **revokes** the trust automatically;
-  re-pin after you've re-read it.
+  re-pin after you've re-read it. Re-pinning **replaces** the prior pin -- one
+  path is one trusted version, so reverting to the old bytes is not re-allowed.
+- Revoke explicitly with `guard untrust-script <path>` (removes every pin for
+  the path; works even after the script is edited or deleted).
 - Eval forms (`python3 -c '...'`) and `-m <module>` have no file to pin, so they
   are never trust-rescuable.
-- Granting is a human action. The command is not on any safe-prefix (so an
-  unattended agent default-denies it) and the trust store is a protected file
-  (so an agent can't write the grant directly). Trust to specific bytes is the
-  only override that is both safe *and* survives varying operands.
+- Granting *and revoking* are human actions. Neither command is on a safe-prefix
+  (so an unattended agent default-denies them) and the trust store is a protected
+  file (so an agent can't write the grant directly). Trust to specific bytes is
+  the only override that is both safe *and* survives varying operands.
 
 ## Responding to a deny
 

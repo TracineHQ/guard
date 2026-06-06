@@ -505,3 +505,43 @@ def test_add_trusted_script_idempotent_and_preserves_mode(
     assert al.find_trusted_script("/repo/x.py", sha) is not None
     # The mutation must not strip the operator's mode.
     assert json.loads(project_path.read_text())["mode"] == "shadow"
+
+
+def test_add_trusted_script_replaces_stale_pin_for_path(
+    isolated_homes: tuple[Path, Path],
+) -> None:
+    """Re-pinning an EDITED script (same path, new sha) must replace the prior
+    pin, not append. One path == one trusted version, so the old bytes are no
+    longer trusted (a revert to them is not silently re-allowed)."""
+    from guard.allowlist import add_trusted_script, load_allowlist
+
+    _, cwd = isolated_homes
+    sha_old = _sha256_text("v1\n")
+    sha_new = _sha256_text("v2\n")
+
+    add_trusted_script(path="/repo/x.py", sha256=sha_old, reason="v1", scope="project", cwd=cwd)
+    assert (
+        add_trusted_script(path="/repo/x.py", sha256=sha_new, reason="v2", scope="project", cwd=cwd)
+        is True
+    )
+
+    al = load_allowlist(cwd=cwd)
+    entries = [e for e in al.trusted_scripts if e.path == "/repo/x.py"]
+    assert len(entries) == 1
+    assert entries[0].sha256 == sha_new
+    assert al.find_trusted_script("/repo/x.py", sha_old) is None
+
+
+def test_remove_trusted_script_removes_all_for_path(
+    isolated_homes: tuple[Path, Path],
+) -> None:
+    from guard.allowlist import add_trusted_script, load_allowlist, remove_trusted_script
+
+    _, cwd = isolated_homes
+    sha = _sha256_text("vetted\n")
+    add_trusted_script(path="/repo/x.py", sha256=sha, reason="ok", scope="project", cwd=cwd)
+
+    assert remove_trusted_script(path="/repo/x.py", scope="project", cwd=cwd) is True
+    assert load_allowlist(cwd=cwd).find_trusted_script("/repo/x.py", sha) is None
+    # Removing again (nothing left) reports no-op.
+    assert remove_trusted_script(path="/repo/x.py", scope="project", cwd=cwd) is False

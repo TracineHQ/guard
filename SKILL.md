@@ -162,7 +162,9 @@ Mutation commands write to the project allowlist by default. Pass `--global` to 
 guard trust-script scripts/scan.py --reason "weekly inbox scan"
 ```
 
-This stores a `trusted_scripts` entry (`{path, sha256, reason}`) keyed on the resolved path + the sha256 of the file's current bytes. The script then runs with varying operands (`scan.py email-1.md`, `scan.py email-2.md`) -- the script is pinned, not the command line. Editing the script changes the hash and revokes the trust; re-pin after re-reading it. Eval (`-c`) and `-m <module>` forms have no file to pin and are never rescued. The grant works in strict mode too (it's an explicit human allow), but an agent can't create it: `trust-script` is not on any safe-prefix and the allowlist file is protected. Pass `--global` to trust for every project.
+This stores a `trusted_scripts` entry (`{path, sha256, reason}`) keyed on the resolved path + the sha256 of the file's current bytes. The script then runs with varying operands (`scan.py email-1.md`, `scan.py email-2.md`) -- the script is pinned, not the command line. Editing the script changes the hash and revokes the trust; re-pin after re-reading it (re-pinning replaces the prior pin -- one path is one trusted version, so old bytes stay revoked). Eval (`-c`) and `-m <module>` forms have no file to pin and are never rescued. The grant works in strict mode too (it's an explicit human allow), but an agent can't create it: `trust-script` is not on any safe-prefix and the allowlist file is protected. Pass `--global` to trust for every project.
+
+Revoke a pin with `guard untrust-script <path>` (removes every pin for that path; works even after the script is edited or deleted). Like `trust-script`, it mutates the trust store, so it's also human-only -- an agent can't self-untrust unattended.
 
 ### Trust-root: un-overridable protections
 
