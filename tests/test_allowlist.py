@@ -345,3 +345,203 @@ def test_mutation_preserves_mode_field(isolated_homes: tuple[Path, Path]) -> Non
     )
     assert json.loads(project_path.read_text())["mode"] == "shadow"
     assert load_allowlist(cwd=cwd).mode == "shadow"
+
+
+# === trusted_scripts (content-pinned interpreter-exec override) ===
+
+import hashlib
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_load_trusted_scripts_project(isolated_homes: tuple[Path, Path]) -> None:
+    from guard.allowlist import load_allowlist
+
+    _, cwd = isolated_homes
+    sha = _sha256_text("print('hi')\n")
+    _write(
+        cwd / ".claude" / "guard" / "allowlist.json",
+        {
+            "trusted_scripts": [
+                {
+                    "path": "/repo/scripts/scan.py",
+                    "sha256": sha,
+                    "reason": "vetted voice-scan helper",
+                }
+            ]
+        },
+    )
+    al = load_allowlist(cwd=cwd)
+    assert len(al.trusted_scripts) == 1
+    entry = al.trusted_scripts[0]
+    assert entry.path == "/repo/scripts/scan.py"
+    assert entry.sha256 == sha
+    assert entry.reason == "vetted voice-scan helper"
+    assert entry.source == "project"
+
+
+def test_find_trusted_script_requires_path_and_sha(isolated_homes: tuple[Path, Path]) -> None:
+    from guard.allowlist import load_allowlist
+
+    _, cwd = isolated_homes
+    sha = _sha256_text("payload\n")
+    _write(
+        cwd / ".claude" / "guard" / "allowlist.json",
+        {"trusted_scripts": [{"path": "/repo/x.py", "sha256": sha, "reason": "ok"}]},
+    )
+    al = load_allowlist(cwd=cwd)
+    # Exact path + exact sha → match.
+    assert al.find_trusted_script("/repo/x.py", sha) is not None
+    # Right path, wrong sha (file was edited) → no match.
+    assert al.find_trusted_script("/repo/x.py", _sha256_text("evil\n")) is None
+    # Right sha, wrong path → no match (trust is scoped to the file location).
+    assert al.find_trusted_script("/repo/other.py", sha) is None
+
+
+def test_find_trusted_script_sha_case_insensitive(isolated_homes: tuple[Path, Path]) -> None:
+    from guard.allowlist import load_allowlist
+
+    _, cwd = isolated_homes
+    sha = _sha256_text("data\n")
+    _write(
+        cwd / ".claude" / "guard" / "allowlist.json",
+        {"trusted_scripts": [{"path": "/repo/x.py", "sha256": sha.upper(), "reason": "ok"}]},
+    )
+    al = load_allowlist(cwd=cwd)
+    assert al.find_trusted_script("/repo/x.py", sha) is not None
+
+
+def test_trusted_scripts_merge_project_and_global(isolated_homes: tuple[Path, Path]) -> None:
+    from guard.allowlist import load_allowlist
+
+    gdir, cwd = isolated_homes
+    sha_g = _sha256_text("g\n")
+    sha_p = _sha256_text("p\n")
+    _write(
+        gdir / "allowlist.json",
+        {"trusted_scripts": [{"path": "/g.py", "sha256": sha_g, "reason": "global"}]},
+    )
+    _write(
+        cwd / ".claude" / "guard" / "allowlist.json",
+        {"trusted_scripts": [{"path": "/p.py", "sha256": sha_p, "reason": "project"}]},
+    )
+    al = load_allowlist(cwd=cwd)
+    assert [e.source for e in al.trusted_scripts] == ["project", "global"]
+    assert al.find_trusted_script("/p.py", sha_p) is not None
+    assert al.find_trusted_script("/g.py", sha_g) is not None
+
+
+def test_trusted_scripts_wrong_type_warns(
+    isolated_homes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    from guard.allowlist import load_allowlist
+
+    _, cwd = isolated_homes
+    _write(cwd / ".claude" / "guard" / "allowlist.json", {"trusted_scripts": "nope"})
+    al = load_allowlist(cwd=cwd)
+    assert al.trusted_scripts == ()
+    assert "'trusted_scripts' must be a list" in capsys.readouterr().err
+
+
+def test_trusted_scripts_missing_field_skips_entry(
+    isolated_homes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    from guard.allowlist import load_allowlist
+
+    _, cwd = isolated_homes
+    good = _sha256_text("good\n")
+    _write(
+        cwd / ".claude" / "guard" / "allowlist.json",
+        {
+            "trusted_scripts": [
+                {"path": "/a.py", "sha256": good},  # missing reason
+                {"path": "/b.py", "sha256": good, "reason": "kept"},
+            ]
+        },
+    )
+    al = load_allowlist(cwd=cwd)
+    assert len(al.trusted_scripts) == 1
+    assert al.trusted_scripts[0].path == "/b.py"
+    assert "missing 'reason'" in capsys.readouterr().err
+
+
+def test_trusted_scripts_bad_sha_skips_entry(
+    isolated_homes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    from guard.allowlist import load_allowlist
+
+    _, cwd = isolated_homes
+    _write(
+        cwd / ".claude" / "guard" / "allowlist.json",
+        {"trusted_scripts": [{"path": "/a.py", "sha256": "deadbeef", "reason": "too short"}]},
+    )
+    al = load_allowlist(cwd=cwd)
+    assert al.trusted_scripts == ()
+    assert "sha256" in capsys.readouterr().err
+
+
+def test_add_trusted_script_idempotent_and_preserves_mode(
+    isolated_homes: tuple[Path, Path],
+) -> None:
+    from guard.allowlist import add_trusted_script, load_allowlist, set_mode
+
+    _, cwd = isolated_homes
+    project_path = cwd / ".claude" / "guard" / "allowlist.json"
+    sha = _sha256_text("vetted\n")
+
+    set_mode("shadow", scope="project", cwd=cwd)
+    assert (
+        add_trusted_script(path="/repo/x.py", sha256=sha, reason="vetted", scope="project", cwd=cwd)
+        is True
+    )
+    # Second add of the same (path, sha) is a no-op.
+    assert (
+        add_trusted_script(path="/repo/x.py", sha256=sha, reason="again", scope="project", cwd=cwd)
+        is False
+    )
+    al = load_allowlist(cwd=cwd)
+    assert al.find_trusted_script("/repo/x.py", sha) is not None
+    # The mutation must not strip the operator's mode.
+    assert json.loads(project_path.read_text())["mode"] == "shadow"
+
+
+def test_add_trusted_script_replaces_stale_pin_for_path(
+    isolated_homes: tuple[Path, Path],
+) -> None:
+    """Re-pinning an EDITED script (same path, new sha) must replace the prior
+    pin, not append. One path == one trusted version, so the old bytes are no
+    longer trusted (a revert to them is not silently re-allowed)."""
+    from guard.allowlist import add_trusted_script, load_allowlist
+
+    _, cwd = isolated_homes
+    sha_old = _sha256_text("v1\n")
+    sha_new = _sha256_text("v2\n")
+
+    add_trusted_script(path="/repo/x.py", sha256=sha_old, reason="v1", scope="project", cwd=cwd)
+    assert (
+        add_trusted_script(path="/repo/x.py", sha256=sha_new, reason="v2", scope="project", cwd=cwd)
+        is True
+    )
+
+    al = load_allowlist(cwd=cwd)
+    entries = [e for e in al.trusted_scripts if e.path == "/repo/x.py"]
+    assert len(entries) == 1
+    assert entries[0].sha256 == sha_new
+    assert al.find_trusted_script("/repo/x.py", sha_old) is None
+
+
+def test_remove_trusted_script_removes_all_for_path(
+    isolated_homes: tuple[Path, Path],
+) -> None:
+    from guard.allowlist import add_trusted_script, load_allowlist, remove_trusted_script
+
+    _, cwd = isolated_homes
+    sha = _sha256_text("vetted\n")
+    add_trusted_script(path="/repo/x.py", sha256=sha, reason="ok", scope="project", cwd=cwd)
+
+    assert remove_trusted_script(path="/repo/x.py", scope="project", cwd=cwd) is True
+    assert load_allowlist(cwd=cwd).find_trusted_script("/repo/x.py", sha) is None
+    # Removing again (nothing left) reports no-op.
+    assert remove_trusted_script(path="/repo/x.py", scope="project", cwd=cwd) is False

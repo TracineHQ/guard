@@ -1,0 +1,20 @@
+# Linux/WSL systemd service for the guard integrity monitor.
+#
+# Install (as root): copy this and guard-integrity.timer to
+# /etc/systemd/system/, then `systemctl daemon-reload` and
+# `systemctl enable --now guard-integrity.timer`. Runs as root (system-unit
+# default) out of band from Claude Code, so a hook that fails OPEN cannot stop
+# it. On WSL this requires systemd enabled (`[boot] systemd=true` in /etc/wsl.conf).
+#
+# The /opt/guard paths are the documented defaults from docs/integrity-runbook.md;
+# adjust both here and the manifest root if you install elsewhere.
+
+[Unit]
+Description=guard integrity monitor (out-of-band, immune to Claude Code hook fail-open)
+Documentation=https://github.com/TracineHQ/guard
+
+[Service]
+Type=oneshot
+Environment=GUARD_INTEGRITY_ROOT=/opt/guard/integrity
+Environment=GUARD_INTEGRITY_LOG=/var/log/guard-integrity.log
+ExecStart=/opt/guard/bin/guard-integrity-monitor

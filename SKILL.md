@@ -1,13 +1,31 @@
 ---
 name: guard
 description: Configure guard's safety hooks and explain what each hook catches — bash command validation (rm -rf, force-push, interpreter eval, shell wrappers, pipe-to-shell), git safety (-c config injection, core.hooksPath/attributesFile, destructive flags), credential scanning, commit-message rules, protected files, agent output, subagent scope.
-when_to_use: When the user asks to enable/disable a guard hook, change the decision log path, set advisory mode, troubleshoot guard's output, or asks "why did guard block X" / "what does <hook> catch".
+when_to_use: When the user asks to enable/disable a guard hook, change the decision log path, set advisory mode, troubleshoot guard's output, asks "why did guard block X" / "what does <hook> catch", needs to decide how to respond to a deny, or wants to content-pin a trusted script (`guard trust-script`).
 ---
 
 # Guard configuration
 
 Guard is a safety-hook plugin for Claude Code. It runs before tool calls and writes
 decisions to `~/.claude/guard-decisions.jsonl`.
+
+## Responding to a deny
+
+`docs/decision-model.md` is the full model (two-layer gate, floor vs
+default-deny vs ask, the override knobs). The short version for agents:
+
+- A **floor** deny (`rm -rf /`, interpreter-exec, shell wrappers) blocks in
+  every permission mode. Don't retry variants; don't reach for `disable_rules`.
+- Interpreter-exec is a floor because guard sees the command line, not the
+  script's bytes -- `python3 x.py` is an opaque payload. To run a *vetted*
+  script you re-use, a human content-pins it: `guard trust-script <path>
+  --reason '...'` (pins the file's bytes; operands may vary; editing the script
+  revokes the trust). Granting is a human action -- propose the exact command
+  and wait for approval; an agent can't self-grant.
+- A **strict default-deny** means "not on the safe list and no human to ask."
+  Surface it for the operator; re-run interactively if it's genuinely safe.
+- The deny message is mode-aware and names the rule id + the override that fits.
+  Read it before acting.
 
 ## What hooks catch
 
@@ -135,6 +153,18 @@ guard allowlist remove-command --rule <rule-id> --command "<cmd>"
 ```
 
 Mutation commands write to the project allowlist by default. Pass `--global` to write the per-user file at `~/.claude/guard/allowlist.json` instead (or `--project` to be explicit; the two flags are mutually exclusive).
+
+### Trusted scripts (content-pinned interpreter-exec override)
+
+`bash.dangerous_interpreter` denies running a script through an interpreter (`python3 scan.py`) because guard can't see the script's contents -- the payload is opaque. To allow a *vetted* script you re-run, content-pin it:
+
+```
+guard trust-script scripts/scan.py --reason "weekly inbox scan"
+```
+
+This stores a `trusted_scripts` entry (`{path, sha256, reason}`) keyed on the resolved path + the sha256 of the file's current bytes. The script then runs with varying operands (`scan.py email-1.md`, `scan.py email-2.md`) -- the script is pinned, not the command line. Editing the script changes the hash and revokes the trust; re-pin after re-reading it (re-pinning replaces the prior pin -- one path is one trusted version, so old bytes stay revoked). Eval (`-c`) and `-m <module>` forms have no file to pin and are never rescued. The grant works in strict mode too (it's an explicit human allow), but an agent can't create it: `trust-script` is not on any safe-prefix and the allowlist file is protected. Pass `--global` to trust for every project.
+
+Revoke a pin with `guard untrust-script <path>` (removes every pin for that path; works even after the script is edited or deleted). Like `trust-script`, it mutates the trust store, so it's also human-only -- an agent can't self-untrust unattended.
 
 ### Trust-root: un-overridable protections
 

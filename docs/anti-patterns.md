@@ -115,15 +115,36 @@ python -c '...'
 python3 -c '...'
 node -e '...'
 node --eval '...'
+python3 deploy.py          # bare script path — also denied
+python3 -m http.server     # arbitrary module — also denied
+uv run python deploy.py    # wrapped runner — also denied
 env -i bash -c '...'
 ```
 
-**Why it's bad.** These are canonical re-exec primitives. Once a `-c` /
-`-e` form is allowed, every other validator in the chain can be bypassed
-by stuffing the real command into the eval string.
+**Why it's bad.** These are canonical re-exec primitives. Guard sees only
+the command line, never the script's contents, so any `python3 x.py` is an
+opaque payload: an agent can write whatever it wants into `x.py` first, then
+run it past every command-level matcher. That makes interpreter-exec
+RCE-equivalent.
 
-**What guard does.** Hard deny in the registry. Bare `python` / `python3`
-/ `node` / `env` are still allowed for legitimate uses (running a script,
-inspecting environment) — only the re-exec flag forms are blocked. `env -i`
-is denied unconditionally because clearing the environment is a common RCE
-wrapper.
+**What guard does.** Hard deny via `bash_command_validator`
+(`bash.dangerous_interpreter`), in both interactive and strict modes. The
+deny is *not* limited to eval flags. A bare script path (`python3
+deploy.py`), an `-m <module>` form (except a curated stdin/stdout-only set
+like `json.tool` / `venv`), and the wrapped runners (`uv run python x.py`,
+`uvx python -c ...`) all deny too. Because the payload is opaque, this is a
+floor rule, not an ASK: there is no "are you sure?", it refuses.
+
+To run a *vetted* script you re-use, a human content-pins it:
+
+```
+guard trust-script path/to/script.py --reason "weekly inbox scan"
+```
+
+That pins the sha256 of the file's bytes, so the same script runs with
+varying operands (`scan.py email-1.md`, `scan.py email-2.md`) while editing
+the script revokes the trust. Granting trust is a human action -- an agent
+can't self-grant (the command is not on any safe-prefix and the trust store
+is a protected file). See [`decision-model.md`](decision-model.md) for the
+full floor-vs-default-deny model. `env -i bash -c` is denied unconditionally
+because clearing the environment is a common RCE wrapper.

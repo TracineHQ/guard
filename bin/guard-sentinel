@@ -1,0 +1,65 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TracineHQ contributors
+#
+# guard integrity sentinel -- dependency-free SessionStart check.
+#
+# Verifies each protected file against a root-owned manifest. The manifest's
+# sha256 is the trust anchor; a live file must match it. Self-heal and advisory
+# reporting are layered on by subsequent tests.
+#
+# Manifest format (one entry per line, whitespace-separated):
+#   <sha256>  <canonical_relname>  <live_abs_path>
+# The live path is the LAST field so a path containing spaces (e.g. macOS
+# "Application Support") is read intact; the canonical relname is kept space-free.
+#
+# Config: GUARD_INTEGRITY_ROOT points at the root-owned dir holding `manifest`
+# and `canonical/`. Pure POSIX sh so it runs even when guard's Python is broken.
+set -eu
+
+root="${GUARD_INTEGRITY_ROOT:?GUARD_INTEGRITY_ROOT not set}"
+manifest="$root/manifest"
+
+sha256() {  # $1=file -> hex digest on stdout ("" if the file is missing, no noise)
+    [ -f "$1" ] || return 0
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
+if [ ! -f "$manifest" ]; then
+    echo "guard integrity: manifest missing ($manifest); cannot verify the protected set" >&2
+    exit 1
+fi
+
+drift=0
+tamper=0
+while read -r want canon live; do
+    [ -n "$want" ] || continue
+    if [ "$(sha256 "$live")" != "$want" ]; then
+        drift=1
+        canon_path="$root/canonical/$canon"
+        if [ ! -f "$canon_path" ]; then
+            # No canonical copy to restore from: cannot heal.
+            tamper=1
+            echo "guard integrity: TAMPER -- canonical copy missing for $live ($canon_path); manual / out-of-band intervention required" >&2
+        elif [ "$(sha256 "$canon_path")" = "$want" ]; then
+            # Canonical matches the anchor: safe to restore.
+            cp "$canon_path" "$live"
+            echo "guard integrity: healed $live"
+        else
+            # Canonical is also off the anchor: refuse to heal to a bad state.
+            tamper=1
+            echo "guard integrity: TAMPER -- canonical for $live does not match anchor; manual / out-of-band intervention required" >&2
+        fi
+    fi
+done < "$manifest"
+
+if [ "$tamper" -ne 0 ]; then
+    exit 1
+fi
+if [ "$drift" -eq 0 ]; then
+    echo "guard integrity: clean"
+fi

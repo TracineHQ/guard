@@ -1,0 +1,14 @@
+# Linux/WSL systemd timer that drives guard-integrity.service on a schedule.
+# Enable with: systemctl enable --now guard-integrity.timer
+
+[Unit]
+Description=Periodic guard integrity check (every 5 minutes)
+Documentation=https://github.com/TracineHQ/guard
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

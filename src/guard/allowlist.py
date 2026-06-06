@@ -164,17 +164,50 @@ class AllowEntry:
 
 
 @dataclass(frozen=True)
+class TrustedScript:
+    """A single content-pinned ``trusted_scripts`` entry.
+
+    Unlike ``allow_commands`` (which matches the command *string*), a trusted
+    script is pinned by the sha256 of the script *file's bytes*. The command
+    line that runs it (``python3 scan.py email-1.md``) can vary its operands
+    freely; only the script's content is vetted. Editing the script changes
+    the hash and revokes the trust, so an agent can't smuggle a new payload
+    under an old grant.
+    """
+
+    path: str  # resolved absolute path of the vetted script
+    sha256: str  # lowercase hex digest of the file's bytes at trust time
+    reason: str
+    source: str = "?"  # "global" / "project" / file path — for diagnostic display
+
+
+@dataclass(frozen=True)
 class Allowlist:
     """Effective merged allowlist (union of global and project entries)."""
 
     disable_rules: frozenset[str] = field(default_factory=frozenset)
     allow_commands: tuple[AllowEntry, ...] = ()
+    trusted_scripts: tuple[TrustedScript, ...] = ()
     sources: tuple[Path, ...] = ()  # files actually read (for diagnostics)
     mode: Mode = _DEFAULT_MODE  # enforce | shadow | off; project overrides global
 
     def is_rule_disabled(self, rule_id: str) -> bool:
         """True if ``rule_id`` is in ``disable_rules``."""
         return rule_id in self.disable_rules
+
+    def find_trusted_script(self, resolved_path: str, sha256: str) -> TrustedScript | None:
+        """Return a ``trusted_scripts`` entry matching BOTH the path and the sha256.
+
+        Path is compared by exact string equality (both sides are resolved
+        absolute paths). The sha256 is compared case-insensitively. Both must
+        match: a content-pinned trust is scoped to one file at one set of
+        bytes. A path-only or sha-only hit returns ``None``.
+        """
+        want = sha256.lower()
+        for e in self.trusted_scripts:
+            if e.path == resolved_path and e.sha256.lower() == want:
+                return e
+        return None
 
     def find_command(self, rule_id: str, command: str) -> AllowEntry | None:
         """Return the first ``allow_commands`` entry matching ``rule_id`` and exact ``command``.
@@ -242,6 +275,45 @@ def _validate_allow_commands(raw: Any, source: str) -> list[AllowEntry]:  # noqa
     return out
 
 
+_HEX_CHARS: frozenset[str] = frozenset("0123456789abcdef")
+_SHA256_HEX_LEN = 64
+
+
+def _is_sha256_hex(value: str) -> bool:
+    """True if ``value`` is a 64-char lowercase-or-uppercase hex sha256 digest."""
+    return len(value) == _SHA256_HEX_LEN and all(c in _HEX_CHARS for c in value.lower())
+
+
+def _validate_trusted_scripts(raw: Any, source: str) -> list[TrustedScript]:  # noqa: ANN401 -- JSON value is genuinely Any
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        _warn(f"{source}: 'trusted_scripts' must be a list of objects; ignoring")
+        return []
+    out: list[TrustedScript] = []
+    for idx, item in enumerate(raw):
+        if not isinstance(item, dict):
+            _warn(f"{source}: trusted_scripts[{idx}] is not an object; skipping")
+            continue
+        path = item.get("path")
+        sha256 = item.get("sha256")
+        reason = item.get("reason")
+        if not isinstance(path, str) or not path:
+            _warn(f"{source}: trusted_scripts[{idx}] missing 'path'; skipping")
+            continue
+        if not isinstance(reason, str) or not reason:
+            _warn(f"{source}: trusted_scripts[{idx}] missing 'reason'; skipping")
+            continue
+        if not isinstance(sha256, str) or not _is_sha256_hex(sha256):
+            _warn(
+                f"{source}: trusted_scripts[{idx}] has an invalid 'sha256' "
+                "(expected a 64-char hex digest); skipping"
+            )
+            continue
+        out.append(TrustedScript(path=path, sha256=sha256.lower(), reason=reason, source=source))
+    return out
+
+
 def _warn(msg: str) -> None:
     """Emit a single-line warning to stderr (best-effort, never raises)."""
     with contextlib.suppress(OSError):
@@ -249,24 +321,27 @@ def _warn(msg: str) -> None:
         sys.stderr.flush()
 
 
-def _load_one(path: Path, source_label: str) -> tuple[list[str], list[AllowEntry], Mode | None]:
-    """Parse one allowlist file. Returns ``([], [], None)`` if missing or unreadable."""
+def _load_one(
+    path: Path, source_label: str
+) -> tuple[list[str], list[AllowEntry], list[TrustedScript], Mode | None]:
+    """Parse one allowlist file. Returns ``([], [], [], None)`` if missing or unreadable."""
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
-        return [], [], None
+        return [], [], [], None
     try:
         data = json.loads(text)
     except (json.JSONDecodeError, ValueError) as exc:
         _warn(f"{path}: invalid JSON: {exc}; ignoring file")
-        return [], [], None
+        return [], [], [], None
     if not isinstance(data, dict):
         _warn(f"{path}: top-level must be an object; ignoring file")
-        return [], [], None
+        return [], [], [], None
     rules = _validate_disable_rules(data.get("disable_rules"), source_label)
     cmds = _validate_allow_commands(data.get("allow_commands"), source_label)
+    trusted = _validate_trusted_scripts(data.get("trusted_scripts"), source_label)
     mode = _validate_mode(data.get("mode"), source_label)
-    return rules, cmds, mode
+    return rules, cmds, trusted, mode
 
 
 def global_allowlist_path() -> Path:
@@ -448,6 +523,75 @@ def remove_allow_command(
     return True
 
 
+def add_trusted_script(
+    *,
+    path: str,
+    sha256: str,
+    reason: str,
+    scope: str = "project",
+    cwd: Path | None = None,
+) -> bool:
+    """Add a content-pinned ``{path, sha256, reason}`` trusted-script entry.
+
+    Returns ``True`` if added, ``False`` if an entry with the same
+    ``(path, sha256)`` already exists (idempotent). The sha256 is stored
+    lowercased.
+    """
+    al_path = _resolve_scope_path(scope, cwd)
+    doc = _read_raw(al_path)
+    trusted = doc.get("trusted_scripts")
+    if not isinstance(trusted, list):
+        trusted = []
+    sha_norm = sha256.lower()
+    kept: list[Any] = []
+    for e in trusted:
+        if not isinstance(e, dict) or e.get("path") != path:
+            kept.append(e)
+            continue
+        # Same path: an exact (path, sha) match is idempotent (no write); a
+        # stale-sha entry for this path is dropped so re-pinning an edited
+        # script replaces it -- one path == one trusted version.
+        if str(e.get("sha256", "")).lower() == sha_norm:
+            return False
+    kept.append({"path": path, "sha256": sha_norm, "reason": reason})
+    doc["trusted_scripts"] = kept
+    _write_raw(al_path, doc)
+    return True
+
+
+def remove_trusted_script(
+    *,
+    path: str,
+    sha256: str | None = None,
+    scope: str = "project",
+    cwd: Path | None = None,
+) -> bool:
+    """Remove trusted-script entries matching ``path`` (and ``sha256`` if given).
+
+    With ``sha256=None``, all entries for ``path`` are removed (revoke trust
+    for a file regardless of which bytes were pinned). Returns ``True`` if any
+    entry was removed.
+    """
+    al_path = _resolve_scope_path(scope, cwd)
+    doc = _read_raw(al_path)
+    trusted = doc.get("trusted_scripts")
+    if not isinstance(trusted, list):
+        return False
+    sha_norm = sha256.lower() if sha256 is not None else None
+
+    def _keep(e: Any) -> bool:  # noqa: ANN401 -- JSON list entries are genuinely Any
+        if not isinstance(e, dict) or e.get("path") != path:
+            return True
+        return sha_norm is not None and str(e.get("sha256", "")).lower() != sha_norm
+
+    new = [e for e in trusted if _keep(e)]
+    if len(new) == len(trusted):
+        return False
+    doc["trusted_scripts"] = new
+    _write_raw(al_path, doc)
+    return True
+
+
 def set_mode(value: Mode, *, scope: str = "project", cwd: Path | None = None) -> Mode | None:
     """Write ``mode`` to the chosen scope's allowlist file.
 
@@ -484,12 +628,12 @@ def load_allowlist(cwd: Path | None = None) -> Allowlist:
     """
     sources: list[Path] = []
     project_path = project_allowlist_path(cwd)
-    project_rules, project_cmds, project_mode = _load_one(project_path, "project")
+    project_rules, project_cmds, project_trusted, project_mode = _load_one(project_path, "project")
     if project_path.exists():
         sources.append(project_path)
 
     global_path = global_allowlist_path()
-    global_rules, global_cmds, global_mode = _load_one(global_path, "global")
+    global_rules, global_cmds, global_trusted, global_mode = _load_one(global_path, "global")
     if global_path.exists():
         sources.append(global_path)
 
@@ -501,6 +645,7 @@ def load_allowlist(cwd: Path | None = None) -> Allowlist:
     return Allowlist(
         disable_rules=frozenset(project_rules) | frozenset(global_rules),
         allow_commands=(*project_cmds, *global_cmds),
+        trusted_scripts=(*project_trusted, *global_trusted),
         sources=tuple(sources),
         mode=effective_mode,
     )
