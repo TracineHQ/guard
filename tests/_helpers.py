@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -57,6 +58,22 @@ def decision_from_stdout(stdout: str) -> str | None:
     return envelope.get("permissionDecision") if isinstance(envelope, dict) else None
 
 
+def lockdown_guard_home(guard_data_dir: str | None = None) -> Path:
+    """Return a guard home whose global allowlist sets ``mode: lockdown``.
+
+    Created next to the test's isolated ``GUARD_DATA_DIR`` when one is given,
+    else in a fresh temp dir.
+    """
+    home = (
+        Path(guard_data_dir).parent / "guard-home-lockdown"
+        if guard_data_dir
+        else Path(tempfile.mkdtemp(prefix="guard-lockdown-"))
+    )
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "allowlist.json").write_text('{"mode": "lockdown"}', encoding="utf-8")
+    return home
+
+
 def run_hook(  # noqa: PLR0913 -- kw-only flags, all optional and orthogonal
     hook_name: str,
     command: str,
@@ -71,8 +88,10 @@ def run_hook(  # noqa: PLR0913 -- kw-only flags, all optional and orthogonal
     """Spawn the named hook with a Bash PreToolUse payload, return (rc, stdout, stderr).
 
     The default payload is the canonical bash-command shape. ``strict=True``
-    is a shortcut for ``permission_mode="dontAsk"``; pass ``permission_mode``
-    directly for any other mode (``plan``, ``acceptEdits``, ...).
+    runs the hook in guard's ``lockdown`` mode (strict default-deny) by
+    pointing ``GUARD_DATA_DIR`` at a scratch home whose allowlist sets it.
+    ``permission_mode`` sets the payload field (context only; it never
+    changes the decision).
     """
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_ROOT / "src")
@@ -88,7 +107,9 @@ def run_hook(  # noqa: PLR0913 -- kw-only flags, all optional and orthogonal
     env.setdefault("GUARD_STRICT_DENY_QUEUE_PATH", os.devnull)
     if env_extra:
         env.update(env_extra)
-    mode = permission_mode if permission_mode is not None else ("dontAsk" if strict else "default")
+    if strict:
+        env["GUARD_DATA_DIR"] = str(lockdown_guard_home(env.get("GUARD_DATA_DIR")))
+    mode = permission_mode if permission_mode is not None else "default"
     payload: dict[str, Any] = {
         "session_id": session_id,
         "tool_name": "Bash",

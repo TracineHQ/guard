@@ -69,8 +69,8 @@ _REST = [
 
 @pytest.mark.parametrize("rest", _REST, ids=[r[:40] for r in _REST])
 def test_dash_c_matches_bare(rest: str) -> None:
-    bare = decide(f"git {rest}", permission_mode="auto")
-    dash_c = decide(f"git -C /tmp {rest}", permission_mode="auto")
+    bare = decide(f"git {rest}", lockdown=True)
+    dash_c = decide(f"git -C /tmp {rest}", lockdown=True)
     assert _decision(dash_c) == _decision(bare), (
         f"git -C parity broken for {rest!r}: bare={_decision(bare)} -C={_decision(dash_c)}"
     )
@@ -80,5 +80,5 @@ def test_dash_c_readonly_actually_allows() -> None:
     """Guard against vacuous parity (both denying): the read-only -C forms must
     genuinely allow, which is the user-facing fix."""
     for rest in ("status", "log --oneline -5", "diff HEAD~1", "show HEAD", "branch"):
-        res = decide(f"git -C /tmp {rest}", permission_mode="auto")
+        res = decide(f"git -C /tmp {rest}", lockdown=True)
         assert _decision(res) == "allow", f"git -C /tmp {rest} should allow, got {res!r}"

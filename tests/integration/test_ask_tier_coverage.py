@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TracineHQ contributors
-"""Coverage matrix for the elevated-risk ask tier + its sibling hard denies.
+"""Coverage matrix for the elevated-risk tier + its sibling hard denies.
 
-Two new fences land together (see ``bash_command_validator``):
+Two fences land together (see ``bash_command_validator``):
 
-* **Ask tier** -- high harm-capability / low legitimate-frequency shapes
-  (non-sudo escalation, host power control, package-registry redirection).
-  Interactive modes surface them to the human (``permissionDecision: "ask"``);
-  strict/unattended modes (no human at the prompt) deny them with the SAME
-  specific rule_id -- a sharper message than the generic strict default-deny.
+* **Elevated-risk tier** -- high harm-capability / low legitimate-frequency
+  shapes (non-sudo escalation, host power control, package-registry
+  redirection). Denied in every mode with a specific rule_id and a reason
+  that names the safer route; lockdown keeps the same id rather than the
+  generic strict default-deny.
 
 * **Hard deny** -- sibling filesystem-attribute tampering (chown/chgrp/chattr/
   setfacl on a sensitive path) and credential-file network egress
@@ -32,9 +32,8 @@ import pytest
 
 from guard.hooks.bash_command_validator import decide
 
-# decide() annotates both the ask ("needs approval: <id>") and the strict-mode
-# downgrade ("denied: <id>") with the same rule_id token.
-_RULE_RE = re.compile(r"(?:denied|needs approval): (bash\.[a-z0-9_]+)")
+# decide() annotates every deny with "denied: <rule_id>".
+_RULE_RE = re.compile(r"denied: (bash\.[a-z0-9_]+)")
 
 _MY_RULE_IDS = frozenset(
     {
@@ -48,7 +47,7 @@ _MY_RULE_IDS = frozenset(
 
 
 def _decision(result: dict[str, str] | None) -> str:
-    """passthrough / ask / deny / allow."""
+    """passthrough / deny / allow."""
     if result is None:
         return "passthrough"
     return result.get("permissionDecision", "passthrough")
@@ -62,9 +61,9 @@ def _rule_id(result: dict[str, str] | None) -> str | None:
 
 
 # --------------------------------------------------------------------------
-# Ask tier: interactive -> ask, strict -> deny, both carrying the same rule_id.
+# Elevated-risk tier: deny in default and lockdown, same rule_id.
 # Wrapper-peeled variants (sudo/doas/timeout/env prefixes) must still fire --
-# _match_ask_tier walks _candidate_forms.
+# _match_elevated_risk walks _candidate_forms.
 # --------------------------------------------------------------------------
 _ASK_CASES: list[pytest.ParameterSet] = [
     pytest.param("su", "bash.escalation_shell", id="su"),
@@ -116,31 +115,31 @@ _ASK_CASES: list[pytest.ParameterSet] = [
 
 
 @pytest.mark.parametrize(("command", "rule_id"), _ASK_CASES)
-def test_ask_tier_asks_in_interactive(command: str, rule_id: str) -> None:
+def test_ask_tier_denies_in_default_mode(command: str, rule_id: str) -> None:
     result = decide(command, permission_mode="default")
-    assert _decision(result) == "ask", (
-        f"{command!r} should ask in interactive mode, got {_decision(result)!r}"
+    assert _decision(result) == "deny", (
+        f"{command!r} should deny in default mode, got {_decision(result)!r}"
     )
     assert _rule_id(result) == rule_id, (
-        f"{command!r} asked under {_rule_id(result)!r}, not {rule_id}"
+        f"{command!r} denied under {_rule_id(result)!r}, not {rule_id}"
     )
 
 
 @pytest.mark.parametrize(("command", "rule_id"), _ASK_CASES)
-def test_ask_tier_denies_in_strict(command: str, rule_id: str) -> None:
-    """No human at the prompt: the ask downgrades to a deny under the SAME id.
+def test_ask_tier_denies_in_lockdown(command: str, rule_id: str) -> None:
+    """Lockdown keeps the SAME specific id.
 
-    The point is specificity -- strict mode would default-deny these anyway, but
-    with a generic ``bash.strict_default_deny``; the ask-tier dispatch keeps the
-    sharp rule_id so the strict-deny review queue is attributable.
+    The point is specificity -- lockdown would default-deny these anyway, but
+    with a generic ``bash.strict_default_deny``; the elevated-risk dispatch keeps
+    the sharp rule_id so the strict-deny review queue is attributable.
     """
-    result = decide(command, permission_mode="auto")
+    result = decide(command, lockdown=True)
     assert _decision(result) == "deny", (
-        f"{command!r} should deny in strict mode, got {_decision(result)!r}"
+        f"{command!r} should deny in lockdown, got {_decision(result)!r}"
     )
     assert _rule_id(result) == rule_id, (
         f"{command!r} denied under {_rule_id(result)!r}, not {rule_id} "
-        "-- strict ask-tier downgrade lost its specific id"
+        "-- lockdown lost the elevated-risk tier's specific id"
     )
 
 
@@ -181,10 +180,10 @@ _HARD_DENY_CASES: list[pytest.ParameterSet] = [
 ]
 
 
-@pytest.mark.parametrize("mode", ["default", "auto"])
+@pytest.mark.parametrize("mode", ["default", "lockdown"])
 @pytest.mark.parametrize(("command", "rule_id"), _HARD_DENY_CASES)
 def test_hard_deny_both_modes(command: str, rule_id: str, mode: str) -> None:
-    result = decide(command, permission_mode=mode)
+    result = decide(command, lockdown=mode == "lockdown")
     assert _decision(result) == "deny", (
         f"{command!r} should deny in {mode} mode, got {_decision(result)!r}"
     )
@@ -194,9 +193,10 @@ def test_hard_deny_both_modes(command: str, rule_id: str, mode: str) -> None:
 
 
 # --------------------------------------------------------------------------
-# Anti-FP floor: benign neighbours must not ask and must not hit one of the new
-# rule_ids. Asserted in interactive mode (strict would default-deny non-read-only
-# verbs for unrelated reasons, which says nothing about these matchers).
+# Anti-FP floor: benign neighbours must not be denied and must not hit one of
+# the new rule_ids. Asserted in default mode (lockdown would default-deny
+# non-read-only verbs for unrelated reasons, which says nothing about these
+# matchers).
 # --------------------------------------------------------------------------
 _ANTI_FP_CASES: list[pytest.ParameterSet] = [
     # reads / status, not power control
@@ -224,7 +224,7 @@ _ANTI_FP_CASES: list[pytest.ParameterSet] = [
 @pytest.mark.parametrize("command", _ANTI_FP_CASES)
 def test_anti_fp_not_caught(command: str) -> None:
     result = decide(command, permission_mode="default")
-    assert _decision(result) != "ask", f"benign command wrongly asked: {command!r}"
+    assert _decision(result) != "deny", f"benign command wrongly denied: {command!r}"
     assert _rule_id(result) not in _MY_RULE_IDS, (
         f"benign command hit a new rule_id ({_rule_id(result)!r}): {command!r}"
     )

@@ -142,7 +142,7 @@ class TestSecretValueNoFalsePositives:
 
 class TestSecretValueStrictAndOverride:
     def test_denies_in_strict_mode(self) -> None:
-        assert _is_secret_value_deny(decide("echo AKIAIOSFODNN7EXAMPLE", permission_mode="dontAsk"))
+        assert _is_secret_value_deny(decide("echo AKIAIOSFODNN7EXAMPLE", lockdown=True))
 
     def test_deny_reason_names_rule_and_override(self) -> None:
         res = decide("echo AKIAIOSFODNN7EXAMPLE")

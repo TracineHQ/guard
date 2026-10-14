@@ -53,13 +53,6 @@ _utils.safe_main
 # that monkey-patch the env — vulture's static pass cannot follow that.
 _utils.GUARD_HOME
 
-# --- Public decision builder ---
-# `make_decision()` is exercised only by subprocess-based tests in
-# tests/test_utils.py (the test body builds a Python source string and execs
-# it in a child interpreter). Vulture sees the def but not the string-embedded
-# call sites.
-_utils.make_decision
-
 # --- Test parametrize id args ---
 # `description` is consumed by @pytest.mark.parametrize as the human-readable
 # id (`id=d` in the param list) but never referenced in the test body. Pytest

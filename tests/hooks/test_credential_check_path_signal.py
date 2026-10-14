@@ -37,7 +37,7 @@ def _is_ask(envelope: dict[str, object] | None) -> bool:
     spec = envelope.get("hookSpecificOutput")
     if not isinstance(spec, dict):
         return False
-    return spec.get("permissionDecision") == "ask"
+    return spec.get("permissionDecision") == "deny"
 
 
 # --- Tier 1: direct path through every tool ---
@@ -61,7 +61,7 @@ class TestTier1DirectPath:
     )
     def test_credential_path_asks(self, tool_name, tool_input):
         result = decide(tool_name, tool_input)
-        assert _is_ask(result), f"{tool_name} on {tool_input} should ASK"
+        assert _is_ask(result), f"{tool_name} on {tool_input} should deny"
 
     @pytest.mark.parametrize(
         "command",
@@ -78,7 +78,7 @@ class TestTier1DirectPath:
     )
     def test_bash_reader_credential_asks(self, command):
         result = decide("Bash", {"command": command})
-        assert _is_ask(result), f"command should ASK: {command!r}"
+        assert _is_ask(result), f"command should deny: {command!r}"
 
     def test_dotenv_in_relative_path_asks(self):
         # Bare-name '.env' in cat command must ASK.
@@ -112,7 +112,7 @@ class TestTier2CopySource:
     )
     def test_copy_source_credential_asks(self, command):
         result = decide("Bash", {"command": command})
-        assert _is_ask(result), f"copy-source ASK missed: {command!r}"
+        assert _is_ask(result), f"copy-source deny missed: {command!r}"
 
     def test_tar_extract_does_not_trigger_copy_branch(self):
         # ``tar xf`` is extract, not create — the copy-source branch should
@@ -143,9 +143,9 @@ class TestTier3VarIndirection:
     )
     def test_reader_with_var_arg_asks(self, command):
         result = decide("Bash", {"command": command})
-        assert _is_ask(result), f"var-indirection ASK missed: {command!r}"
+        assert _is_ask(result), f"var-indirection deny missed: {command!r}"
 
-    def test_home_var_path_asks_via_tier1(self):
+    def test_home_var_path_denies_via_tier1(self):
         # ``$HOME/.aws/credentials`` is a tier-1 hit: ``all_paths_in``
         # expands $HOME and the literal-credential matcher fires.
         result = decide("Bash", {"command": "cat ${HOME}/.aws/credentials"})
@@ -327,38 +327,38 @@ class TestSubprocessIntegration:
             env=env,
         )
 
-    def test_subprocess_read_credentials_emits_ask(self, decision_log_env):
+    def test_subprocess_read_credentials_emits_deny(self, decision_log_env):
         result = self._run_hook(
             {
                 "tool_name": "Read",
                 "tool_input": {"file_path": str(Path.home() / ".aws" / "credentials")},
             }
         )
-        assert result.returncode == 0
+        assert result.returncode == 2
         envelope = json.loads(result.stdout)
-        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    def test_subprocess_bash_var_indirection_emits_ask(self, decision_log_env):
+    def test_subprocess_bash_var_indirection_emits_deny(self, decision_log_env):
         result = self._run_hook(
             {
                 "tool_name": "Bash",
                 "tool_input": {"command": "cat $CRED_PATH"},
             }
         )
-        assert result.returncode == 0
+        assert result.returncode == 2
         envelope = json.loads(result.stdout)
-        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    def test_subprocess_heuristic_kdbx_emits_ask(self, decision_log_env):
+    def test_subprocess_heuristic_kdbx_emits_deny(self, decision_log_env):
         result = self._run_hook(
             {
                 "tool_name": "Read",
                 "tool_input": {"file_path": "/tmp/foo.kdbx"},
             }
         )
-        assert result.returncode == 0
+        assert result.returncode == 2
         envelope = json.loads(result.stdout)
-        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     def test_subprocess_benign_passes(self, decision_log_env):
         result = self._run_hook(
@@ -409,7 +409,7 @@ class TestExecutionPositionNarrowing:
             "/var/data/my_token.txt",
         ],
     )
-    def test_name_keyword_still_asks_for_file_path_input(self, path):
+    def test_name_keyword_still_denies_for_file_path_input(self, path):
         # The heuristic stays for real file_path tool inputs (Read/Edit/Write).
         assert _is_ask(decide("Read", {"file_path": path})), path
 

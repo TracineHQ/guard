@@ -186,7 +186,7 @@ class TestFP2StrictStillDenies:
     )
     def test_executing_substitution_denied_in_strict(self, cmd: str) -> None:
         # Relaxation is interactive-only; strict agents do not get substitution.
-        assert _denied(decide(cmd, permission_mode="dontAsk")), cmd
+        assert _denied(decide(cmd, lockdown=True)), cmd
 
 
 # === NEW-Q: quoted metacharacters are literal text, not constructs ===
@@ -219,7 +219,7 @@ class TestNewQQuotedConstructsAllowed:
     def test_quoted_metachars_not_denied_strict(self, cmd: str) -> None:
         # is_safe_command masks quoted literals, so strict allows them too —
         # while a real executing $() (preserved by the mask) still denies.
-        assert _not_denied(decide(cmd, permission_mode="dontAsk")), f"strict quoted deny: {cmd!r}"
+        assert _not_denied(decide(cmd, lockdown=True)), f"strict quoted deny: {cmd!r}"
 
 
 class TestNewQRealConstructsStillDeny:
@@ -257,7 +257,7 @@ class TestNewQQuoteParityBypass:
         ],
     )
     def test_quote_parity_bypass_denied(self, cmd: str) -> None:
-        assert _denied(decide(cmd, permission_mode="dontAsk")), f"parity bypass: {cmd!r}"
+        assert _denied(decide(cmd, lockdown=True)), f"parity bypass: {cmd!r}"
 
     @pytest.mark.parametrize(
         "cmd",

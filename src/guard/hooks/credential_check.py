@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TracineHQ contributors
-"""PreToolUse hook: ask before any tool touches a credential file.
+"""PreToolUse hook: deny any tool call that touches a credential file.
 
 Universal path scanner: every path-like token in ``tool_input`` is extracted
-(regardless of ``tool_name``) and checked against credential matchers. ASK
-fires on any hit.
+(regardless of ``tool_name``) and checked against credential matchers. Any
+hit is denied with a reason that steers the agent to the tool's own auth or
+to the user.
 
 Closes the bypass where ``Read({"file_path": "~/.aws/credentials"})`` was
 allowed silently because the previous implementation only fired on
@@ -17,7 +18,7 @@ Tiers of detection (v1):
 - Tier 2: copy-source shadow — ``cp/mv/dd/install/rsync/scp/tar`` with a
   credential file as source
 - Tier 3: var indirection — reader head + ``$VAR``/``${VAR}`` arg (cannot
-  resolve statically, ASK to be safe)
+  resolve statically, deny to be safe)
 - Tier 4: symlink resolution via ``Path.resolve()`` (already handled in
   ``_candidate_paths``)
 - Tier 6: heuristic match on filename keywords / sensitive extensions
@@ -30,23 +31,20 @@ utility is independent of the hook entry point.
 from __future__ import annotations
 
 import itertools
-import json
 import os
 import re
 import shlex
 import stat
-import sys
 from pathlib import Path
 from typing import Any
 
 from guard._utils import (
     all_paths_in,
     emit_pretooluse_decision,
-    log_decision,
     safe_main,
     token_basename,
 )
-from guard.allowlist import hook_bypass_reason, load_allowlist
+from guard.allowlist import apply_decision
 
 _HOOK_ID = "guard.credential_check"
 
@@ -139,12 +137,12 @@ _HEURISTIC_EXTENSIONS: frozenset[str] = frozenset(
 )
 
 # Tier 2: copy-source shadow — file-copy tools where a credential path in
-# source position should ASK at copy time (so the cp itself is gated, not
+# source position is denied at copy time (so the cp itself is gated, not
 # only a later read of the destination).
 _COPY_HEAD_VERBS: frozenset[str] = frozenset({"cp", "mv", "install", "rsync", "scp"})
 
 # Tier 3: reader heads where a $VAR / ${VAR} argument cannot be resolved
-# statically — ASK because the variable may point at a credential file.
+# statically; denied because the variable may point at a credential file.
 _READER_HEAD_VERBS: frozenset[str] = frozenset(
     {
         "cat",
@@ -171,7 +169,7 @@ _READER_HEAD_VERBS: frozenset[str] = frozenset(
 )
 
 # Tier 3 helper: matches a bare ``$VAR``, ``${VAR}``, or a token starting with
-# either form followed by a path segment. We ASK on any of these because we
+# either form followed by a path segment. We deny any of these because we
 # can't resolve the variable.
 _VAR_ARG_RE = re.compile(
     r"(?:^|[^\\])(?:\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9])"
@@ -183,20 +181,22 @@ _VAR_ARG_RE = re.compile(
 # credential-path indirection.
 _AWK_FIELD_RE = re.compile(r"\$(?:[0-9]+|NF|NR|FNR|FS|OFS|RS|ORS)\b")
 
-_ASK_REASON = (
-    "Credential file access — confirm intent. "
-    "Touching credential material (AWS/SSH/.env/*.pem/*.key/etc.) requires "
-    "an explicit human OK so a misrouted edit can't leak secrets."
+_DENY_REASON = (
+    "Credential file access blocked. Touching credential material "
+    "(AWS/SSH/.env/*.pem/*.key/etc.) puts secrets in the transcript. Let the "
+    "tool use its own auth (aws, gh, ssh read their credentials themselves), "
+    "or ask the user for the specific non-secret value you need."
 )
-_ASK_REASON_COPY = (
-    "Credential file copy — confirm intent. A credential file appears as a "
-    "copy source (cp/mv/dd/install/rsync/scp/tar). ASK so an unintended "
-    "copy of secrets is gated by a human."
+_DENY_REASON_COPY = (
+    "Credential file copy blocked. A credential file appears as a copy source "
+    "(cp/mv/dd/install/rsync/scp/tar). Don't duplicate secrets: point the tool "
+    "that needs them at the original path, or tell the user what you're "
+    "setting up."
 )
-_ASK_REASON_VAR = (
-    "Reader command with variable argument — cannot resolve statically. "
-    "If the variable expands to a credential file (e.g. $HOME/.aws/credentials), "
-    "the contents would leak into the agent transcript. Confirm intent."
+_DENY_REASON_VAR = (
+    "Reader command with a variable argument can't be checked statically. If "
+    "the variable expands to a credential file (e.g. $HOME/.aws/credentials), "
+    "the contents would leak into the transcript. Use a literal path."
 )
 
 
@@ -339,8 +339,8 @@ def _is_reader_with_var_arg(command: str) -> bool:
 
     Returns True for commands like ``cat $P``, ``sed -i $CRED_PATH``,
     ``head ${SECRET_FILE}``. We can't resolve the variable statically, so
-    ASK — false positives here are cheap (user clicks through), false
-    negatives leak credentials.
+    deny: a false positive costs the agent a rewrite with a literal path, a
+    false negative leaks credentials.
     """
     if not command.strip():
         return False
@@ -392,16 +392,16 @@ def _decide_bash(command: str) -> dict[str, Any] | None:
         if not tok or tok.startswith("-"):
             continue
         if _hits_credential_strict(tok):
-            return emit_pretooluse_decision("ask", _ASK_REASON)
+            return emit_pretooluse_decision("deny", _DENY_REASON)
     if _is_credential_copy_source(command):
-        return emit_pretooluse_decision("ask", _ASK_REASON_COPY)
+        return emit_pretooluse_decision("deny", _DENY_REASON_COPY)
     if _is_reader_with_var_arg(command):
-        return emit_pretooluse_decision("ask", _ASK_REASON_VAR)
+        return emit_pretooluse_decision("deny", _DENY_REASON_VAR)
     return None
 
 
 def decide(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any] | None:
-    """Return an ``ask`` envelope when a credential file is being touched.
+    """Return a ``deny`` envelope when a credential file is being touched.
 
     Universal scanner: every path-like token in ``tool_input`` is extracted
     and checked, regardless of ``tool_name``. Bash-specific tier-2 (copy
@@ -416,15 +416,15 @@ def decide(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any] | None:
     # Write-class tools: the credential subject is the file being WRITTEN, not
     # paths merely mentioned in the body. A doc / test fixture / source file that
     # references ~/.ssh or ~/.aws is not touching the credential, so scanning the
-    # content would ASK on every such edit -- a false positive that buries the
+    # content would deny every such edit -- a false positive that buries the
     # real signal. Check only the destination path: writing TO a credential file
-    # still ASKs; credential MATERIAL in the body is the secret-value detector's
+    # still denies; credential MATERIAL in the body is the secret-value detector's
     # job (it matches key contents, not path mentions).
     if tool_name in _WRITE_TOOLS:
         for field in ("file_path", "notebook_path"):
             target = tool_input.get(field, "")
             if isinstance(target, str) and _hits_credential(target):
-                return emit_pretooluse_decision("ask", _ASK_REASON)
+                return emit_pretooluse_decision("deny", _DENY_REASON)
         return None
 
     # Tier 1 + Tier 4 + Tier 6: any path-like token in any field. For Bash the
@@ -433,7 +433,7 @@ def decide(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any] | None:
     for raw in all_paths_in(tool_input):
         hit = _hits_credential_strict(raw) if is_bash else _hits_credential(raw)
         if hit:
-            return emit_pretooluse_decision("ask", _ASK_REASON)
+            return emit_pretooluse_decision("deny", _DENY_REASON)
 
     if is_bash:
         cmd = tool_input.get("command", "")
@@ -457,45 +457,9 @@ def hook(payload: dict[str, Any]) -> None:
     if envelope is None:
         return
 
-    excerpt: str | None = None
-    if tool_name == "Bash":
-        cmd = tool_input.get("command", "")
-        if isinstance(cmd, str):
-            excerpt = cmd
-    else:
-        fp = tool_input.get("file_path", "") or tool_input.get("notebook_path", "")
-        if isinstance(fp, str):
-            excerpt = fp
-
-    cwd = payload.get("cwd")
-    cwd_str = cwd if isinstance(cwd, str) else None
-
-    bypass = hook_bypass_reason(load_allowlist(), _HOOK_ID, excerpt or "")
-    if bypass is not None:
-        log_decision(
-            hook_id=_HOOK_ID,
-            event="PreToolUse",
-            tool_name=tool_name,
-            decision="pass",
-            reason=bypass,
-            command_excerpt=excerpt,
-            session_id=str(payload.get("session_id", "")),
-            cwd=cwd_str,
-        )
-        return
-
-    reason = envelope["hookSpecificOutput"]["permissionDecisionReason"]
-    log_decision(
-        hook_id=_HOOK_ID,
-        event="PreToolUse",
-        tool_name=tool_name,
-        decision="ask",
-        reason=reason,
-        command_excerpt=excerpt,
-        session_id=str(payload.get("session_id", "")),
-        cwd=cwd_str,
-    )
-    sys.stdout.write(json.dumps(envelope))
+    field = "command" if tool_name == "Bash" else "file_path"
+    excerpt = tool_input.get(field) or tool_input.get("notebook_path") or ""
+    apply_decision(_HOOK_ID, payload, envelope, excerpt if isinstance(excerpt, str) else "")
 
 
 if __name__ == "__main__":

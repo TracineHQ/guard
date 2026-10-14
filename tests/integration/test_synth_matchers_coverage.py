@@ -307,7 +307,7 @@ STRICT_READONLY_DIAGNOSTIC_ALLOW = [
 
 @pytest.mark.parametrize("command", STRICT_READONLY_DIAGNOSTIC_ALLOW)
 def test_strict_readonly_diagnostic_allowed(command: str) -> None:
-    res = decide(command, permission_mode="dontAsk")
+    res = decide(command, lockdown=True)
     assert not _is_deny(res), f"read-only diagnostic false deny in strict: {command!r} -> {res}"
 
 
@@ -322,9 +322,7 @@ FD_EXEC_STILL_DENY = [
 @pytest.mark.parametrize("command", FD_EXEC_STILL_DENY)
 def test_fd_exec_not_allowed_in_strict(command: str) -> None:
     # fd is deliberately unregistered; strict mode denies it (no exec sink slips through).
-    assert _is_deny(decide(command, permission_mode="dontAsk")), (
-        f"fd exec must not allow: {command!r}"
-    )
+    assert _is_deny(decide(command, lockdown=True)), f"fd exec must not allow: {command!r}"
 
 
 # ============================================================================

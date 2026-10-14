@@ -22,17 +22,10 @@ def _isolate_guard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     the dev's real ``~/.claude/guard/allowlist.json`` and silently allow
     commands tests expect to deny.
 
-    Permission mode is sourced from the PreToolUse payload. Tests that need
-    strict mode pass ``permission_mode="dontAsk"`` directly. ``CLAUDE_AUTONOMOUS``
-    is the deprecated env-var fallback (one-cycle migration window); the dev
-    shell may have it set, so we strip it here to keep tests deterministic.
-    Reset ``_CLAUDE_AUTONOMOUS_WARNED`` so the one-time stderr warning gets
-    its first chance each test (otherwise the assertion-via-stderr tests
-    flake on test ordering).
+    Strict default-deny is guard's ``lockdown`` mode, never Claude Code's
+    ``permission_mode``. Tests that need it pass ``lockdown=True`` to
+    ``decide()`` or write ``{"mode": "lockdown"}`` to the isolated allowlist.
     """
-    from guard import _utils
-
-    monkeypatch.delenv("CLAUDE_AUTONOMOUS", raising=False)
     monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "guard-home"))
     # Isolate the decision log too: the env var covers subprocess tests; the
     # setattr covers in-process decide() calls (the constant is import-captured,
@@ -52,7 +45,6 @@ def _isolate_guard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         str(queue_path),
         raising=False,
     )
-    _utils._CLAUDE_AUTONOMOUS_WARNED["once"] = False  # noqa: SLF001 -- reset module-private warn-once flag
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -115,9 +107,9 @@ def strict_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, decision_log_env
     ``GUARD_DECISIONS_PATH`` from ``decision_log_env``. Returns ``tmp_path``
     so tests can inspect both files.
 
-    NOTE: this fixture no longer activates strict mode — pass
-    ``permission_mode="dontAsk"`` to ``decide()`` (or set it in the
-    PreToolUse payload for subprocess tests).
+    NOTE: this fixture does not activate strict mode. Pass ``lockdown=True``
+    to ``decide()`` (or write ``{"mode": "lockdown"}`` to the allowlist for
+    subprocess tests).
     """
     monkeypatch.setenv("GUARD_STRICT_DENY_QUEUE_PATH", str(tmp_path / "queue.jsonl"))
     return tmp_path

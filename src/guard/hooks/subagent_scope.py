@@ -29,11 +29,11 @@ from __future__ import annotations
 
 import fnmatch
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
-from guard._utils import emit_pretooluse_decision, log_decision, safe_main
+from guard._utils import emit_pretooluse_decision, safe_main
+from guard.allowlist import apply_decision
 from guard.hooks.protected_files import bash_write_targets
 
 _HOOK_ID = "guard.subagent_scope"
@@ -193,11 +193,10 @@ def _emit_deny(
     *,
     payload: dict[str, Any],
     file_path: str,
-    cwd: str,
     scope: dict[str, Any],
     allowed_raw: list[Any],
 ) -> None:
-    """Emit the standard scope-violation deny envelope and exit 2."""
+    """Emit the standard scope-violation deny (exits 2 unless guard mode says otherwise)."""
     task = scope.get("task", "current task")
     allowed_list = "\n".join(f"  - {p}" for p in allowed_raw if isinstance(p, str))
     reason = (
@@ -205,20 +204,7 @@ def _emit_deny(
         f"Allowed files/patterns:\n{allowed_list}\n"
         f"If you need to modify other files, the task scope needs updating."
     )
-    envelope = emit_pretooluse_decision("deny", reason)
-    tool_name = payload.get("tool_name", "")
-    log_decision(
-        hook_id=_HOOK_ID,
-        event="PreToolUse",
-        tool_name=tool_name if isinstance(tool_name, str) else None,
-        decision="deny",
-        reason=reason,
-        command_excerpt=file_path,
-        session_id=str(payload.get("session_id", "")),
-        cwd=cwd,
-    )
-    sys.stdout.write(json.dumps(envelope))
-    sys.exit(2)
+    apply_decision(_HOOK_ID, payload, emit_pretooluse_decision("deny", reason), file_path)
 
 
 def _handle_bash(payload: dict[str, Any]) -> None:
@@ -249,7 +235,6 @@ def _handle_bash(payload: dict[str, Any]) -> None:
         _emit_deny(
             payload=payload,
             file_path=target,
-            cwd=cwd,
             scope=scope,
             allowed_raw=allowed_raw,
         )
@@ -279,7 +264,6 @@ def hook(payload: dict[str, Any]) -> None:
     _emit_deny(
         payload=payload,
         file_path=file_path,
-        cwd=cwd,
         scope=scope,
         allowed_raw=allowed_raw,
     )

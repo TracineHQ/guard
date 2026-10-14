@@ -43,11 +43,12 @@ import os
 import re
 import subprocess  # nosec B404 -- used for guard healthcheck to invoke the bundled hook
 import sys
+import tempfile
 import time
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from guard import __version__
 from guard._utils import (
@@ -397,7 +398,8 @@ def cmd_status() -> tuple[dict[str, Any], str]:
     mode_hint = {
         "enforce": "denies are surfaced and exit 2",
         "shadow": "denies are logged with mode=shadow; pass-through to Claude Code",
-        "off": "hook is short-circuited; no decisions computed",
+        "off": "hooks are short-circuited except guard's own trust root",
+        "lockdown": "enforce plus bash default-deny and the extended protected-file list",
     }.get(allowlist.mode, "")
     lines = [
         f"guard {__version__}",
@@ -425,51 +427,55 @@ def cmd_status() -> tuple[dict[str, Any], str]:
 
 
 _HEALTHCHECK_PROBES: tuple[tuple[str, str, str], ...] = (
-    # (command, permission_mode, expected rule_id substring). Three probes:
-    # two interactive-mode always-deny commands plus one strict-mode probe
-    # that exercises the strict_default_deny path. A registry-only weakening
-    # cannot turn the healthcheck green; a permission-mode plumbing
-    # regression cannot either. Rule_id is the stable contract, not body
-    # wording.
-    ("rm -rf /", "default", "bash.always_deny"),
-    ("python -c 'x'", "default", "bash.always_deny"),
-    ("flarbnoz --gronk", "dontAsk", "bash.strict_default_deny"),
+    # (command, guard mode, expected rule_id substring). Three probes: two
+    # always-deny commands under enforce plus one lockdown probe that
+    # exercises the strict_default_deny path. A registry-only weakening
+    # cannot turn the healthcheck green; a mode plumbing regression cannot
+    # either. Rule_id is the stable contract, not body wording.
+    ("rm -rf /", "enforce", "bash.always_deny"),
+    ("python -c 'x'", "enforce", "bash.always_deny"),
+    ("flarbnoz --gronk", "lockdown", "bash.strict_default_deny"),
 )
 
 
 def _run_healthcheck_probe(
     hook_path: Path,
     command: str,
-    permission_mode: str,
+    mode: str,
     expected_rule: str,
     timeout_s: float = 2.0,
 ) -> dict[str, Any]:
-    payload = {
-        "session_id": "guard-healthcheck",
-        "tool_name": "Bash",
-        "tool_input": {"command": command},
-        "hook_event_name": "PreToolUse",
-        "cwd": str(Path.home()),
-        "permission_mode": permission_mode,
-    }
-    start = time.monotonic()
-    try:
-        proc = subprocess.run(  # noqa: S603  # nosec B603 -- fixed argv (sys.executable + bundled hook script), no shell
-            [sys.executable, str(hook_path)],
-            input=json.dumps(payload),
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return {
-            "command": command,
-            "permission_mode": permission_mode,
-            "expected_rule": expected_rule,
-            "passed": False,
-            "elapsed_ms": int((time.monotonic() - start) * 1000),
+    # Probe the hook code, not the user's config: a throwaway guard home
+    # pins the mode, and the temp cwd keeps project allowlists out.
+    with tempfile.TemporaryDirectory(prefix="guard-healthcheck-") as tmp:
+        (Path(tmp) / "allowlist.json").write_text(json.dumps({"mode": mode}), encoding="utf-8")
+        payload = {
+            "session_id": "guard-healthcheck",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "hook_event_name": "PreToolUse",
+            "cwd": tmp,
         }
+        start = time.monotonic()
+        try:
+            proc = subprocess.run(  # noqa: S603  # nosec B603 -- fixed argv (sys.executable + bundled hook script), no shell
+                [sys.executable, str(hook_path)],
+                input=json.dumps(payload),
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                check=False,
+                cwd=tmp,
+                env={**os.environ, "GUARD_DATA_DIR": tmp},
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "command": command,
+                "mode": mode,
+                "expected_rule": expected_rule,
+                "passed": False,
+                "elapsed_ms": int((time.monotonic() - start) * 1000),
+            }
     elapsed_ms = int((time.monotonic() - start) * 1000)
     decision = None
     rule_seen = False
@@ -486,7 +492,7 @@ def _run_healthcheck_probe(
             decision = None
     return {
         "command": command,
-        "permission_mode": permission_mode,
+        "mode": mode,
         "expected_rule": expected_rule,
         "passed": decision == "deny" and rule_seen,
         "elapsed_ms": elapsed_ms,
@@ -496,13 +502,13 @@ def _run_healthcheck_probe(
 def cmd_healthcheck() -> tuple[dict[str, Any], str]:
     """Synthesize known-deny PreToolUse payloads and assert guard denies.
 
-    Three probes: two interactive-mode (``default``) always-deny commands
-    plus one strict-mode (``dontAsk``) probe that exercises the
-    strict_default_deny path. Each must come back with
+    Three probes: two always-deny commands under ``enforce`` plus one
+    ``lockdown`` probe that exercises the strict_default_deny path. Each
+    runs against a throwaway guard home, so the user's own mode and
+    allowlist don't change the result. Each must come back with
     ``permissionDecision: deny`` AND the expected rule_id substring in
     the reason. Requiring distinct probes plus rule_id matching defeats
-    both single-rule registry weakening and permission_mode plumbing
-    regressions.
+    both single-rule registry weakening and mode plumbing regressions.
 
     When a probe fails, the full deny envelope is in
     ``~/.claude/guard-decisions.jsonl`` -- this output stays minimal.
@@ -847,7 +853,7 @@ def _test_specs(command: str) -> Iterable[dict[str, Any]]:
 def cmd_mode(
     value: str | None, *, scope: str, cwd: Path | None = None
 ) -> tuple[dict[str, Any], str]:
-    """Print or set the effective guard mode (enforce|shadow|off).
+    """Print or set the effective guard mode (enforce|shadow|off|lockdown).
 
     With no ``value``, prints the resolved mode plus the per-scope values so
     operators can see why the resolved mode is what it is. With a value,
@@ -858,12 +864,7 @@ def cmd_mode(
 
     if value is not None:
         # Argparse choices on the subparser restrict ``value`` to a Mode literal at runtime.
-        if value == "enforce":
-            mode_value: Mode = "enforce"
-        elif value == "shadow":
-            mode_value = "shadow"
-        else:
-            mode_value = "off"
+        mode_value = cast("Mode", value)
         previous = set_mode(mode_value, scope=scope, cwd=cwd)
         effective = load_allowlist(cwd).mode
         payload: dict[str, Any] = {
@@ -1202,7 +1203,7 @@ def _add_log_filter_args(parser: argparse.ArgumentParser) -> None:
     """Add ``--decision`` / ``--hook`` / ``--tool`` filters shared by log-query subcommands."""
     parser.add_argument(
         "--decision",
-        help="Filter to records with this decision (e.g. deny, ask, allow, advisory).",
+        help="Filter to records with this decision (e.g. deny, allow, pass).",
     )
     parser.add_argument(
         "--hook",
@@ -1364,7 +1365,7 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915 -- flat subpars
         epilog=(
             "Examples:\n"
             "  guard corpus add 'gh auth token' --expect deny\n"
-            "  guard corpus add 'yq -I4 x.yaml' --expect allow --mode auto\n"
+            "  guard corpus add 'yq -I4 x.yaml' --expect allow --mode lockdown\n"
             "  guard corpus add '\"gh\" auth token' --expect deny --file crossexam.jsonl"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1373,13 +1374,16 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915 -- flat subpars
     p_corpus_add.add_argument(
         "--expect",
         required=True,
-        choices=("allow", "ask", "deny"),
+        choices=("allow", "deny"),
         help="The decision guard must reach for this command.",
     )
     p_corpus_add.add_argument(
         "--mode",
         default="default",
-        help="Permission mode to adjudicate under (default: default; e.g. auto for strict).",
+        help=(
+            "Mode to adjudicate under: 'lockdown' for strict default-deny, otherwise a "
+            "Claude Code permission_mode (default: default)."
+        ),
     )
     p_corpus_add.add_argument(
         "--note", default="", help="Why this case exists / what bypass or FP it guards against."
@@ -1475,14 +1479,14 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915 -- flat subpars
     p_mode = sub.add_parser(
         "mode",
         help=(
-            "Print or set the effective guard mode (enforce|shadow|off). "
+            "Print or set the effective guard mode (enforce|shadow|off|lockdown). "
             "With no value, prints the resolved mode and the source file."
         ),
     )
     p_mode.add_argument(
         "value",
         nargs="?",
-        choices=["enforce", "shadow", "off"],
+        choices=["enforce", "shadow", "off", "lockdown"],
         help="If set, writes mode to the chosen scope's allowlist file.",
     )
     _add_scope_args(p_mode)

@@ -128,5 +128,5 @@ class TestFP3StrictUnaffected:
         # (`ls && find . -type f` is NOT a good probe: post-FP-6a `find . -type f`
         # is a standalone conditional-safe segment that strict legitimately
         # allows, independent of the advisory set.)
-        res = decide("git log | awk '{print $1}'", permission_mode="dontAsk")
+        res = decide("git log | awk '{print $1}'", lockdown=True)
         assert _is_deny(res)

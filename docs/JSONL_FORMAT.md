@@ -55,12 +55,12 @@ section is the contract. Consumers can opt-in by reading the env var directly
 | `v` | int | yes | schema version, currently `1`. Short alias of `schema_version`. |
 | `schema_version` | int | yes | long form, kept for backward compatibility |
 | `type` | enum string | optional | record-shape discriminator. Defaults to `"decision"` when absent. Currently one of `"decision"`, `"internal_error"`, or `"permission_request"` (§3.4, §3.5). Consumers MUST filter on `type` to avoid blending non-decision records into decision tallies. |
-| `mode` | enum string | yes (decision) | one of `"enforce"`, `"shadow"`, `"off"`. Set per-record from the resolved allowlist mode (project > global > default `"enforce"`). `"shadow"` decisions are logged but not enforced; `"off"` short-circuits the hook and emits no record. |
+| `mode` | enum string | yes (decision) | one of `"enforce"`, `"shadow"`, `"off"`, `"lockdown"`. Set per-record from the resolved allowlist mode (project > global > default `"enforce"`). `"shadow"` decisions are logged but not enforced; `"off"` short-circuits the hook and emits no record, except trust-root denies from `protected_files`. |
 | `timestamp` | string (ISO-8601 UTC, microsecond precision, `Z` suffix) | yes | e.g. `"2026-04-29T14:32:11.123456Z"` |
 | `hook_id` | string | yes (decision) | namespaced: `guard.<hook_module>` (e.g. `guard.bash_command_validator`) |
 | `event` | string | yes (decision) | matches Claude Code event names (`PreToolUse`, `PostToolUse`) |
 | `tool_name` | string \| null | yes for PreToolUse/PostToolUse | `Bash`, `Edit`, etc. |
-| `decision` | enum string | yes (decision) | one of `allow`, `deny`, `ask`, `defer`, `pass` |
+| `decision` | enum string | yes (decision) | one of `allow`, `deny`, `defer`, `pass`. Guard no longer asks; logs written by older releases may also hold `ask`. |
 | `permission_mode` | enum string \| null | optional | Claude Code `permission_mode` at decision time (`default`, `plan`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`). Threaded from the PreToolUse payload; populated for Bash decisions. |
 | `reason` | string | yes (decision) | human-readable; ≤ 1024 chars. Secret-shapes are redacted at write time. |
 | `command_excerpt` | string \| null | optional | truncated to 4096 chars; only set for Bash-related decisions. Secret-shapes are redacted at write time. |
@@ -75,12 +75,16 @@ section is the contract. Consumers can opt-in by reading the env var directly
 - `"enforce"` — guard's decision is the authoritative outcome for the user.
 - `"shadow"` — guard computed a decision but did not enforce it (decision is
   observational only; useful for testing new rules without breaking flows).
-- `"off"` — the hook ran but is functionally disabled; decisions are
-  passthrough.
+- `"off"` — hooks are silent and write nothing, except `protected_files`
+  denies on guard's trust root (its own code, allowlist and subagent scope),
+  which still block and log with `mode: "off"`.
+- `"lockdown"` — enforced, plus the opt-in strict default-deny: Bash
+  commands off the safe list are denied (`bash.strict_*` rule_ids) and
+  `protected_files` widens its pattern list.
 
 As of v1.4.0, the writer emits the resolved allowlist mode on every
 decision record (default `"enforce"`). Operators flip mode with
-`guard mode <enforce|shadow|off> [--project|--global]`, which writes a
+`guard mode <enforce|shadow|off|lockdown> [--project|--global]`, which writes a
 top-level `"mode"` field into `.claude/guard/allowlist.json`. Project
 beats global beats the default. `"shadow"` is useful for testing a new
 rule against real sessions without blocking: the writer still logs
@@ -111,8 +115,8 @@ Top-level categories:
 | `bash.always_deny` | literal `ALWAYS_DENY` registry hits | `git push --force`, `rm -rf /` |
 | `bash.<synth>` | synthetic-deny predicates (one rule_id per predicate) | `bash.dangerous_rm`, `bash.git_config_injection`, `bash.git_force_push`, `bash.kubectl_destructive`, `bash.gh_api_destructive`, `bash.disk_destruction`, etc. The active list lives next to the `_PER_FORM_MATCHERS` tuple in `bash_command_validator.py`. |
 | `bash.admin_*` | admin-CLI flag-spec violations (default / interactive mode) | `bash.admin_default_deny`, `bash.admin_forbidden_subcommand`, `bash.admin_forbidden_flag`, `bash.admin_sensitive_env_override` |
-| `bash.admin_unknown_flag_strict` | strict mode (`auto`/`dontAsk`/`bypassPermissions`) blocks an admin CLI invocation that carries flags outside the spec's `known_flags` set | strict-only |
-| `bash.strict_feedback` / `bash.strict_default_deny` | strict-mode default-deny for non-admin commands not on the allowlist | strict-only |
+| `bash.admin_unknown_flag_strict` | lockdown (`guard mode lockdown`) blocks an admin CLI invocation that carries flags outside the spec's `known_flags` set | lockdown-only |
+| `bash.strict_feedback` / `bash.strict_default_deny` | lockdown default-deny for non-admin commands not on the allowlist | lockdown-only |
 | `bash.command_too_long` | command exceeded `_COMMAND_LENGTH_CAP` after canonicalization | DoS guard |
 
 `git_c_validator` decisions do not carry a `rule_id`; the deny `reason` is
@@ -120,7 +124,7 @@ self-describing (`"git -C: 'reset' is destructive and blocked"`,
 `"git -c <key>=<value>: command-line override of core.hooksPath / ..."`).
 Group git-C decisions on `hook_id == "guard.git_c_validator"`.
 
-Strict-mode rule_ids (`bash.admin_unknown_flag_strict`,
+Lockdown rule_ids (`bash.admin_unknown_flag_strict`,
 `bash.command_too_long`, `bash.strict_default_deny`,
 `bash.strict_feedback`) are eligible for allowlist override; see
 `guard allowlist allow-command <rule_id> '<command>' --reason '...'`.
@@ -157,7 +161,7 @@ record is observation-only, and the prompt proceeds normally.
 |---|---|---|---|
 | `type` | string | yes | always `"permission_request"` for this record shape |
 | `v` / `schema_version` | int | yes | schema version (currently `1`) |
-| `mode` | string | yes | guard's effective mode at request time (`"enforce"` / `"shadow"` / `"off"`); `"off"` short-circuits before logging |
+| `mode` | string | yes | guard's effective mode at request time (`"enforce"` / `"shadow"` / `"off"` / `"lockdown"`); `"off"` short-circuits before logging |
 | `timestamp` | string | yes | ISO-8601 UTC with microsecond precision |
 | `session_id` | string | yes | Claude Code session id |
 | `tool_name` | string | yes | tool about to be invoked (`"Bash"`, `"Edit"`, `"mcp__server__tool"`, ...) |
@@ -217,7 +221,7 @@ so operators see prompt frequency alongside deny frequency. Pass
 ```json
 {"type":"decision","v":1,"schema_version":1,"mode":"enforce","timestamp":"2026-04-29T14:32:11.123456Z","hook_id":"guard.bash_command_validator","event":"PreToolUse","tool_name":"Bash","decision":"allow","reason":"Read-only command","command_excerpt":"ls -la","session_id":"abc-123","cwd":"/home/alice/project"}
 {"type":"decision","v":1,"schema_version":1,"mode":"enforce","timestamp":"2026-04-29T14:32:12.987654Z","hook_id":"guard.bash_command_validator","event":"PreToolUse","tool_name":"Bash","decision":"deny","reason":"git add -A is denied: stages all files indiscriminately","command_excerpt":"git add -A","session_id":"abc-123","cwd":"/home/alice/project"}
-{"type":"decision","v":1,"schema_version":1,"mode":"enforce","timestamp":"2026-04-29T14:32:13.456789Z","hook_id":"guard.protected_files","event":"PreToolUse","tool_name":"Edit","decision":"ask","reason":"Edit to .env requires user confirmation","session_id":"abc-123","cwd":"/home/alice/project"}
+{"type":"decision","v":1,"schema_version":1,"mode":"enforce","timestamp":"2026-04-29T14:32:13.456789Z","hook_id":"guard.protected_files","event":"PreToolUse","tool_name":"Edit","decision":"deny","reason":"Protected file: guard/registry.py. guard blocks agent edits to its own code and subagent scope so a session can't rewrite its own guardrails. ...","session_id":"abc-123","cwd":"/home/alice/project"}
 ```
 
 ## 8. Reference implementation

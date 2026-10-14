@@ -157,7 +157,7 @@ _MATRIX: list[tuple[str, str, str]] = [
     (wrap_name, wrap_tpl.format(rest=rest), mode)
     for rest in _all_subforms()
     for wrap_name, wrap_tpl in _WRAPPERS.items()
-    for mode in ("auto", "default")
+    for mode in ("lockdown", "default")
 ]
 
 
@@ -168,7 +168,7 @@ _MATRIX: list[tuple[str, str, str]] = [
 )
 def test_write_subforms_denied(wrapper: str, command: str, mode: str) -> None:
     """Every git write subform denies in both modes under every global wrapper."""
-    res = decide(command, permission_mode=mode)
+    res = decide(command, lockdown=mode == "lockdown")
     assert is_deny(res), (
         f"[{mode}] wrapper={wrapper} guard FAILED to deny a git ref/config/exec "
         f"write: {command!r} -> {res!r}"

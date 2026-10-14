@@ -215,7 +215,7 @@ def test_agent_output_guard_denies_output_read(tmp_path):
     assert decision["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
-def test_protected_files_asks_on_hook_edit(tmp_path):
+def test_protected_files_denies_hook_edit(tmp_path):
     hook = HOOKS_DIR / "protected_files.py"
     payload = {
         "tool_name": "Edit",
@@ -224,9 +224,9 @@ def test_protected_files_asks_on_hook_edit(tmp_path):
         "cwd": str(tmp_path),
     }
     rc, stdout, _ = _run_hook(hook, payload)
-    assert rc == 0
+    assert rc == 2
     decision = json.loads(stdout)
-    assert decision["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert decision["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 def test_subagent_scope_denies_out_of_scope_edit(tmp_path):

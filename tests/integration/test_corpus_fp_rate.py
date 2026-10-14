@@ -6,8 +6,9 @@ Every row under ``tests/corpus/*.jsonl`` is a command + the decision guard MUST
 reach in a given mode -- recorded as ``{command, expected, mode, source, note}``.
 The ``allow``/``deny`` files are the original false-positive / false-negative
 ratchets (seeded from real convo session history); the threat-category files
-(``escalation.jsonl``, ``host_control.jsonl``, ...) add the ``ask`` tier and its
-sibling hard denies. A probe of "does guard classify this right?" becomes a
+(``escalation.jsonl``, ``host_control.jsonl``, ...) add the elevated-risk tier
+and its sibling hard denies. ``mode: lockdown`` rows exercise strict
+default-deny; any other mode is a Claude Code permission_mode (context only). A probe of "does guard classify this right?" becomes a
 permanent row here instead of a throwaway ``guard test`` string.
 
 This module and the ``guard corpus`` CLI both read the SAME rows through
@@ -27,8 +28,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from guard._corpus import ALLOW, DENY, classify, load_corpus
-from guard.hooks.bash_command_validator import decide
+from guard._corpus import ALLOW, DENY, adjudicate, load_corpus
 
 if TYPE_CHECKING:
     from guard._corpus import CorpusRow
@@ -43,7 +43,7 @@ def _row_id(row: CorpusRow) -> str:
 
 
 def _actual(row: CorpusRow) -> str:
-    return classify(decide(row.command, permission_mode=row.mode))
+    return adjudicate(row.command, row.mode)
 
 
 def test_corpus_is_non_empty() -> None:

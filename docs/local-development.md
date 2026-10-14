@@ -27,11 +27,11 @@ uv tool install --editable /Users/dev/develop/guard --force
 ```
 
 `--editable` means source edits are reflected with no reinstall. After this,
-`guard corpus` runs from the local tree and stays allowlisted even in strict
-sessions. Re-run the install only after a dependency change (a new entry in
+`guard corpus` runs from the local tree and stays allowlisted even under
+lockdown. Re-run the install only after a dependency change (a new entry in
 `pyproject.toml`), not after ordinary source edits.
 
-The install itself is a privileged action that strict mode fences, so it is a
+The install itself is a privileged action that lockdown fences, so it is a
 one-time human bootstrap (run it from a normal shell, or via `!` in a session).
 
 ### Official vs local

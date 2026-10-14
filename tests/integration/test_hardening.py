@@ -77,36 +77,6 @@ def test_bare_env_still_allowed_in_strict() -> None:
     assert _decision(stdout) == "allow", "bare env should still be safe in strict"
 
 
-def test_settings_json_edit_asks() -> None:
-    """Edit on ~/.claude/settings.json must surface ASK (regression: not in PROTECTED_PATTERNS)."""
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(REPO / "src")
-    home = Path.home()
-    target = home / ".claude" / "settings.json"
-    proc = subprocess.run(
-        [sys.executable, str(PROTECTED)],
-        input=json.dumps(
-            {
-                "session_id": "h",
-                "tool_name": "Edit",
-                "tool_input": {
-                    "file_path": str(target),
-                    "old_string": "x",
-                    "new_string": "y",
-                },
-                "hook_event_name": "PreToolUse",
-                "cwd": "/tmp",
-            }
-        ),
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=10,
-        check=False,
-    )
-    assert _decision(proc.stdout) == "ask", f"settings.json edit not asking: {proc.stdout[:300]}"
-
-
 def test_oversized_stdin_denied() -> None:
     """Stdin > 1 MiB must fail-closed deny (regression: was unbounded passthrough)."""
     env = os.environ.copy()

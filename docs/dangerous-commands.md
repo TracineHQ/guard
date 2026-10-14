@@ -7,7 +7,8 @@ summarizes it.** When the two disagree, the registry wins.
 Commands are classified into four tiers:
 
 - **ALLOW** — auto-permitted. Read-only or otherwise safe by construction.
-- **ASK** — surfaced for human confirmation. Most write operations.
+- **ASK** — guard passes it through to Claude Code's own permission prompt
+  (denied under `guard mode lockdown`). Most write operations.
 - **DENY** — refused unconditionally, even with a human in the loop.
 - **CLASSIFIER** — bare prefix is allowed but routed through a custom
   classifier (because flag forms re-exec arbitrary code).
@@ -18,8 +19,8 @@ the full list.
 
 ## Always-deny
 
-These prefixes are in `ALWAYS_DENY` and block in both interactive and
-strict mode.
+These prefixes are in `ALWAYS_DENY` and block in every guard mode except
+`off`.
 
 ### Filesystem destruction (`rm-deny`)
 
@@ -147,9 +148,9 @@ via the user allowlist (`~/.claude/guard/allowlist.json`).
 
 ## High-risk ASK commands
 
-These are not denied but are surfaced for human confirmation. In strict mode
-(`permission_mode` is `auto`, `dontAsk`, or `bypassPermissions`) they are
-denied with a queued-for-session-end message.
+Guard doesn't deny these; they reach Claude Code's own permission prompt.
+Under `guard mode lockdown` they are denied with a queued-for-session-end
+message.
 
 ### Filesystem writes
 
@@ -161,7 +162,7 @@ denied with a queued-for-session-end message.
 fetch`, `git checkout`, `git switch`, `git merge`, `git rebase`, `git
 reset`, `git revert`, `git stash`, `git clean`, `git restore`, `git
 cherry-pick`. (Ref creation/mutation -- `git branch -d/-m`, `git tag -a/-d`,
-`git remote add` -- is a both-mode deny, not ASK; see the synthetic-deny table.)
+`git remote add` -- is denied in every mode; see the synthetic-deny table.)
 
 ### Cloud writes
 
@@ -191,21 +192,21 @@ taint|untaint`, `terraform workspace new|select|delete`.
 
 `pip install`, `pip uninstall`, `uv pip install`, `make install`.
 
-### Elevated-risk shapes (ask tier)
+### Elevated-risk shapes
 
-A small set of high-harm / low-frequency shapes ask for confirmation in
-interactive mode and deny in strict mode -- with a specific rule_id, not the
-generic `bash.strict_default_deny`, so the strict-deny review queue stays
-attributable. All are shape matchers, not registry literals.
+A small set of high-harm / low-frequency shapes are denied in every mode
+with a specific rule_id, not the generic `bash.strict_default_deny`, so the
+strict-deny review queue stays attributable. The deny tells the agent to hand
+the step to the user. All are shape matchers, not registry literals.
 
 | Shape | Detector (`rule_id`) | Examples |
 |---|---|---|
-| Non-sudo privilege escalation | `_is_escalation_ask` (`bash.escalation_shell`) | `su`, `doas ...`, `pkexec bash`, `runuser -l root`, `setpriv --reuid 0 ... /bin/bash`, `machinectl shell root@.host`. Escalation behind a pre-exec wrapper (`chroot / su -`, `flock lock su`, `unshare su`) is peeled and still caught. |
+| Non-sudo privilege escalation | `_is_escalation_shell` (`bash.escalation_shell`) | `su`, `doas ...`, `pkexec bash`, `runuser -l root`, `setpriv --reuid 0 ... /bin/bash`, `machinectl shell root@.host`. Escalation behind a pre-exec wrapper (`chroot / su -`, `flock lock su`, `unshare su`) is peeled and still caught. |
 | Host power / runlevel control | `_is_host_control` (`bash.host_control`) | `reboot`, `shutdown -h now`, `poweroff`, `halt`, `init 0`, `telinit 6`, `systemctl poweroff`, `systemctl isolate reboot.target` |
 | Package-registry redirection | `_is_registry_poisoning` (`bash.registry_config`) | `npm config set registry https://x`, `npm set registry https://x`, `pip config set global.index-url https://x`, `gem sources --add https://x` |
 
 `sudo`-based escalation (`sudo su`, `sudo bash -c ...`) is a both-mode hard
-deny (`bash.sudo_escalation`), not ask. Benign neighbours are deliberately
+deny (`bash.sudo_escalation`). Benign neighbours are deliberately
 left alone: `machinectl list`, `systemctl status reboot.target`, `init 3`,
 `npm config get registry`, `git init`.
 
@@ -213,7 +214,7 @@ left alone: `machinectl list`, `systemctl status reboot.target`, `init 3`,
 
 The intended classification of every shape above is pinned by a fixture
 corpus under `tests/corpus/*.jsonl` (one row per command, with its expected
-`allow`/`ask`/`deny` and mode). Run the whole corpus through the live matcher
+`allow`/`deny` and mode). Run the whole corpus through the live matcher
 in one process with `guard corpus` (exit 1 on any mismatch); CI enforces the
 same rows. Add a row there rather than testing ad-hoc -- see
 `tests/corpus/README.md`.

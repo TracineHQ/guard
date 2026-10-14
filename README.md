@@ -23,7 +23,7 @@ Guardrails not walls: guard catches the obvious foot-guns at the Claude Code hoo
 | credential_check | hardcoded credentials in tool inputs |
 | commit_message_validator | AI-attribution trailers (`Co-Authored-By: Claude…`) and missing/file-backed commit messages |
 | agent_output_guard | reads of subagent transcript files (`/tmp/claude-<pid>/.../tasks/*.output`) |
-| protected_files | edits to user-marked protected files |
+| protected_files | edits to guard's own code, allowlist, and subagent scope, plus your own patterns (lockdown adds agent-instruction, git-hook and MCP config files) |
 | subagent_scope | file edits outside the declared `.claude/subagent-scope.json` allowlist |
 | permission_request_logger | observation-only: logs every Claude Code permission prompt as a `permission_request` JSONL row (no enforcement) |
 
@@ -71,29 +71,30 @@ Then `guard status` shows the log location and last record, `guard noisy --since
 
 Guard reads a small set of environment variables. See [SKILL.md](SKILL.md) for the canonical descriptions and defaults.
 
-Strict default-deny activates from Claude Code's `permission_mode` field in
-PreToolUse hook input (no env var). The strict modes are `auto` (Anthropic's
-classifier-mediated unattended mode), `dontAsk`, and `bypassPermissions` --
-all three imply "no human at the prompt." Other modes (`default`, `plan`,
-`acceptEdits`) use advisory evaluation.
-
-**Requirements:** Claude Code that emits `permission_mode` on PreToolUse
-payloads (current Claude Code releases do; older builds default to advisory
-since the field is absent). For one minor cycle, a deprecated
-`CLAUDE_AUTONOMOUS=1` env var fallback escalates to `dontAsk` with a stderr
-warning -- remove the env var before the next minor release.
+Guard never asks. Every block is a deny whose reason tells the agent what
+to do instead: usually stop and tell you, with the command or allowlist
+override you can run. You get the context in the conversation, not a
+confirm dialog without it.
 
 **Healthcheck:** `guard healthcheck` exits 0 on healthy, non-zero on
 failure. Suitable for CI gates and cron-based monitors.
 
-**Mode (enforce / shadow / off):** the effective mode lives in
+**Mode (enforce / shadow / off / lockdown):** the effective mode lives in
 `.claude/guard/allowlist.json` as a top-level `"mode"` field (project),
 with `~/.claude/guard/allowlist.json` (global) as fallback. Default is
-`"enforce"`. Flip with `guard mode shadow --project` to test a new rule
-against real sessions without blocking -- denies are logged with
-`mode: "shadow"` but the hook exits 0 so Claude Code's normal permission
-flow takes over. Restore with `guard mode enforce --project`. `"off"`
-short-circuits the hook entirely (no decisions, no audit row).
+`"enforce"`. Every hook honors it:
+
+- `enforce` -- deny what matches; everything else goes to Claude Code's
+  normal permission flow.
+- `shadow` -- log what would have been denied (`mode: "shadow"`) but exit 0.
+  Try a new rule against real sessions with `guard mode shadow --project`,
+  then `guard mode enforce --project`.
+- `off` -- hooks go quiet, except edits to guard's own code and allowlist.
+  Those stay blocked so a session can't rewrite guard while it's off.
+- `lockdown` -- opt-in strict default-deny for driven or unattended agents.
+  Bash commands off the read-only safe list are denied, and protected_files
+  adds agent-instruction, git-hook, MCP and `.aws/config` files. Only
+  `guard mode lockdown` turns it on; Claude Code's `permission_mode` never does.
 
 | Variable | Purpose |
 |---|---|

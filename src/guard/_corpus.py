@@ -5,8 +5,12 @@
 The corpus (``tests/corpus/*.jsonl``) is the single source of truth for the
 command shapes guard must classify a particular way. One row is one fixture::
 
-    {"command": "...", "expected": "allow|ask|deny", "mode": "default|auto|...",
+    {"command": "...", "expected": "allow|deny", "mode": "default|lockdown|...",
      "note": "...", "source": "..."}
+
+``mode`` is ``lockdown`` (guard's opt-in strict default-deny) or a Claude Code
+``permission_mode`` such as ``default`` / ``auto``, which is context only and
+never changes the decision.
 
 Both consumers read THIS module, so the fixtures are never duplicated:
 
@@ -41,10 +45,11 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
 # Decision classes a fixture's ``expected`` (and decide()'s actual) collapse to.
+# Guard never asks, so there is no ``ask`` class.
 ALLOW = "allow"
-ASK = "ask"
 DENY = "deny"
-_DECISIONS = frozenset({ALLOW, ASK, DENY})
+_DECISIONS = frozenset({ALLOW, DENY})
+LOCKDOWN = "lockdown"
 
 
 @dataclass(frozen=True)
@@ -156,7 +161,7 @@ def load_corpus() -> list[CorpusRow]:
 
 
 def classify(result: dict[str, str] | None) -> str:
-    """Map a ``decide()`` envelope to its decision class (allow/ask/deny).
+    """Map a ``decide()`` envelope to its decision class (allow/deny).
 
     ``None`` (interactive passthrough) and an explicit allow envelope both mean
     "not blocked" -> ``allow``.
@@ -167,12 +172,19 @@ def classify(result: dict[str, str] | None) -> str:
     return decision if decision in _DECISIONS else ALLOW
 
 
+def adjudicate(command: str, mode: str) -> str:
+    """Return the decision class ``decide()`` reaches for ``command`` in ``mode``."""
+    if mode == LOCKDOWN:
+        return classify(decide(command, lockdown=True))
+    return classify(decide(command, permission_mode=mode))
+
+
 def evaluate(rows: Iterable[CorpusRow]) -> CorpusReport:
     """Adjudicate each row through ``decide()`` and collect mismatches."""
     report = CorpusReport()
     for row in rows:
         report.total += 1
-        actual = classify(decide(row.command, permission_mode=row.mode))
+        actual = adjudicate(row.command, row.mode)
         if actual == row.expected:
             report.passed += 1
         else:
@@ -242,7 +254,7 @@ def append_row(  # noqa: PLR0913 -- one keyword per corpus row field; matches th
     row = CorpusRow(
         command=command, expected=expected, mode=mode, note=note, source=src, file=path.name
     )
-    actual = classify(decide(command, permission_mode=mode))
+    actual = adjudicate(command, mode)
     for existing in load_corpus():
         if existing.command == command and existing.mode == mode:
             if existing.expected == expected:

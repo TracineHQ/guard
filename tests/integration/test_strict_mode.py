@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TracineHQ contributors
-"""End-to-end: when permission_mode is dontAsk/bypassPermissions,
-bash_command_validator default-denies unsafe segments and surfaces
-STRICT_FEEDBACK custom messages.
+"""End-to-end: in guard lockdown mode, bash_command_validator default-denies
+unsafe segments and surfaces STRICT_FEEDBACK custom messages.
 
 Locks in the strict-mode safety net for subagents / driven agents so it can't
 silently regress again.
@@ -21,6 +20,7 @@ import pytest
 from guard.registry import STRICT_FEEDBACK
 from tests._helpers import REPO_ROOT as REPO
 from tests._helpers import decision_from_stdout as _decision
+from tests._helpers import lockdown_guard_home
 
 HOOK = REPO / "src" / "guard" / "hooks" / "bash_command_validator.py"
 
@@ -35,6 +35,8 @@ def _run(
     env["PYTHONPATH"] = str(REPO / "src")
     if decisions_path is not None:
         env["GUARD_DECISIONS_PATH"] = str(decisions_path)
+    if strict:
+        env["GUARD_DATA_DIR"] = str(lockdown_guard_home(env.get("GUARD_DATA_DIR")))
     proc = subprocess.run(
         [sys.executable, str(HOOK)],
         input=json.dumps(
@@ -44,7 +46,7 @@ def _run(
                 "tool_input": {"command": command},
                 "hook_event_name": "PreToolUse",
                 "cwd": "/tmp",
-                "permission_mode": "dontAsk" if strict else "default",
+                "permission_mode": "auto",
             }
         ),
         capture_output=True,
@@ -173,6 +175,7 @@ def test_strict_queue_path_is_writable(tmp_path: Path) -> None:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO / "src")
     env["GUARD_STRICT_DENY_QUEUE_PATH"] = str(queue)
+    env["GUARD_DATA_DIR"] = str(lockdown_guard_home(env.get("GUARD_DATA_DIR")))
     proc = subprocess.run(
         [sys.executable, str(HOOK)],
         input=json.dumps(
@@ -182,7 +185,7 @@ def test_strict_queue_path_is_writable(tmp_path: Path) -> None:
                 "tool_input": {"command": "flarbnoz --gronk"},
                 "hook_event_name": "PreToolUse",
                 "cwd": "/tmp",
-                "permission_mode": "dontAsk",
+                "permission_mode": "auto",
             }
         ),
         capture_output=True,

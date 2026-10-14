@@ -11,18 +11,16 @@ output pattern, regardless of which tool or verb is invoked.
 
 from __future__ import annotations
 
-import json
 import re
-import sys
 from typing import Any
 
 from guard._utils import (
     all_paths_in,
     all_strings_in,
     emit_pretooluse_decision,
-    log_decision,
     safe_main,
 )
+from guard.allowlist import apply_decision
 
 _HOOK_ID = "guard.agent_output_guard"
 
@@ -167,27 +165,8 @@ def hook(payload: dict[str, Any]) -> None:
     if envelope is None:
         return  # Passthrough
 
-    command_excerpt: str | None = None
-    if tool_name == "Bash":
-        cmd = tool_input.get("command", "")
-        if isinstance(cmd, str):
-            command_excerpt = cmd
-    elif tool_name == "Read":
-        fp = tool_input.get("file_path", "")
-        if isinstance(fp, str):
-            command_excerpt = fp
-    log_decision(
-        hook_id=_HOOK_ID,
-        event="PreToolUse",
-        tool_name=tool_name if isinstance(tool_name, str) else None,
-        decision="deny",
-        reason=_DENY_REASON,
-        command_excerpt=command_excerpt,
-        session_id=str(payload.get("session_id", "")),
-        cwd=cwd_str,
-    )
-    sys.stdout.write(json.dumps(envelope))
-    sys.exit(2)
+    excerpt = tool_input.get("command" if tool_name == "Bash" else "file_path", "")
+    apply_decision(_HOOK_ID, payload, envelope, excerpt if isinstance(excerpt, str) else "")
 
 
 if __name__ == "__main__":

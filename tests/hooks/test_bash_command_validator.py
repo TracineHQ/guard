@@ -403,48 +403,47 @@ class TestRobustness:
 
 
 class TestStrictMode:
-    """Direct decide() calls under permission_mode="dontAsk".
+    """Direct decide() calls under lockdown=True.
 
     Locks in the strict-mode contract for subagents / driven agents at the
     unit level (no subprocess overhead).
     """
 
     def test_unknown_command_denied(self, strict_env):
-        result = decide("flarbnoz --gronk", permission_mode="dontAsk")
+        result = decide("flarbnoz --gronk", lockdown=True)
         assert result is not None
         assert result["permissionDecision"] == "deny"
 
     def test_safe_command_allowed(self, strict_env):
-        result = decide("ls -la", permission_mode="dontAsk")
+        result = decide("ls -la", lockdown=True)
         assert result is not None
         assert result["permissionDecision"] == "allow"
 
     def test_strict_feedback_message_used(self, strict_env):
         # `rm` is in STRICT_FEEDBACK
-        result = decide("rm somefile", permission_mode="dontAsk")
+        result = decide("rm somefile", lockdown=True)
         assert result is not None
         assert result["permissionDecision"] == "deny"
         # Annunciator-wrapped: full STRICT_FEEDBACK text appears within
         # the reason, prefixed by the mode/rule_id annunciator.
         assert STRICT_FEEDBACK["rm"] in result["permissionDecisionReason"]
-        assert "permission_mode=dontAsk" in result["permissionDecisionReason"]
         assert "bash.strict_feedback" in result["permissionDecisionReason"]
 
     def test_default_deny_for_unregistered(self, strict_env):
-        result = decide("noexist --flag", permission_mode="dontAsk")
+        result = decide("noexist --flag", lockdown=True)
         assert result is not None
         assert result["permissionDecision"] == "deny"
-        assert "strict mode" in result["permissionDecisionReason"].lower()
+        assert "lockdown" in result["permissionDecisionReason"].lower()
 
     def test_git_status_allowed_strict(self, strict_env):
         # `git status` is on SAFE_PREFIXES — must allow even in strict mode.
-        result = decide("git status", permission_mode="dontAsk")
+        result = decide("git status", lockdown=True)
         assert result is not None
         assert result["permissionDecision"] == "allow"
 
     def test_git_push_denied_strict(self, strict_env):
         # `git push` is in STRICT_FEEDBACK — must deny.
-        result = decide("git push origin main", permission_mode="dontAsk")
+        result = decide("git push origin main", lockdown=True)
         assert result is not None
         assert result["permissionDecision"] == "deny"
 
