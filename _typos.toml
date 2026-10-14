@@ -2,3 +2,4 @@
 # add false-positive identifiers as needed
 Nd = "Nd"  # placeholder for "N days" in CLI duration docstrings
 aks = "aks"  # Azure Kubernetes Service subcommand
+WRONLY = "WRONLY"  # POSIX O_WRONLY open flag
