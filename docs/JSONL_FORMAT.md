@@ -75,6 +75,7 @@ section is the contract. Consumers can opt-in by reading the env var directly
 - `"enforce"` — guard's decision is the authoritative outcome for the user.
 - `"shadow"` — guard computed a decision but did not enforce it (decision is
   observational only; useful for testing new rules without breaking flows).
+  Trust-root denies from `protected_files` still block.
 - `"off"` — hooks are silent and write nothing, except `protected_files`
   denies on guard's trust root (its own code, allowlist and subagent scope),
   which still block and log with `mode: "off"`.
@@ -89,7 +90,8 @@ top-level `"mode"` field into `.claude/guard/allowlist.json`. Project
 beats global beats the default. `"shadow"` is useful for testing a new
 rule against real sessions without blocking: the writer still logs
 `decision: "deny"` with `mode: "shadow"`, but the hook exits 0 with an
-empty stdout so Claude Code's normal permission flow takes over.
+empty stdout so Claude Code's normal permission flow takes over (trust-root
+denies excepted).
 
 ### 3.2 Path discovery for consumers
 
@@ -125,9 +127,9 @@ self-describing (`"git -C: 'reset' is destructive and blocked"`,
 Group git-C decisions on `hook_id == "guard.git_c_validator"`.
 
 Lockdown rule_ids (`bash.admin_unknown_flag_strict`,
-`bash.command_too_long`, `bash.strict_default_deny`,
-`bash.strict_feedback`) are eligible for allowlist override; see
-`guard allowlist allow-command <rule_id> '<command>' --reason '...'`.
+`bash.strict_default_deny`, `bash.strict_feedback`) and
+`bash.command_too_long` (every mode) are eligible for allowlist override; see
+`guard allowlist allow-command --rule <rule_id> --command '<command>' --reason '...'`.
 
 ### 3.4 `internal_error` records
 

@@ -71,7 +71,7 @@ def test_no_steer_outside_dev_tree(monkeypatch: pytest.MonkeyPatch, mode: str) -
     result = decide("guard test 'ls -la'", lockdown=mode == "lockdown")
     reason = (result or {}).get("permissionDecisionReason", "")
     assert "bash.use_corpus_harness" not in reason
-    if mode == "auto":
+    if mode == "lockdown":
         # still whitelisted as a read-only subcommand -> auto-allow, not denied
         assert not is_deny(result)
 

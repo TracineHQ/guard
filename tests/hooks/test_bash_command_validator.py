@@ -580,7 +580,7 @@ def test_dangerous_rm_shapes_denied(cmd):
 def test_safe_rm_not_blanket_denied():
     # ``rm somefile`` is not on the deny shape — defer to existing prompt path.
     res = decide("rm /tmp/specific_file.log")
-    # Should NOT be a deny envelope — either passthrough or ASK route.
+    # Should NOT be a deny envelope: passthrough to Claude Code's own prompt.
     if res is not None:
         assert res.get("permissionDecision") != "deny", res
 

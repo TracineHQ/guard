@@ -50,9 +50,9 @@ evaluates every file. Rows are self-describing via `expected`/`mode`.
 |---|---|
 | `allow.jsonl` | Real dev commands guard must NOT deny (FP ratchet, seeded from session history). |
 | `deny.jsonl` | Dangerous-floor commands guard must deny in both modes (FN ratchet). |
-| `escalation.jsonl` | Non-sudo privilege escalation (`su`, `doas`, `pkexec`, `runuser`, `setpriv`, `machinectl shell`). Elevated-risk tier: denied in every mode. |
-| `host_control.jsonl` | Host power / runlevel control (`reboot`, `shutdown`, `systemctl poweroff`, `init 0`, `systemctl isolate <power>.target`). Elevated-risk tier: denied in every mode. |
-| `registry.jsonl` | Package-registry / index redirection (`npm config set registry`, `pip config set global.index-url`). Elevated-risk tier: denied in every mode. |
+| `escalation.jsonl` | Non-sudo privilege escalation (`su`, `doas`, `pkexec`, `runuser`, `setpriv`, `machinectl shell`). Elevated-risk tier: denied in default and lockdown. |
+| `host_control.jsonl` | Host power / runlevel control (`reboot`, `shutdown`, `systemctl poweroff`, `init 0`, `systemctl isolate <power>.target`). Elevated-risk tier: denied in default and lockdown. |
+| `registry.jsonl` | Package-registry / index redirection (`npm config set registry`, `pip config set global.index-url`). Elevated-risk tier: denied in default and lockdown. |
 | `fs_attr.jsonl` | Filesystem-attribute tampering on sensitive paths (`chown`/`chgrp`/`chattr`/`setfacl`). Both-mode hard deny. |
 | `secret_egress.jsonl` | Credential-file network egress (`curl -T ~/.ssh/id_rsa`, `nc < key`). Both-mode hard deny. |
 | `crossexam.jsonl` | Adversarial cross-examination findings -- the default append target for `guard corpus add`. Grows append-only as new bypasses / FPs are found. |

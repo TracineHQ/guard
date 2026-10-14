@@ -2453,8 +2453,8 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         "``git tag/branch <name>`` creates a ref, ``git branch -d/-D/-m`` / "
         "``git tag -a/-d`` deletes or moves one, and ``git remote add/rename/"
         "set-url`` rewrites remote config. The bare subcommand only lists; the "
-        "flag or positional makes it a write. Denied in both interactive and "
-        "strict modes -- a local ref write should not run unattended or silently. "
+        "flag or positional makes it a write. Denied under enforce and lockdown, "
+        "since a local ref write should not run unattended or silently. "
         "Run the explicit write yourself, or override for a specific command if "
         "this is intentional."
     ),
@@ -2490,10 +2490,9 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         " flag."
     ),
     _SYNTH_ADMIN_UNKNOWN_FLAG_STRICT: (
-        "Unknown flag on admin CLI in strict mode. Unrecognized flags may"
-        " alter request destination, credentials, or output format in ways"
-        " guard cannot statically verify. Remove unknown flags or run"
-        " interactively."
+        "Unrecognized flags may alter request destination, credentials, or"
+        " output format in ways guard cannot statically verify. Remove the"
+        " unknown flags, or ask the user to run the command."
     ),
 }
 
@@ -5822,7 +5821,8 @@ def _format_deny_reason(rule_id: str, body: str) -> str:
     guidance = _AGENT_GUIDANCE_STRICT if lockdown else _AGENT_GUIDANCE_INTERACTIVE
     return (
         f"guard [permission_mode={mode}] denied: {rule_id}. {body}. "
-        f"Override: `guard allowlist allow-command {rule_id} '<command>' --reason '...'` "
+        f"Override: `guard allowlist allow-command --rule {rule_id} --command '<command>' "
+        "--reason '...'` "
         f"or `guard allowlist disable-rule {rule_id}`. {guidance}"
     )
 
@@ -6461,8 +6461,8 @@ def _pre_evaluate_dangerous(
             body = (
                 f"`{segment[:_SEGMENT_DISPLAY_TRUNC]}` contains a dangerous shell "
                 "construct ($(...), backticks, or process substitution). "
-                "These are exfil/RCE primitives and are denied in both "
-                "interactive and strict mode"
+                "These are exfil/RCE primitives and are denied under "
+                "enforce and lockdown"
             )
             deny = _deny(_format_deny_reason("bash.dangerous_construct", body))
             bypass = _maybe_allow_via_allowlist(
@@ -6598,7 +6598,7 @@ def _evaluate_strict(
         _log_local(command, "deny", reason)
         queue_denied_command(command)
         return result
-    reason = "All command segments are safe (strict mode)"
+    reason = "All command segments are safe (lockdown)"
     extra = _admin_unknown_flags_extra(segments)
     _log_local(command, "allow", reason, extra=extra)
     return _allow(reason)

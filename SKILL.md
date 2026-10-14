@@ -1,7 +1,7 @@
 ---
 name: guard
 description: Configure guard's safety hooks and explain what each hook catches — bash command validation (rm -rf, force-push, interpreter eval, shell wrappers, pipe-to-shell), git safety (-c config injection, core.hooksPath/attributesFile, destructive flags), credential scanning, commit-message rules, protected files, agent output, subagent scope.
-when_to_use: When the user asks to enable/disable a guard hook, change the decision log path, set advisory mode, troubleshoot guard's output, or asks "why did guard block X" / "what does <hook> catch".
+when_to_use: When the user asks to enable/disable a guard hook, change the decision log path, switch guard mode (enforce / shadow / off / lockdown), troubleshoot guard's output, or asks "why did guard block X" / "what does <hook> catch".
 ---
 
 # Guard configuration
@@ -58,7 +58,7 @@ the user, with the command or `guard allowlist` override they can run).
 for the per-user file). Every hook honors it.
 
 - `enforce` (default) -- deny what matches, pass the rest through.
-- `shadow` -- log would-be denies with `mode: "shadow"`, block nothing.
+- `shadow` -- log would-be denies with `mode: "shadow"`; only trust-root denies block.
 - `off` -- hooks go quiet, except edits to guard's own code and allowlist.
 - `lockdown` -- opt-in strict default-deny for driven or unattended agents.
   Any Bash command not on the safe-prefix allowlist is denied with a
@@ -116,8 +116,8 @@ Both files use the same JSON schema; the project file wins on per-rule conflicts
   "allow_commands": [
     {
       "rule": "guard.protected_files",
-      "command": "/repo/CLAUDE.md",
-      "reason": "intentional CLAUDE.md update for the rebrand task"
+      "command": "/repo/src/guard/registry.py",
+      "reason": "intentional registry update for the release"
     }
   ]
 }

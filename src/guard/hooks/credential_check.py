@@ -17,8 +17,6 @@ Tiers of detection (v1):
   WebFetch with ``file://``, Glob, Grep, MultiEdit, NotebookEdit
 - Tier 2: copy-source shadow — ``cp/mv/dd/install/rsync/scp/tar`` with a
   credential file as source
-- Tier 3: var indirection — reader head + ``$VAR``/``${VAR}`` arg (cannot
-  resolve statically, deny to be safe)
 - Tier 4: symlink resolution via ``Path.resolve()`` (already handled in
   ``_candidate_paths``)
 - Tier 6: heuristic match on filename keywords / sensitive extensions
@@ -30,7 +28,6 @@ utility is independent of the hook entry point.
 
 from __future__ import annotations
 
-import itertools
 import os
 import re
 import shlex
@@ -141,46 +138,6 @@ _HEURISTIC_EXTENSIONS: frozenset[str] = frozenset(
 # only a later read of the destination).
 _COPY_HEAD_VERBS: frozenset[str] = frozenset({"cp", "mv", "install", "rsync", "scp"})
 
-# Tier 3: reader heads where a $VAR / ${VAR} argument cannot be resolved
-# statically; denied because the variable may point at a credential file.
-_READER_HEAD_VERBS: frozenset[str] = frozenset(
-    {
-        "cat",
-        "head",
-        "tail",
-        "less",
-        "more",
-        "sed",
-        "awk",
-        "grep",
-        "rg",
-        "xxd",
-        "od",
-        "hexdump",
-        "strings",
-        "view",
-        "vim",
-        "vi",
-        "nano",
-        "emacs",
-        "bat",
-        "tee",
-    }
-)
-
-# Tier 3 helper: matches a bare ``$VAR``, ``${VAR}``, or a token starting with
-# either form followed by a path segment. We deny any of these because we
-# can't resolve the variable.
-_VAR_ARG_RE = re.compile(
-    r"(?:^|[^\\])(?:\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9])"
-)
-
-# awk field/builtin references (``$0``, ``$1``, ``$NF``, ``$NR`` ...) are NOT
-# shell variables — they're part of the awk program. Stripped before the
-# reader-var-arg check when the head verb is ``awk`` so they don't read as
-# credential-path indirection.
-_AWK_FIELD_RE = re.compile(r"\$(?:[0-9]+|NF|NR|FNR|FS|OFS|RS|ORS)\b")
-
 _DENY_REASON = (
     "Credential file access blocked. Touching credential material "
     "(AWS/SSH/.env/*.pem/*.key/etc.) puts secrets in the transcript. Let the "
@@ -193,13 +150,6 @@ _DENY_REASON_COPY = (
     "that needs them at the original path, or tell the user what you're "
     "setting up."
 )
-_DENY_REASON_VAR = (
-    "Reader command with a variable argument can't be checked statically. If "
-    "the variable expands to a credential file (e.g. $HOME/.aws/credentials), "
-    "the contents would leak into the transcript. Use a literal path."
-)
-
-
 # Write-class tools whose credential subject is the DESTINATION path, not paths
 # mentioned in the content body (see ``decide``).
 _WRITE_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
@@ -334,37 +284,6 @@ def _is_credential_copy_source(command: str) -> bool:
     return False
 
 
-def _is_reader_with_var_arg(command: str) -> bool:
-    """Tier 3: reader head + ``$VAR`` / ``${VAR}`` arg.
-
-    Returns True for commands like ``cat $P``, ``sed -i $CRED_PATH``,
-    ``head ${SECRET_FILE}``. We can't resolve the variable statically, so
-    deny: a false positive costs the agent a rewrite with a literal path, a
-    false negative leaks credentials.
-    """
-    if not command.strip():
-        return False
-    tokens = _tokenize(command)
-    if not tokens:
-        return False
-    head = token_basename(tokens[0])
-
-    # Stdin redirection: ``< $VAR`` is also a read.
-    has_stdin_var = any(
-        prev == "<" and _VAR_ARG_RE.search(tok) for prev, tok in itertools.pairwise(tokens)
-    )
-    if has_stdin_var:
-        return True
-
-    if head not in _READER_HEAD_VERBS:
-        return False
-    if head == "awk":
-        # Drop awk field refs ($0/$NF/...) before looking for shell variables,
-        # so ``awk '{print $1, $NF}' file`` isn't read as var indirection.
-        return any(_VAR_ARG_RE.search(_AWK_FIELD_RE.sub("", tok)) for tok in tokens[1:])
-    return any(_VAR_ARG_RE.search(tok) for tok in tokens[1:])
-
-
 def _hits_credential(path: str) -> bool:
     """Tier 1 + Tier 6: literal credential match or heuristic match."""
     return _path_is_credential(path) or _is_heuristic_credential(path)
@@ -382,7 +301,7 @@ def _hits_credential_strict(path: str) -> bool:
 
 
 def _decide_bash(command: str) -> dict[str, Any] | None:
-    """Bash-specific tiers: bare-name credential tokens, copy-source, var-indirection."""
+    """Bash-specific tiers: bare-name credential tokens and copy-source."""
     if not command:
         return None
     # Tokenize and run each token through the credential matcher — catches
@@ -395,8 +314,6 @@ def _decide_bash(command: str) -> dict[str, Any] | None:
             return emit_pretooluse_decision("deny", _DENY_REASON)
     if _is_credential_copy_source(command):
         return emit_pretooluse_decision("deny", _DENY_REASON_COPY)
-    if _is_reader_with_var_arg(command):
-        return emit_pretooluse_decision("deny", _DENY_REASON_VAR)
     return None
 
 
@@ -404,9 +321,9 @@ def decide(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any] | None:
     """Return a ``deny`` envelope when a credential file is being touched.
 
     Universal scanner: every path-like token in ``tool_input`` is extracted
-    and checked, regardless of ``tool_name``. Bash-specific tier-2 (copy
-    source) and tier-3 (variable indirection) logic still gates only on
-    ``Bash`` because their semantics are command-specific.
+    and checked, regardless of ``tool_name``. The Bash-specific tier-2
+    (copy source) check gates only on ``Bash`` because its semantics are
+    command-specific.
     """
     if not isinstance(tool_input, dict):
         return None

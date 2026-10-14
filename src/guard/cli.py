@@ -16,7 +16,7 @@ Subcommands:
   hook in-process; no log access, no subprocess. Accepts multiple commands.
 - ``guard corpus`` — adjudicate every fixture in ``tests/corpus/*.jsonl``
   through ``decide()`` in one process; exit 1 on any mismatch. The
-  whitelisted, strict-mode-safe test harness — agents run this instead of
+  whitelisted, lockdown-safe test harness — agents run this instead of
   spraying ad-hoc ``guard test`` strings. ``guard corpus add '<cmd>'
   --expect <d>`` appends one fixture row (into a bare ``tests/corpus`` file)
   and adjudicates it, so a found bypass becomes a permanent regression row.
@@ -397,7 +397,7 @@ def cmd_status() -> tuple[dict[str, Any], str]:
 
     mode_hint = {
         "enforce": "denies are surfaced and exit 2",
-        "shadow": "denies are logged with mode=shadow; pass-through to Claude Code",
+        "shadow": "denies are logged with mode=shadow, not enforced (trust root excepted)",
         "off": "hooks are short-circuited except guard's own trust root",
         "lockdown": "enforce plus bash default-deny and the extended protected-file list",
     }.get(allowlist.mode, "")
@@ -519,14 +519,17 @@ def cmd_healthcheck() -> tuple[dict[str, Any], str]:
         for cmd, mode, rule in _HEALTHCHECK_PROBES
     ]
     healthy = all(p["passed"] for p in probes)
+    # The probes ignore the user's config, so say what mode is actually live.
+    mode = load_allowlist().mode
     result: dict[str, Any] = {
         "healthy": healthy,
+        "mode": mode,
         "elapsed_ms": sum(p["elapsed_ms"] for p in probes),
         "probes": probes,
     }
     status_label = "OK" if healthy else "UNHEALTHY"
     summary = " ".join(f"{p['command']!r}={'ok' if p['passed'] else 'FAIL'}" for p in probes)
-    return result, f"guard healthcheck: {status_label} ({summary})\n"
+    return result, f"guard healthcheck: {status_label} ({summary}); your mode: {mode}\n"
 
 
 def cmd_noisy(  # noqa: PLR0913 -- argparse-derived filter ladder; refactoring to dataclass adds indirection
@@ -755,9 +758,9 @@ def _corpus_payload(report: CorpusReport) -> tuple[dict[str, Any], str]:
 def cmd_corpus() -> tuple[dict[str, Any], str]:
     """Adjudicate every fixture in ``tests/corpus/*.jsonl`` and report mismatches.
 
-    The whitelisted, strict-mode-safe harness: one process runs ``decide()`` over
+    The whitelisted, lockdown-safe harness: one process runs ``decide()`` over
     the whole fixture corpus, so agents stop spraying ad-hoc ``guard test '<cmd>'``
-    strings (blocked in strict mode, and lost the moment the shell call returns).
+    strings (blocked in lockdown, and lost the moment the shell call returns).
     A newly found bypass or false positive becomes a one-line fixture row picked
     up here and in CI. The caller sets the exit code from ``payload['ok']``.
     """

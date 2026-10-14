@@ -166,7 +166,9 @@ def hook(payload: dict[str, Any]) -> None:
         return  # Passthrough
 
     excerpt = tool_input.get("command" if tool_name == "Bash" else "file_path", "")
-    apply_decision(_HOOK_ID, payload, envelope, excerpt if isinstance(excerpt, str) else "")
+    excerpt = excerpt if isinstance(excerpt, str) else ""
+    # Not allowlist-overridable (the registry sets supports_disable_hook=False).
+    apply_decision(_HOOK_ID, payload, envelope, excerpt, overridable=False)
 
 
 if __name__ == "__main__":

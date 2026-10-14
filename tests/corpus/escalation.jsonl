@@ -1,5 +1,4 @@
 {"command": "su", "expected": "deny", "mode": "default", "source": "curated", "note": "bare su drops to a root shell"}
-{"command": "su", "expected": "deny", "mode": "lockdown", "source": "curated", "note": "unattended: elevated-risk tier denies under the same rule_id"}
 {"command": "su - root", "expected": "deny", "mode": "default", "source": "curated", "note": "login shell to root"}
 {"command": "doas reboot", "expected": "deny", "mode": "default", "source": "curated", "note": "doas privilege escalation"}
 {"command": "pkexec bash", "expected": "deny", "mode": "default", "source": "curated", "note": "pkexec to an interactive shell"}
@@ -17,15 +16,10 @@
 {"command": "setpriv --dump", "expected": "deny", "mode": "default", "source": "curated", "note": "setpriv is uniformly denied (rare escalation tool); even --dump introspection is denied"}
 {"command": "flock /tmp/lock sudo bash", "expected": "deny", "mode": "default", "source": "adversarial", "note": "H1: sudo+shell behind the flock exec-wrapper denies both-mode (bash.sudo_escalation)"}
 {"command": "doas -s", "expected": "deny", "mode": "default", "source": "adversarial", "note": "doas shell-drop (-s) denies; head in _ESCALATION_HEADS regardless of flag"}
-{"command": "doas -s", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "strict downgrade: doas escalation denies unattended under bash.escalation_shell (no strict doas row existed)"}
 {"command": "doas -u root bash", "expected": "deny", "mode": "default", "source": "adversarial", "note": "doas -u <user> shell-drop; head-based match fires regardless of the -u value flag"}
-{"command": "pkexec bash", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "lockdown counterpart of the fixture 'pkexec bash' row: same rule_id denies unattended"}
 {"command": "pkexec /bin/sh", "expected": "deny", "mode": "default", "source": "adversarial", "note": "pkexec to an absolute-path shell -- variant of the existing 'pkexec bash'"}
 {"command": "su -c /bin/bash", "expected": "deny", "mode": "default", "source": "adversarial", "note": "su -c command form still denies; head su matches regardless of args"}
-{"command": "su - root", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "strict downgrade of login-shell-to-root; no human to confirm in auto mode"}
-{"command": "runuser -l root", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "strict downgrade of the runuser login form; head runuser denies in both modes"}
 {"command": "runuser -u postgres -- psql", "expected": "deny", "mode": "default", "source": "adversarial", "note": "runuser -u <user> -- <cmd> run-as form denies even for a benign inner cmd: head-based, -- and inner not inspected"}
-{"command": "setpriv --reuid 0 --regid 0 --init-groups /bin/bash", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "strict downgrade of the interactive setpriv reuid-0 row: denies under bash.escalation_shell"}
 {"command": "machinectl shell", "expected": "deny", "mode": "default", "source": "adversarial", "note": "machinectl shell with no user/host still opens a host shell -- tokens[1]=='shell' is the trigger, not a user arg"}
 {"command": "machinectl shell user@mycontainer /bin/bash", "expected": "deny", "mode": "default", "source": "adversarial", "note": "machinectl shell into a named container with explicit shell path still denies"}
 {"command": "machinectl shell root@container", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "strict counterpart: machinectl container shell-drop denies under bash.escalation_shell when unattended"}
@@ -42,7 +36,6 @@
 {"command": "env FOO=bar pkexec bash", "expected": "deny", "mode": "default", "source": "adversarial", "note": "pkexec shell-drop behind an env K=V prefix that _candidate_forms strips before the matcher sees pkexec"}
 {"command": "nohup su -", "expected": "deny", "mode": "default", "source": "adversarial", "note": "su login shell behind the nohup plain-runner prefix -- runner-stripped, then escalation_shell"}
 {"command": "sudo -i", "expected": "deny", "mode": "default", "source": "adversarial", "note": "sudo -i opens a root login shell: both-mode hard deny via bash.sudo_escalation"}
-{"command": "sudo -i", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "sudo -i root login shell denies in strict mode too (both-mode floor, same rule_id)"}
 {"command": "sudo -s", "expected": "deny", "mode": "default", "source": "adversarial", "note": "sudo -s spawns a root shell: both-mode hard deny via bash.sudo_escalation"}
 {"command": "sudo --preserve-env=PATH bash", "expected": "deny", "mode": "default", "source": "adversarial", "note": "sudo --preserve-env=VALUE chain into a shell denies both-mode; the =VALUE form still trips startswith('--preserve-env')"}
 {"command": "sudo zsh", "expected": "deny", "mode": "default", "source": "adversarial", "note": "sudo into a non-bash DANGEROUS_SHELL_WRAPPER (zsh) is still sudo_escalation deny"}
@@ -52,7 +45,6 @@
 {"command": "chroot /mnt/root ls -la", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP: chroot wrapping a read command with a flag; peels to 'ls -la', no escalation tool inside"}
 {"command": "chroot /mnt/root cat /etc/hostname", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP: chroot wrapping a read command; inner cat is benign"}
 {"command": "bwrap --dev-bind / / su -", "expected": "deny", "mode": "default", "source": "adversarial", "note": "FIX: bwrap --dev-bind SRC DEST space-separated values now consumed; inner su - peels and fires escalation (was allow -- bind flag misaligned the peel)"}
-{"command": "bwrap --dev-bind / / su -", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "FIX: strict downgrades the peeled escalation to deny"}
 {"command": "bwrap --ro-bind / / su", "expected": "deny", "mode": "default", "source": "adversarial", "note": "FIX: --ro-bind 2-value peel exposes inner su"}
 {"command": "bwrap --bind /a /b su -l root", "expected": "deny", "mode": "default", "source": "adversarial", "note": "FIX: --bind SRC DEST then inner su escalation"}
 {"command": "bwrap --symlink /a /b doas sh", "expected": "deny", "mode": "default", "source": "adversarial", "note": "FIX: --symlink 2-value then inner doas escalation"}

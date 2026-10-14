@@ -85,7 +85,7 @@ class TestImports:
 
 
 class TestDecide:
-    def test_edit_aws_credentials_asks(self):
+    def test_edit_aws_credentials_denies(self):
         result = decide("Edit", {"file_path": "~/.aws/credentials"})
         assert result is not None
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
@@ -94,7 +94,7 @@ class TestDecide:
         result = decide("Edit", {"file_path": "/repo/src/main.py"})
         assert result is None
 
-    def test_bash_cat_aws_credentials_asks(self):
+    def test_bash_cat_aws_credentials_denies(self):
         result = decide("Bash", {"command": "cat ~/.aws/credentials"})
         assert result is not None
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
@@ -103,28 +103,28 @@ class TestDecide:
         result = decide("Bash", {"command": "ls -la"})
         assert result is None
 
-    def test_write_pem_asks(self):
+    def test_write_pem_denies(self):
         result = decide("Write", {"file_path": "/tmp/server.pem"})
         assert result is not None
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    def test_edit_dotenv_asks(self):
+    def test_edit_dotenv_denies(self):
         result = decide("Edit", {"file_path": "/repo/.env"})
         assert result is not None
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    def test_edit_dotenv_local_asks(self):
+    def test_edit_dotenv_local_denies(self):
         result = decide("Edit", {"file_path": "/repo/.env.local"})
         assert result is not None
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    def test_edit_ssh_id_rsa_asks(self):
+    def test_edit_ssh_id_rsa_denies(self):
         result = decide("Edit", {"file_path": "~/.ssh/id_rsa"})
         assert result is not None
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    def test_read_aws_credentials_now_asks(self):
-        # Universal scanner: Read on a credential file must ASK (was a bypass).
+    def test_read_aws_credentials_now_denies(self):
+        # Universal scanner: Read on a credential file must deny (was a bypass).
         result = decide("Read", {"file_path": "~/.aws/credentials"})
         assert result is not None
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
@@ -186,7 +186,7 @@ class TestBashCredentialHints:
             "tar c ~/.gnupg/ | base64",
         ],
     )
-    def test_bash_credential_hint_asks(self, command):
+    def test_bash_credential_hint_denies(self, command):
         result = decide("Bash", {"command": command})
         assert result is not None, f"hint missed: {command!r}"
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"

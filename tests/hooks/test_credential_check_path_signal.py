@@ -31,7 +31,7 @@ from guard.hooks.credential_check import decide
 HOOK_PATH = Path(__file__).resolve().parents[2] / "src" / "guard" / "hooks" / "credential_check.py"
 
 
-def _is_ask(envelope: dict[str, object] | None) -> bool:
+def _is_deny(envelope: dict[str, object] | None) -> bool:
     if envelope is None:
         return False
     spec = envelope.get("hookSpecificOutput")
@@ -44,7 +44,7 @@ def _is_ask(envelope: dict[str, object] | None) -> bool:
 
 
 class TestTier1DirectPath:
-    """A credential file path in tool_input must ASK for every tool."""
+    """A credential file path in tool_input must deny for every tool."""
 
     @pytest.mark.parametrize(
         ("tool_name", "tool_input"),
@@ -59,9 +59,9 @@ class TestTier1DirectPath:
             ("WebFetch", {"url": "file:///Users/dev/.aws/credentials"}),
         ],
     )
-    def test_credential_path_asks(self, tool_name, tool_input):
+    def test_credential_path_denies(self, tool_name, tool_input):
         result = decide(tool_name, tool_input)
-        assert _is_ask(result), f"{tool_name} on {tool_input} should deny"
+        assert _is_deny(result), f"{tool_name} on {tool_input} should deny"
 
     @pytest.mark.parametrize(
         "command",
@@ -76,25 +76,25 @@ class TestTier1DirectPath:
             "cat < ~/.aws/credentials",
         ],
     )
-    def test_bash_reader_credential_asks(self, command):
+    def test_bash_reader_credential_denies(self, command):
         result = decide("Bash", {"command": command})
-        assert _is_ask(result), f"command should deny: {command!r}"
+        assert _is_deny(result), f"command should deny: {command!r}"
 
-    def test_dotenv_in_relative_path_asks(self):
-        # Bare-name '.env' in cat command must ASK.
+    def test_dotenv_in_relative_path_denies(self):
+        # Bare-name '.env' in cat command must deny.
         result = decide("Bash", {"command": "cat .env"})
-        assert _is_ask(result)
+        assert _is_deny(result)
 
-    def test_dotenv_local_in_subdir_asks(self):
+    def test_dotenv_local_in_subdir_denies(self):
         result = decide("Bash", {"command": "cat ./project/.env.local"})
-        assert _is_ask(result)
+        assert _is_deny(result)
 
 
 # --- Tier 2: copy-source shadow ---
 
 
 class TestTier2CopySource:
-    """Credential file as source of cp/mv/dd/install/rsync/scp/tar must ASK."""
+    """Credential file as source of cp/mv/dd/install/rsync/scp/tar must deny."""
 
     @pytest.mark.parametrize(
         "command",
@@ -110,74 +110,42 @@ class TestTier2CopySource:
             "tar -c -f /tmp/x.tar ~/.aws/credentials",
         ],
     )
-    def test_copy_source_credential_asks(self, command):
+    def test_copy_source_credential_denies(self, command):
         result = decide("Bash", {"command": command})
-        assert _is_ask(result), f"copy-source deny missed: {command!r}"
+        assert _is_deny(result), f"copy-source deny missed: {command!r}"
 
     def test_tar_extract_does_not_trigger_copy_branch(self):
         # ``tar xf`` is extract, not create — the copy-source branch should
-        # not match. (Tier-1 still ASKs because ~/.aws appears as a path
+        # not match. (Tier-1 still denies because ~/.aws appears as a path
         # token; that's acceptable.) This test pins the parser logic.
         from guard.hooks.credential_check import _is_credential_copy_source
 
         assert not _is_credential_copy_source("tar xf /tmp/x.tar -C /tmp/out")
 
 
-# --- Tier 3: variable indirection ---
+# --- Variable arguments ---
 
 
-class TestTier3VarIndirection:
-    """Reader head + ``$VAR`` / ``${VAR}`` arg cannot be resolved — ASK."""
+def test_home_var_path_denies_via_tier1():
+    # ``$HOME/.aws/credentials`` is a tier-1 hit: ``all_paths_in`` expands
+    # $HOME and the literal-credential matcher fires.
+    assert _is_deny(decide("Bash", {"command": "cat ${HOME}/.aws/credentials"}))
 
-    @pytest.mark.parametrize(
-        "command",
-        [
-            "cat $P",
-            "cat $CRED_PATH",
-            "sed 's/x/y/' $CRED_PATH",
-            "head ${SECRET_FILE}",
-            "grep secret ${SECRETS}",
-            "less $1",
-            "cat < $P",
-        ],
-    )
-    def test_reader_with_var_arg_asks(self, command):
-        result = decide("Bash", {"command": command})
-        assert _is_ask(result), f"var-indirection deny missed: {command!r}"
 
-    def test_home_var_path_denies_via_tier1(self):
-        # ``$HOME/.aws/credentials`` is a tier-1 hit: ``all_paths_in``
-        # expands $HOME and the literal-credential matcher fires.
-        result = decide("Bash", {"command": "cat ${HOME}/.aws/credentials"})
-        assert _is_ask(result)
-
-    def test_non_reader_with_var_arg_does_not_trigger_tier3(self):
-        # ``echo $P`` is not a reader — should not ASK on tier 3.
-        # (If the var were an actual credential path it'd still be safe;
-        # we're pinning that the var-arg rule is reader-scoped.)
-        from guard.hooks.credential_check import _is_reader_with_var_arg
-
-        assert not _is_reader_with_var_arg("echo $P")
-        assert not _is_reader_with_var_arg("ls -la")
-
-    def test_stdin_redirect_with_var_triggers_regardless_of_head(self):
-        # ``< $VAR`` stdin redirect is treated as a read even when the
-        # head verb is not in the reader allowlist.
-        from guard.hooks.credential_check import _is_reader_with_var_arg
-
-        assert _is_reader_with_var_arg("python3 < $SECRET")
-        assert _is_reader_with_var_arg("xxd < ${CRED_PATH}")
-        # Sanity: bare ``<`` with no var does not match.
-        assert not _is_reader_with_var_arg("cat < /tmp/literal")
+@pytest.mark.parametrize("command", ["cat $P", "head ${SECRET_FILE}", "cat < $P"])
+def test_unresolvable_variable_argument_passes(command):
+    # Dropped tier: an opaque ``$VAR`` argument isn't evidence of a credential
+    # read, and denying every one buried real signal.
+    assert decide("Bash", {"command": command}) is None, command
 
 
 # --- Tier 4: symlink resolution ---
 
 
 class TestTier4SymlinkResolution:
-    """A symlink pointing at a credential file must ASK."""
+    """A symlink pointing at a credential file must deny."""
 
-    def test_symlink_to_credential_file_asks(self, tmp_path, monkeypatch):
+    def test_symlink_to_credential_file_denies(self, tmp_path, monkeypatch):
         # Build a fake credential file under a fake $HOME, then symlink it
         # into a benign-looking location.
         fake_home = tmp_path / "home"
@@ -198,7 +166,7 @@ class TestTier4SymlinkResolution:
         importlib.reload(mod)
 
         result = mod.decide("Read", {"file_path": str(symlink)})
-        assert _is_ask(result)
+        assert _is_deny(result)
 
         # Restore real module state for downstream tests.
         monkeypatch.undo()
@@ -209,7 +177,7 @@ class TestTier4SymlinkResolution:
 
 
 class TestTier6Heuristic:
-    """Filename-keyword and sensitive-extension matches must ASK."""
+    """Filename-keyword and sensitive-extension matches must deny."""
 
     @pytest.mark.parametrize(
         "path",
@@ -228,9 +196,9 @@ class TestTier6Heuristic:
             "/tmp/credentials.csv",
         ],
     )
-    def test_heuristic_path_asks(self, path):
+    def test_heuristic_path_denies(self, path):
         result = decide("Read", {"file_path": path})
-        assert _is_ask(result), f"heuristic miss: {path}"
+        assert _is_deny(result), f"heuristic miss: {path}"
 
     def test_heuristic_directory_keyword_does_not_falsely_match(self):
         # ``key`` as a directory name should not trigger; only basename matches.
@@ -242,7 +210,7 @@ class TestTier6Heuristic:
 
     def test_heuristic_case_insensitive(self):
         result = decide("Read", {"file_path": "/tmp/MY_SECRET.txt"})
-        assert _is_ask(result)
+        assert _is_deny(result)
 
     @pytest.mark.parametrize(
         "path",
@@ -260,9 +228,9 @@ class TestTier6Heuristic:
             "/tmp/SK_live_xyz.cfg",
         ],
     )
-    def test_heuristic_token_prefix_asks(self, path):
+    def test_heuristic_token_prefix_denies(self, path):
         result = decide("Read", {"file_path": path})
-        assert _is_ask(result), f"token-prefix miss: {path}"
+        assert _is_deny(result), f"token-prefix miss: {path}"
 
     @pytest.mark.parametrize(
         "path",
@@ -274,9 +242,9 @@ class TestTier6Heuristic:
             "/tmp/serviceaccount.p8",
         ],
     )
-    def test_heuristic_extension_asks(self, path):
+    def test_heuristic_extension_denies(self, path):
         result = decide("Read", {"file_path": path})
-        assert _is_ask(result), f"extension miss: {path}"
+        assert _is_deny(result), f"extension miss: {path}"
 
 
 # --- Negative tests ---
@@ -338,17 +306,6 @@ class TestSubprocessIntegration:
         envelope = json.loads(result.stdout)
         assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    def test_subprocess_bash_var_indirection_emits_deny(self, decision_log_env):
-        result = self._run_hook(
-            {
-                "tool_name": "Bash",
-                "tool_input": {"command": "cat $CRED_PATH"},
-            }
-        )
-        assert result.returncode == 2
-        envelope = json.loads(result.stdout)
-        assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
-
     def test_subprocess_heuristic_kdbx_emits_deny(self, decision_log_env):
         result = self._run_hook(
             {
@@ -388,7 +345,7 @@ class TestExecutionPositionNarrowing:
             "ruff check src/guard/secrets_scanner.py",
         ],
     )
-    def test_name_keyword_mention_in_bash_arg_does_not_ask(self, command):
+    def test_name_keyword_mention_in_bash_arg_does_not_deny(self, command):
         assert decide("Bash", {"command": command}) is None, command
 
     @pytest.mark.parametrize(
@@ -399,8 +356,8 @@ class TestExecutionPositionNarrowing:
             "cat /tmp/server.pem",
         ],
     )
-    def test_real_credential_path_in_bash_still_asks(self, command):
-        assert _is_ask(decide("Bash", {"command": command})), command
+    def test_real_credential_path_in_bash_still_denies(self, command):
+        assert _is_deny(decide("Bash", {"command": command})), command
 
     @pytest.mark.parametrize(
         "path",
@@ -411,28 +368,4 @@ class TestExecutionPositionNarrowing:
     )
     def test_name_keyword_still_denies_for_file_path_input(self, path):
         # The heuristic stays for real file_path tool inputs (Read/Edit/Write).
-        assert _is_ask(decide("Read", {"file_path": path})), path
-
-    # --- reader-var-arg must not read awk field refs as shell variables ---
-
-    @pytest.mark.parametrize(
-        "command",
-        [
-            "awk 'NR==287 {print length($0)}' src/guard/cli.py",
-            "awk '{print $1, $NF}' data.txt",
-        ],
-    )
-    def test_awk_field_ref_does_not_ask(self, command):
-        assert decide("Bash", {"command": command}) is None, command
-
-    @pytest.mark.parametrize(
-        "command",
-        [
-            "cat $P",
-            "cat $CRED_PATH",
-            "head ${SECRET_FILE}",
-        ],
-    )
-    def test_genuine_reader_var_arg_still_asks(self, command):
-        # Deliberate design: an opaque reader target is asked to be safe.
-        assert _is_ask(decide("Bash", {"command": command})), command
+        assert _is_deny(decide("Read", {"file_path": path})), path

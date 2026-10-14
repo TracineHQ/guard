@@ -3,9 +3,10 @@
 """PreToolUse hook: deny agent writes to guard's trust root.
 
 Matches write-shaped tool calls (``Edit`` / ``Write`` / ``MultiEdit`` /
-``NotebookEdit`` paths, Bash write targets, path tokens in other tools)
-against protected path patterns. A match is denied with a reason that tells
-the agent to take the change to the user. Read-only tools never match.
+``NotebookEdit`` paths and Bash write targets) against protected path
+patterns. ``guard allowlist`` / ``guard mode`` writes
+count as allowlist writes. A match is denied with a reason that tells the
+agent to take the change to the user. Other tools never match.
 
 The default list is guard's own trust root: its hook code, registry,
 allowlist and subagent scope file. ``guard mode lockdown`` adds git-exec,
@@ -25,7 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from guard._safe_io import safe_read_text_capped
-from guard._utils import all_paths_in, emit_pretooluse_decision, safe_main
+from guard._utils import emit_pretooluse_decision, safe_main
 from guard.allowlist import apply_decision, load_allowlist
 
 if TYPE_CHECKING:
@@ -299,33 +300,51 @@ def is_protected_parent_dir(dir_path: str, patterns: Sequence[str] | None = None
 # Bash redirect / file-write commands and their target-extracting regex / token
 # index. Used by ``bash_write_targets`` as a best-effort second line of
 # defense — the primary path is the Edit/Write tool guard above.
-_BASH_REDIRECT_RE = re.compile(r"(?:^|\s)>>?\s*(\S+)")
+_BASH_REDIRECT_RE = re.compile(r"(?:^|[\s&\d])>>?\|?\s*(\S+)")
 _BASH_DD_OF_RE = re.compile(r"(?:^|\s)of=(\S+)")
 
 
-# Shell control operators that end one command and start the next. Tokens
-# are split on these before the per-command extractors run, so ``sed -i x a
-# && cat b`` doesn't read ``b`` as a ``sed`` operand.
-_CONTROL_OPERATORS: frozenset[str] = frozenset({"&&", "||", "|", "|&", "&", ";"})
+def _split_commands(command: str) -> list[list[str]]:
+    r"""Tokenize ``command`` one command at a time, splitting at unquoted ``; | & newline``.
 
-
-def _split_commands(tokens: list[str]) -> list[list[str]]:
-    """Split a token stream into per-command token lists at control operators."""
-    commands: list[list[str]] = [[]]
-    for tok in tokens:
-        if tok in _CONTROL_OPERATORS:
-            commands.append([])
-        else:
-            commands[-1].append(tok)
-    return [c for c in commands if c]
+    Splitting the raw string (not shlex tokens) keeps a quoted ``';'`` or an
+    escaped ``\;`` as an operand and still splits an unspaced ``a;b``. The
+    ``&`` and ``|`` in ``&>``, ``>&`` and ``>|`` are redirects, not operators.
+    Raises ``ValueError`` on unbalanced quotes, like ``shlex.split``.
+    """
+    segments: list[str] = []
+    start = 0
+    quote = ""
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        prev = command[i - 1] if i else ""
+        nxt = command[i + 1 : i + 2]
+        if ch == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote:
+            quote = "" if ch == quote else quote
+        elif ch in "'\"":
+            quote = ch
+        elif (
+            ch in ";\n"
+            or (ch == "|" and prev != ">")
+            or (ch == "&" and prev not in "<>" and nxt != ">")
+        ):
+            segments.append(command[start:i])
+            start = i + 1
+        i += 1
+    segments.append(command[start:])
+    return [tokens for seg in segments if (tokens := shlex.split(seg))]
 
 
 def bash_write_targets(command: str, patterns: Sequence[str] | None = None) -> list[str]:
     """Return likely write-target paths from a bash command.
 
-    Best-effort: scans for output redirects (``>``, ``>>``), ``tee``,
-    ``cp``, ``mv``, ``ln -sf``, ``install``, and ``dd of=`` targets, plus
-    in-place editor flags (``sed -i``, ``perl -i``, ``awk -i inplace``).
+    Best-effort: scans for output redirects (``>``, ``>>``, ``>|``, ``&>``),
+    ``tee``, ``cp``, ``mv``, ``ln -sf``, ``install``, and ``dd of=`` targets,
+    plus in-place editor flags (``sed -i``, ``perl -i``, ``awk -i inplace``).
     Each command between control operators is scanned on its own.
 
     ``patterns`` is the protected list the interpreter-eval scan looks for
@@ -338,10 +357,10 @@ def bash_write_targets(command: str, patterns: Sequence[str] | None = None) -> l
     targets.extend(_BASH_REDIRECT_RE.findall(command))
     targets.extend(_BASH_DD_OF_RE.findall(command))
     try:
-        tokens = shlex.split(command)
+        commands = _split_commands(command)
     except ValueError:
         return targets
-    for cmd_tokens in _split_commands(tokens):
+    for cmd_tokens in commands:
         targets.extend(_command_write_targets(cmd_tokens, command, patterns))
     return targets
 
@@ -710,7 +729,7 @@ _EVAL_BODY_OVERFLOW_SENTINEL = "guard/_utils.py"
 _EVAL_WRITE_INTENT_RE = re.compile(
     r"['\"][rbt]*[wax+][rbt+]*['\"]|>|write|append|unlink|remove|rename|replace|rmtree|copy|"
     r"move|touch|truncate|symlink|chmod|O_(?:WRONLY|RDWR|CREAT)|system|exec|spawn|popen|"
-    r"subprocess|eval|compile|__import__|FileUtils|`"
+    r"subprocess|eval|compile|__import__|FileUtils|`|delete|put_contents|\+<|\b(?:cp|rm)(?:Sync)?\b"
 )
 
 
@@ -758,65 +777,53 @@ def _interpreter_eval_targets(
     return out
 
 
+# ``guard allowlist <verb>`` and ``guard mode <mode>`` rewrite the allowlist
+# through guard's own CLI, so they count as a write to it.
+_GUARD_ALLOWLIST_FILE = ".claude/guard/allowlist.json"
+_GUARD_ALLOWLIST_WRITES: frozenset[str] = frozenset(
+    {"disable-rule", "enable-rule", "allow-command", "remove-command"}
+)
+
+
+def _guard_cli_writes_allowlist(tokens: list[str]) -> bool:
+    """Return True for a ``guard allowlist <write>`` or ``guard mode <mode>`` command."""
+    for i, tok in enumerate(tokens):
+        if tok.rsplit("/", 1)[-1] != "guard":
+            continue
+        args = [t for t in tokens[i + 1 :] if not t.startswith("-")]
+        if args[:1] == ["allowlist"]:
+            return len(args) > 1 and args[1] in _GUARD_ALLOWLIST_WRITES
+        if args[:1] == ["mode"]:
+            return len(args) > 1
+    return False
+
+
 def _bash_first_protected_match(command: str, patterns: Sequence[str]) -> str | None:
     """Return the first protected pattern matched by a bash write target."""
     for target in bash_write_targets(command, patterns):
         matched = is_protected(target, patterns)
         if matched is not None:
             return matched
-
-    # Tar extract-dir is a directory write target — check whether it sits
-    # anywhere on a protected file's directory chain (an extraction there
-    # could overwrite the protected file).
     try:
-        tokens = shlex.split(command)
+        commands = _split_commands(command)
     except ValueError:
-        tokens = []
-    for i, tok in enumerate(tokens):
-        head = tok.rsplit("/", 1)[-1]
-        if head != "tar":
-            continue
-        extract_dir = _tar_extract_dir(tokens[i + 1 :])
-        if extract_dir is None:
-            continue
-        matched = is_protected_parent_dir(extract_dir, patterns)
-        if matched is not None:
-            return matched
-    return None
-
-
-def _fallthrough_first_protected_match(
-    tool_input: dict[str, Any], patterns: Sequence[str]
-) -> str | None:
-    """Scan every path-like token in ``tool_input`` against ``is_protected``.
-
-    Defense-in-depth: any write-capable tool we don't have an explicit
-    handler for is run through the universal path scanner. If a future tool
-    (or an existing one invoked with an unexpected payload shape) targets a
-    protected file, we deny rather than miss it.
-    """
-    for token in all_paths_in(tool_input):
-        matched = is_protected(token, patterns)
-        if matched is not None:
-            return matched
+        commands = []
+    for tokens in commands:
+        if _guard_cli_writes_allowlist(tokens):
+            return _GUARD_ALLOWLIST_FILE
+        # Tar extract-dir is a directory write target: an extraction anywhere
+        # on a protected file's directory chain could overwrite it.
+        for i, tok in enumerate(tokens):
+            if tok.rsplit("/", 1)[-1] != "tar":
+                continue
+            extract_dir = _tar_extract_dir(tokens[i + 1 :])
+            matched = is_protected_parent_dir(extract_dir or "", patterns)
+            if matched is not None:
+                return matched
     return None
 
 
 _FILE_PATH_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
-
-# Tools that never write a file themselves. Reading guard's code or config
-# is harmless, and a subagent prompt that names a protected path isn't a
-# write: the subagent's own tool calls pass through this hook.
-_NON_WRITE_TOOLS: frozenset[str] = frozenset(
-    {"Read", "Grep", "Glob", "LS", "NotebookRead", "WebFetch", "WebSearch", "Task", "Agent"}
-)
-
-
-def _excerpt_for_fallthrough(tool_input: dict[str, Any]) -> str:
-    """Return a short, human-readable excerpt for a fallthrough match."""
-    for token in all_paths_in(tool_input):
-        return token
-    return ""
 
 
 def _match_for_tool(
@@ -828,19 +835,12 @@ def _match_for_tool(
     when nothing protected is written; ``excerpt`` is the human-readable
     string used in audit-log records.
 
-    Four cases:
-
-    * Read-only tools (``_NON_WRITE_TOOLS``) never match.
-    * ``Write`` / ``Edit`` / ``MultiEdit`` / ``NotebookEdit`` — pull the
-      ``file_path`` (or ``notebook_path``) and run ``is_protected``.
-    * ``Bash`` — extract write targets from the command and run the bash
-      first-match scanner.
-    * Anything else — defence-in-depth scan via
-      ``_fallthrough_first_protected_match`` over every path-like token in
-      the payload.
+    * ``Write`` / ``Edit`` / ``MultiEdit`` / ``NotebookEdit``: run
+      ``is_protected`` on the ``file_path`` (or ``notebook_path``).
+    * ``Bash``: extract write targets from the command.
+    * Everything else (``Read``, ``Grep``, ``Agent``, ``AskUserQuestion``,
+      ...) never writes a file itself, so naming a protected path is fine.
     """
-    if tool_name in _NON_WRITE_TOOLS:
-        return None, ""
     if tool_name in _FILE_PATH_TOOLS:
         # NotebookEdit uses ``notebook_path``; the others use ``file_path``.
         target = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
@@ -850,9 +850,7 @@ def _match_for_tool(
         command = tool_input.get("command", "")
         command = command if isinstance(command, str) else ""
         return _bash_first_protected_match(command, patterns), command
-    # Defence-in-depth: any other tool shape gets the universal path scanner.
-    matched = _fallthrough_first_protected_match(tool_input, patterns)
-    return matched, _excerpt_for_fallthrough(tool_input) if matched else ""
+    return None, ""
 
 
 _TELL_THE_USER = "Don't retry or route around it. Tell the user what you want to change and why"
@@ -863,15 +861,17 @@ def deny_reason(matched: str) -> str:
     if matched in _UN_OVERRIDABLE_PATTERNS:
         return (
             f"Protected file: {matched}. The allowlist decides what guard lets "
-            f"through, so agents never edit it. {_TELL_THE_USER}; they can add "
-            "the override with `guard allowlist`."
+            "through, so agents never change it, by editing the file or by "
+            f"running `guard allowlist` or `guard mode`. {_TELL_THE_USER}; they "
+            "can run the guard command themselves with `! guard ...`."
         )
     if matched in PROTECTED_PATTERNS:
         return (
             f"Protected file: {matched}. guard blocks agent edits to its own code "
             "and subagent scope so a session can't rewrite its own guardrails. "
             f"{_TELL_THE_USER}; they can make the edit, or allow it with "
-            f"`guard allowlist allow-command {_HOOK_ID} '<path>' --reason '...'`."
+            f"`guard allowlist allow-command --rule {_HOOK_ID} "
+            "--command '<path or exact command>' --reason '...'`."
         )
     if matched in LOCKDOWN_PATTERNS:
         return (
@@ -891,11 +891,9 @@ def decide(
 ) -> dict[str, Any] | None:
     """Return a steering ``deny`` envelope when a protected path is written.
 
-    Pure decision logic — no logging, no allowlist consultation. Both
-    ``hook()`` (production entry, orchestrates logging + allowlist + guard
-    mode) and the registry adapter (``guard test``, no side effects) call
-    this. Splitting the match logic out of ``hook()`` is what stops the two
-    from drifting.
+    Pure decision logic for the registry adapter (``guard test``): no
+    logging, no allowlist, ``enforce`` patterns unless ``lockdown``.
+    ``hook()`` shares ``_match_for_tool`` so the two can't drift.
     """
     patterns = _effective_patterns(mode="lockdown" if lockdown else "enforce")
     matched, _ = _match_for_tool(tool_name, tool_input, patterns)
@@ -908,7 +906,7 @@ def hook(payload: dict[str, Any]) -> None:
     """Top-level hook entry point."""
     tool_name = payload.get("tool_name", "")
     tool_input = payload.get("tool_input", {}) or {}
-    if not isinstance(tool_input, dict):
+    if not isinstance(tool_name, str) or not isinstance(tool_input, dict):
         return
     patterns = _effective_patterns(mode=load_allowlist().mode)
     matched, excerpt = _match_for_tool(tool_name, tool_input, patterns)

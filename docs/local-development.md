@@ -14,8 +14,7 @@ install step, no binary.
 The diagnostic CLI is a separate entry point (`guard = "guard.cli:main"` in
 `pyproject.toml`). It is NOT installed by default. `uv sync` only puts it in
 `.venv/bin/guard`, which is not on `PATH` -- and its absolute path is not a
-guard-recognized invocation, so a strict (`permission_mode=auto`) session
-denies it.
+guard-recognized invocation, so a `guard mode lockdown` session denies it.
 
 guard's bash matcher whitelists `guard corpus`, `guard status`, etc. as
 read-only subcommands, but only for the bare `guard` head (or `uv run guard` /

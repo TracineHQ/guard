@@ -1,5 +1,4 @@
 {"command": "reboot", "expected": "deny", "mode": "default", "source": "curated", "note": "host power control"}
-{"command": "reboot", "expected": "deny", "mode": "lockdown", "source": "curated", "note": "unattended: elevated-risk tier denies under the same rule_id"}
 {"command": "shutdown -h now", "expected": "deny", "mode": "default", "source": "curated", "note": "host shutdown"}
 {"command": "poweroff", "expected": "deny", "mode": "default", "source": "curated", "note": "host power off"}
 {"command": "halt", "expected": "deny", "mode": "default", "source": "curated", "note": "host halt"}
@@ -36,10 +35,7 @@
 {"command": "chroot / reboot", "expected": "deny", "mode": "default", "source": "adversarial", "note": "exec-wrapper peel: chroot <newroot> positional stripped, inner reboot fires"}
 {"command": "stdbuf -o0 poweroff", "expected": "deny", "mode": "default", "source": "adversarial", "note": "exec-wrapper peel: stdbuf flags stripped, inner poweroff fires"}
 {"command": "runuser -u root -- reboot", "expected": "deny", "mode": "default", "source": "adversarial", "note": "exec-wrapper peel: runuser -u <user> -- separator, inner reboot fires"}
-{"command": "systemctl isolate poweroff.target", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "strict: isolate poweroff.target elevated-risk tier denies in lockdown (complements default-mode row)"}
-{"command": "systemctl reboot", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "strict: systemctl power verb denies in lockdown (complements default-mode row)"}
 {"command": "sudo poweroff", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "strict: sudo-peeled poweroff denies in lockdown"}
-{"command": "shutdown -h now", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "strict: shutdown elevated-risk tier denies in lockdown (complements default-mode row)"}
 {"command": "systemctl status sshd", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: status query is read-only, not host control"}
 {"command": "systemctl list-units --type=service", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: listing units is read-only"}
 {"command": "systemctl is-active nginx", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: is-active is a read-only state query"}
@@ -50,6 +46,4 @@
 {"command": "systemctl reboot --help", "expected": "deny", "mode": "default", "source": "adversarial", "note": "edge: --help on power verb still fires since 'reboot' token is present in rest (actual behavior, no help exception)"}
 {"command": "echo reboot the server", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: 'reboot' as echo argument, head is echo not a control verb"}
 {"command": "git commit -m \"add reboot handler\"", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: power verbs inside a commit message must not fire"}
-{"command": "systemctl isolate halt.target", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "strict: isolate halt.target elevated-risk tier denies in lockdown"}
 {"command": "openrc-shutdown -p now", "expected": "deny", "mode": "default", "source": "adversarial", "note": "TH-1/openrc: openrc-shutdown powers off the host (OpenRC/Alpine/Gentoo) -- host-control ask tier"}
-{"command": "openrc-shutdown -p now", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "TH-1/openrc: strict downgrades host-control to deny"}

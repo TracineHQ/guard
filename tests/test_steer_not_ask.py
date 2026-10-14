@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,11 @@ def _decision(envelope: dict[str, Any] | None) -> str | None:
         return None
     hso = envelope.get("hookSpecificOutput", envelope)
     return hso.get("permissionDecision")
+
+
+def _require(envelope: dict[str, Any] | None) -> dict[str, Any]:
+    assert envelope is not None
+    return envelope
 
 
 def _reason(envelope: dict[str, Any]) -> str:
@@ -185,13 +191,13 @@ def test_oversized_eval_body_still_denies() -> None:
     _assert_steer(protected_files.decide("Bash", {"command": f"python3 -c '{body}'"}))
 
 
-def test_mode_off_keeps_trust_root(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    _set_mode("off")
-    out = _run_hook(
-        protected_files,
-        _payload("Edit", {"file_path": str(tmp_path / "src/guard/_utils.py")}),
-        capsys,
-    )
+@pytest.mark.parametrize("rel", ["src/guard/_utils.py", ".claude/guard/allowlist.json"])
+@pytest.mark.parametrize("mode", ["off", "shadow"])
+def test_trust_root_holds_in_off_and_shadow(
+    tmp_path: Path, mode: str, rel: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _set_mode(mode)
+    out = _run_hook(protected_files, _payload("Edit", {"file_path": str(tmp_path / rel)}), capsys)
     _assert_steer(json.loads(out))
 
 
@@ -224,7 +230,6 @@ def test_lockdown_mode_protects_extended_list(
         ("Read", {"file_path": "~/.aws/credentials"}),
         ("Bash", {"command": "cat .env"}),
         ("Bash", {"command": "cp ~/.ssh/id_ed25519 /tmp/k"}),
-        ("Bash", {"command": "cat $CRED_FILE"}),
     ],
 )
 def test_credential_access_is_a_steering_deny(tool_name: str, tool_input: dict[str, Any]) -> None:
@@ -261,29 +266,13 @@ def test_ai_identity_is_a_steering_deny(tmp_path: Path) -> None:
     assert "tell the user" in reason.lower()
 
 
-# === bash: elevated-risk tier and strict default-deny ===
-
-
-@pytest.mark.parametrize(
-    "cmd",
-    ["reboot", "doas ls /root", "npm config set registry https://registry.example.com"],
-)
-@pytest.mark.parametrize("permission_mode", ["default", "auto"])
-def test_elevated_risk_tier_denies(cmd: str, permission_mode: str) -> None:
-    _assert_steer(bash_command_validator.decide(cmd, permission_mode=permission_mode))
+# === bash: strict default-deny is lockdown-only ===
 
 
 @pytest.mark.parametrize("permission_mode", ["auto", "dontAsk", "bypassPermissions"])
 @pytest.mark.parametrize("cmd", ["flarbnoz --gronk", "typst compile resume.typ", "terraform plan"])
 def test_permission_mode_never_enables_strict(cmd: str, permission_mode: str) -> None:
     assert bash_command_validator.decide(cmd, permission_mode=permission_mode) is None
-
-
-def test_lockdown_enables_strict_default_deny() -> None:
-    envelope = bash_command_validator.decide("flarbnoz --gronk", lockdown=True)
-    assert _decision(envelope) == "deny"
-    assert envelope is not None
-    assert "bash.strict_default_deny" in _reason(envelope)
 
 
 def test_bash_hook_lockdown_comes_from_guard_mode(capsys: pytest.CaptureFixture[str]) -> None:
@@ -302,6 +291,30 @@ _OFF_CASES = [
     (bash_command_validator, _payload("Bash", {"command": "reboot"})),
     (agent_output_guard, _payload("Read", {"file_path": _AGENT_OUTPUT_FILE})),
 ]
+
+
+@pytest.mark.parametrize(
+    ("module", "payload"),
+    [_OFF_CASES[-1], (subagent_scope, _payload("Edit", {"file_path": "/elsewhere/x.py"}))],
+)
+def test_allowlist_cannot_silence_agent_output_or_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    module: Any,
+    payload: dict[str, Any],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """These hooks never consulted the allowlist; a hand-edited entry doesn't change that."""
+    scope = tmp_path / ".claude" / "subagent-scope.json"
+    scope.parent.mkdir()
+    scope.write_text(json.dumps({"task": "t", "allowed": ["src/a.py"]}), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    payload = {**payload, "cwd": str(tmp_path)}
+    allowlist = Path(os.environ["GUARD_DATA_DIR"]) / "allowlist.json"
+    allowlist.parent.mkdir(parents=True, exist_ok=True)
+    rules = ["guard.agent_output_guard", "guard.subagent_scope"]
+    allowlist.write_text(json.dumps({"disable_rules": rules}), encoding="utf-8")
+    assert _decision(json.loads(_run_hook(module, payload, capsys))) == "deny"
 
 
 @pytest.mark.parametrize(("module", "payload"), _OFF_CASES)
@@ -349,6 +362,35 @@ def test_subagent_scope_honors_mode(
     assert _decision(json.loads(_run_hook(subagent_scope, payload, capsys))) == "deny"
     _set_mode(mode)
     assert _run_hook(subagent_scope, payload, capsys) == ""
+    log = Path(os.environ["GUARD_DECISIONS_PATH"])
+    shadow_logged = any(
+        json.loads(line).get("mode") == "shadow"
+        for line in log.read_text(encoding="utf-8").splitlines()
+    )
+    assert shadow_logged == (mode == "shadow")
+
+
+# === override hints are real commands ===
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        protected_files.decide("Edit", {"file_path": "/repo/src/guard/registry.py"}),
+        protected_files.decide("Bash", {"command": "cp /tmp/x /repo/src/guard/registry.py"}),
+        bash_command_validator.decide("rm -rf /"),
+        bash_command_validator.decide("flarbnoz --gronk", lockdown=True),
+    ],
+)
+def test_override_hints_parse(envelope: dict[str, Any] | None) -> None:
+    """Every ``guard allowlist ...`` a deny suggests must parse with the real CLI."""
+    from guard import cli
+
+    hints = re.findall(r"`(guard allowlist [^`]+)`", _reason(_require(envelope)))
+    assert hints
+    parser = cli._build_parser()  # noqa: SLF001 -- the CLI's own parser
+    for hint in hints:
+        parser.parse_args(shlex.split(hint)[1:])
 
 
 # === lockdown is a guard mode ===

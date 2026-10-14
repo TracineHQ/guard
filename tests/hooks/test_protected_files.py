@@ -42,9 +42,6 @@ class TestIsProtected:
             "/Users/dev/develop/myproject/src/main.py",
             "",
             "/some/path/not_hooks/command_registry.py",
-            "/Users/x/.claude/settings.json",
-            "/Users/x/.claude/settings.local.json",
-            "/repo/CLAUDE.md",
         ],
     )
     def test_no_match_by_default(self, path: str) -> None:
@@ -126,8 +123,6 @@ _WRITE_SHAPES: list[tuple[str, dict[str, Any], bool]] = [
     ("MultiEdit", {"file_path": "/repo/src/guard/hooks/protected_files.py"}, True),
     ("NotebookEdit", {"notebook_path": "/repo/src/guard/registry.py"}, True),
     ("Edit", {"file_path": "/repo/.claude/subagent-scope.json"}, True),
-    ("Read", {"file_path": "/repo/hooks/command_registry.py"}, False),
-    ("Glob", {"pattern": "/repo/src/guard/hooks/protected_files.py"}, False),
     ("Bash", {"command": "cat hooks/_hook_utils.py"}, False),
     ("Bash", {"command": "ls /tmp"}, False),
     ("Bash", {"command": "echo x > /repo/src/guard/hooks/credential_check.py"}, True),
@@ -145,6 +140,44 @@ _WRITE_SHAPES: list[tuple[str, dict[str, Any], bool]] = [
     ("Bash", {"command": "tar -xf /tmp/x.tar -C /tmp/extract"}, False),
     # ``tar c`` reads, it doesn't extract.
     ("Bash", {"command": f"tar -cf /tmp/x.tar -C {_GUARD}/hooks/ ."}, False),
+    # A quoted operator is an operand, not a command boundary.
+    ("Bash", {"command": f"echo x | tee ';' {_GUARD}/_utils.py"}, True),
+    ("Bash", {"command": f"echo x | tee '&&' {_GUARD}/_utils.py"}, True),
+    ("Bash", {"command": f"sed -i s/a/b/ ';' {_GUARD}/_utils.py"}, True),
+    ("Bash", {"command": f"find /x -exec true {{}} \\; -fprint {_GUARD}/_utils.py"}, True),
+    # Redirect spellings that aren't a bare ``>``.
+    ("Bash", {"command": f"echo x >| {_GUARD}/_utils.py"}, True),
+    ("Bash", {"command": f"echo x &> {_GUARD}/_utils.py"}, True),
+    ("Bash", {"command": f"echo x 2>{_GUARD}/_utils.py"}, True),
+    # Unspaced operators still end the in-place editor's operands.
+    ("Bash", {"command": f"sed -i s/a/b/ notes.txt;cat {_GUARD}/_utils.py"}, False),
+    ("Bash", {"command": f"sed -i s/a/b/ notes.txt&&cat {_GUARD}/_utils.py"}, False),
+    # Interpreter bodies: write idioms count, a plain read doesn't.
+    ("Bash", {"command": f"python3 -c \"print(1, file=open('{_GUARD}/_utils.py', 'a'))\""}, True),
+    ("Bash", {"command": f'php -r \'file_put_contents("{_GUARD}/_utils.py", "x");\''}, True),
+    (
+        "Bash",
+        {"command": f'node -e \'require("fs").cpSync("/tmp/x", "{_GUARD}/_utils.py")\''},
+        True,
+    ),
+    ("Bash", {"command": f'node -e \'require("fs").rmSync("{_GUARD}/_utils.py")\''}, True),
+    ("Bash", {"command": f"ruby -e 'File.delete(\"{_GUARD}/_utils.py\")'"}, True),
+    ("Bash", {"command": f'perl -e \'open(F, "+<", "{_GUARD}/_utils.py"); print F 1\''}, True),
+    ("Bash", {"command": f"python3 -c \"print(open('{_GUARD}/_utils.py').read())\""}, False),
+    # Only file-writing tools and Bash are scanned; a question or todo that
+    # merely names a guard file is how the agent tells the user.
+    ("AskUserQuestion", {"question": f"May I edit {_GUARD}/_utils.py?"}, False),
+    ("TodoWrite", {"todos": [{"content": f"edit {_GUARD}/_utils.py"}]}, False),
+    # The agent can't reconfigure guard through its CLI either.
+    ("Bash", {"command": "guard allowlist disable-rule guard.protected_files"}, True),
+    (
+        "Bash",
+        {"command": "uv run guard allowlist allow-command --rule x --command y --reason z"},
+        True,
+    ),
+    ("Bash", {"command": "guard mode off --global"}, True),
+    ("Bash", {"command": "guard allowlist list"}, False),
+    ("Bash", {"command": "guard mode"}, False),
 ]
 
 

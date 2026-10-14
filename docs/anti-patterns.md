@@ -20,8 +20,8 @@ rm -rf --no-preserve-root /
 hallucinated cleanup step can wipe a developer machine.
 
 **What guard does.** Hard deny via `bash_command_validator`. These prefixes
-are in the registry's `ALWAYS_DENY` set, so they block in every guard mode
-except `off`. An `rm -rf` against a non-root path goes to Claude Code's own
+are in the registry's `ALWAYS_DENY` set, so they block under `enforce` and
+`lockdown`. An `rm -rf` against a non-root path goes to Claude Code's own
 permission prompt (denied under `guard mode lockdown`).
 
 ## `git commit -C <ref>`

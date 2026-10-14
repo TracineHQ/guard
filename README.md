@@ -86,8 +86,8 @@ with `~/.claude/guard/allowlist.json` (global) as fallback. Default is
 
 - `enforce` -- deny what matches; everything else goes to Claude Code's
   normal permission flow.
-- `shadow` -- log what would have been denied (`mode: "shadow"`) but exit 0.
-  Try a new rule against real sessions with `guard mode shadow --project`,
+- `shadow` -- log what would have been denied (`mode: "shadow"`) but exit 0;
+  only the trust-root denies below still block. Try a new rule against real sessions with `guard mode shadow --project`,
   then `guard mode enforce --project`.
 - `off` -- hooks go quiet, except edits to guard's own code and allowlist.
   Those stay blocked so a session can't rewrite guard while it's off.

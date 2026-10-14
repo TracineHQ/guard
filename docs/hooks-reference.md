@@ -46,7 +46,7 @@ In both modes the validator:
   non-allowlisted `-m` modules), command substitution whose inner command is
   itself dangerous, heredoc bodies feeding a shell/eval sink, credential
   leaks (`gh auth token`), and high-entropy secret values.
-- Denies the elevated-risk tier in every mode with a specific rule_id:
+- Denies the elevated-risk tier in enforce and lockdown with a specific rule_id:
   non-sudo escalation (`su`, `doas`, `pkexec`), host power control
   (`reboot`, `shutdown`), and package-registry redirection
   (`npm config set registry`).
@@ -54,8 +54,8 @@ In both modes the validator:
   prefixes pass, `ASK` prefixes fall through to Claude Code's own prompt
   (denied in lockdown), and `ALWAYS_DENY` prefixes block hard.
 
-Read-only command substitution (e.g. `echo $(git rev-parse HEAD)`) passes in
-interactive mode; the same construct is re-evaluated for a dangerous inner
+Read-only command substitution (e.g. `echo $(git rev-parse HEAD)`) passes
+outside lockdown; the same construct is re-evaluated for a dangerous inner
 command and denied if one is found, in either mode.
 
 ### Example block
@@ -95,6 +95,9 @@ Additional denials beyond the simple subcommand list:
   `branch <name>` / `tag <name>` creation, `branch -d/-D/-m/-M`, `tag -a/-d`,
   and `remote add/remove/rename/set-url`. Bare listing (`branch -a`, `tag -l`)
   still auto-allows.
+- **Config writes and unknown subcommands** under `git -C` are denied with a
+  steer to run the same command as `cd <path> && git ...`, where the normal
+  bare-`git` rules apply.
 
 If the command contains shell operators (`&&`, `||`, `;`, `|`) the hook
 declines to auto-allow and falls through to the rest of the chain.
@@ -208,9 +211,11 @@ instruction files (`CLAUDE.md`, `.cursorrules`, ...), MCP registrations and
 Bash writes are matched too: `_match_for_tool` routes `Bash` payloads through
 `bash_write_targets`, which extracts redirect / `tee` / `cp` / `dd of=` /
 in-place-editor targets per command (operands stop at `&&`, `|`, `;`) and
-runs each through `is_protected`. Reads never trip it: `Read`, `Grep`,
-`Glob`, `WebFetch` and `Agent`/`Task` pass, and interpreter bodies count
-only when they show write intent.
+runs each through `is_protected`. Operators inside quotes stay operands.
+`guard allowlist <write>` and `guard mode <mode>` count as writes to the
+allowlist, so the agent can't reconfigure guard through its CLI. Every other
+tool passes (`Read`, `Grep`, `Glob`, `WebFetch`, `Agent`, `AskUserQuestion`,
+...), and interpreter bodies count only when they show write intent.
 
 ### Example deny
 
@@ -218,8 +223,8 @@ only when they show write intent.
 Protected file: guard/registry.py. guard blocks agent edits to its own code
 and subagent scope so a session can't rewrite its own guardrails. Don't retry
 or route around it. Tell the user what you want to change and why; they can
-make the edit, or allow it with
-`guard allowlist allow-command guard.protected_files '<path>' --reason '...'`.
+make the edit, or allow it with `guard allowlist allow-command --rule
+guard.protected_files --command '<path or exact command>' --reason '...'`.
 ```
 
 ---

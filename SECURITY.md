@@ -276,8 +276,8 @@ The credential, agent-output, subagent-scope, and protected-files validators
 operate on **path-as-signal**: every path-like token in any tool input is
 extracted and matched against a pattern set (filenames, extensions, and
 known sensitive directories). This catches direct reads, copy-source shadows
-(`cp`/`mv`/`dd`/`install`/`rsync`/`scp`/`tar c`), variable indirection in
-reader heads, and symlinks via `realpath`. The following bypass classes are
+(`cp`/`mv`/`dd`/`install`/`rsync`/`scp`/`tar c`), and symlinks via
+`realpath`. A reader whose argument is an unresolved `$VAR` passes. The following bypass classes are
 known and explicitly deferred:
 
 - **Glob obfuscation.** `cat ~/.a*/cre*` resolves to a credential file at
@@ -310,8 +310,8 @@ known and explicitly deferred:
 - Honest mistakes (the dominant case in practice).
 - Surfacing prompt-injection attempts that ask the agent to read, copy, or
   write credential-shaped or destructive paths.
-- Forcing user approval across a wide universe of credential-shaped paths,
-  reader tools, and copy verbs — not just `cat ~/.aws/credentials`.
+- Denying access across a wide universe of credential-shaped paths, reader
+  tools, and copy verbs, not just `cat ~/.aws/credentials`.
 - Blocking AI-attribution in commit messages and similar embarrassment
   leaks the agent would otherwise emit silently.
 

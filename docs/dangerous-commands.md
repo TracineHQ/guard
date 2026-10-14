@@ -19,8 +19,8 @@ the full list.
 
 ## Always-deny
 
-These prefixes are in `ALWAYS_DENY` and block in every guard mode except
-`off`.
+These prefixes are in `ALWAYS_DENY` and block under `enforce` and
+`lockdown`.
 
 ### Filesystem destruction (`rm-deny`)
 
@@ -194,8 +194,8 @@ taint|untaint`, `terraform workspace new|select|delete`.
 
 ### Elevated-risk shapes
 
-A small set of high-harm / low-frequency shapes are denied in every mode
-with a specific rule_id, not the generic `bash.strict_default_deny`, so the
+A small set of high-harm / low-frequency shapes are denied under `enforce`
+and `lockdown` with a specific rule_id, not the generic `bash.strict_default_deny`, so the
 strict-deny review queue stays attributable. The deny tells the agent to hand
 the step to the user. All are shape matchers, not registry literals.
 

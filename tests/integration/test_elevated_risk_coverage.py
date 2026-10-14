@@ -65,7 +65,7 @@ def _rule_id(result: dict[str, str] | None) -> str | None:
 # Wrapper-peeled variants (sudo/doas/timeout/env prefixes) must still fire --
 # _match_elevated_risk walks _candidate_forms.
 # --------------------------------------------------------------------------
-_ASK_CASES: list[pytest.ParameterSet] = [
+_ELEVATED_CASES: list[pytest.ParameterSet] = [
     pytest.param("su", "bash.escalation_shell", id="su"),
     pytest.param("su - root", "bash.escalation_shell", id="su-dash-root"),
     pytest.param("doas reboot", "bash.escalation_shell", id="doas-reboot"),
@@ -114,32 +114,19 @@ _ASK_CASES: list[pytest.ParameterSet] = [
 ]
 
 
-@pytest.mark.parametrize(("command", "rule_id"), _ASK_CASES)
-def test_ask_tier_denies_in_default_mode(command: str, rule_id: str) -> None:
-    result = decide(command, permission_mode="default")
-    assert _decision(result) == "deny", (
-        f"{command!r} should deny in default mode, got {_decision(result)!r}"
-    )
-    assert _rule_id(result) == rule_id, (
-        f"{command!r} denied under {_rule_id(result)!r}, not {rule_id}"
-    )
+@pytest.mark.parametrize("lockdown", [False, True])
+@pytest.mark.parametrize(("command", "rule_id"), _ELEVATED_CASES)
+def test_elevated_risk_denies(command: str, rule_id: str, *, lockdown: bool) -> None:
+    """Denied with the SAME specific id with or without lockdown.
 
-
-@pytest.mark.parametrize(("command", "rule_id"), _ASK_CASES)
-def test_ask_tier_denies_in_lockdown(command: str, rule_id: str) -> None:
-    """Lockdown keeps the SAME specific id.
-
-    The point is specificity -- lockdown would default-deny these anyway, but
-    with a generic ``bash.strict_default_deny``; the elevated-risk dispatch keeps
-    the sharp rule_id so the strict-deny review queue is attributable.
+    Lockdown would default-deny these anyway, but with a generic
+    ``bash.strict_default_deny``; the elevated-risk dispatch keeps the sharp
+    rule_id so the strict-deny review queue stays attributable.
     """
-    result = decide(command, lockdown=True)
-    assert _decision(result) == "deny", (
-        f"{command!r} should deny in lockdown, got {_decision(result)!r}"
-    )
+    result = decide(command, lockdown=lockdown)
+    assert _decision(result) == "deny", f"{command!r} not denied (lockdown={lockdown})"
     assert _rule_id(result) == rule_id, (
-        f"{command!r} denied under {_rule_id(result)!r}, not {rule_id} "
-        "-- lockdown lost the elevated-risk tier's specific id"
+        f"{command!r} denied under {_rule_id(result)!r}, not {rule_id} (lockdown={lockdown})"
     )
 
 

@@ -595,7 +595,7 @@ SUDO_ESCALATION_DENY = [
 ]
 
 # We deliberately don't test ``sudo apt-get install`` etc as legit —
-# those should ASK in interactive mode, not deny, and apt-get isn't a
+# those fall through to Claude Code's own prompt, not a deny, and apt-get isn't a
 # DANGEROUS_SHELL_WRAPPERS basename so the matcher won't fire on them.
 
 
@@ -1964,7 +1964,7 @@ def test_deny_reason_includes_rule_id_and_override_path(command: str, expected_r
     assert result.get("permissionDecision") == "deny"
     reason = result.get("permissionDecisionReason", "")
     assert f"denied: {expected_rule}" in reason, f"missing rule_id in reason: {reason!r}"
-    assert f"guard allowlist allow-command {expected_rule}" in reason
+    assert f"guard allowlist allow-command --rule {expected_rule}" in reason
     assert f"guard allowlist disable-rule {expected_rule}" in reason
 
 

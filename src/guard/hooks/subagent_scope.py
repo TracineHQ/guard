@@ -204,7 +204,9 @@ def _emit_deny(
         f"Allowed files/patterns:\n{allowed_list}\n"
         f"If you need to modify other files, the task scope needs updating."
     )
-    apply_decision(_HOOK_ID, payload, emit_pretooluse_decision("deny", reason), file_path)
+    envelope = emit_pretooluse_decision("deny", reason)
+    # Not allowlist-overridable (the registry sets supports_disable_hook=False).
+    apply_decision(_HOOK_ID, payload, envelope, file_path, overridable=False)
 
 
 def _handle_bash(payload: dict[str, Any]) -> None:

@@ -75,17 +75,6 @@ def test_strict_allows_safe_command(tmp_path: Path) -> None:
     assert decision == "allow", f"expected allow, got {decision!r} stderr={stderr[:300]}"
 
 
-def test_interactive_passes_through_unknown(tmp_path: Path) -> None:
-    """With permission_mode=default, an unknown command falls through (no deny envelope).
-
-    Claude Code's normal permission prompt handles it.
-    """
-    _rc, stdout, _stderr = _run(
-        "flarbnoz --gronk", strict=False, decisions_path=tmp_path / "log.jsonl"
-    )
-    assert _decision(stdout) is None, f"expected passthrough, got stdout={stdout[:300]}"
-
-
 @pytest.mark.parametrize("strict", [True, False])
 def test_interactive_still_denies_always_deny(tmp_path: Path, strict: bool) -> None:  # noqa: FBT001 -- bool from parametrize
     """`git add -A` is in ALWAYS_DENY — denied in BOTH modes."""
@@ -152,18 +141,6 @@ def test_strict_allows_neutral_safe_prefix(tmp_path: Path) -> None:
     log = tmp_path / "log.jsonl"
     _rc, stdout, _stderr = _run("git status", strict=True, decisions_path=log)
     assert _decision(stdout) == "allow", f"git status not allowed: {stdout[:300]}"
-
-
-def test_interactive_unchanged_for_unknown_command(tmp_path: Path) -> None:
-    """Interactive mode (permission_mode=default) must still passthrough unknown commands.
-
-    The inverted-default behavior is strict-mode-only; interactive mode
-    is unchanged and continues to passthrough unknown commands.
-    """
-    _rc, stdout, _stderr = _run(
-        "flarbnoz --gronk", strict=False, decisions_path=tmp_path / "log.jsonl"
-    )
-    assert _decision(stdout) is None, f"interactive should passthrough: {stdout[:300]}"
 
 
 def test_strict_queue_path_is_writable(tmp_path: Path) -> None:
