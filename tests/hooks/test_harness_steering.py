@@ -54,28 +54,28 @@ def test_non_probe_not_detected(command: str) -> None:
     assert not any(bcv._guard_test_probe(form) for form in bcv._candidate_forms(command))  # noqa: SLF001
 
 
-@pytest.mark.parametrize("mode", ["default", "auto"])
+@pytest.mark.parametrize("mode", ["default", "lockdown"])
 @pytest.mark.parametrize("command", ["guard test 'ls'", "uv run guard test 'rm -rf /'"])
 def test_steers_in_dev_tree(command: str, mode: str) -> None:
     # pytest runs from a source checkout, so the dev-tree gate is naturally True.
     assert bcv._is_guard_dev_tree() is True  # noqa: SLF001
-    result = decide(command, permission_mode=mode)
+    result = decide(command, lockdown=mode == "lockdown")
     assert is_deny(result)
     assert "bash.use_corpus_harness" in result["permissionDecisionReason"]
 
 
-@pytest.mark.parametrize("mode", ["default", "auto"])
+@pytest.mark.parametrize("mode", ["default", "lockdown"])
 def test_no_steer_outside_dev_tree(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
     """With no corpus on disk (pip install), guard test is never steered."""
     monkeypatch.setattr(bcv, "_is_guard_dev_tree", lambda: False)
-    result = decide("guard test 'ls -la'", permission_mode=mode)
+    result = decide("guard test 'ls -la'", lockdown=mode == "lockdown")
     reason = (result or {}).get("permissionDecisionReason", "")
     assert "bash.use_corpus_harness" not in reason
-    if mode == "auto":
+    if mode == "lockdown":
         # still whitelisted as a read-only subcommand -> auto-allow, not denied
         assert not is_deny(result)
 
 
 def test_corpus_runner_never_steered() -> None:
-    result = decide("uv run guard corpus", permission_mode="auto")
+    result = decide("uv run guard corpus", lockdown=True)
     assert not is_deny(result)

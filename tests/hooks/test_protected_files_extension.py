@@ -132,7 +132,7 @@ def test_effective_patterns_appends_extras_after_builtins(
     # Last two entries are our extras; built-ins precede.
     assert pats[-2:] == ("bin", "standards")
     # Built-in still present.
-    assert "CLAUDE.md" in pats
+    assert "guard/_utils.py" in pats
 
 
 def test_is_protected_honors_env_extension(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -168,8 +168,8 @@ def test_existing_builtin_still_matches_with_extras(
 ) -> None:
     monkeypatch.setenv("GUARD_PROTECTED_EXTRA", "bin")
     monkeypatch.chdir(tmp_path)
-    # CLAUDE.md is a built-in; should still match.
-    assert is_protected("/Users/me/proj/CLAUDE.md") == "CLAUDE.md"
+    # The trust root is built in; it should still match.
+    assert is_protected("/Users/me/proj/src/guard/_utils.py") == "guard/_utils.py"
 
 
 def test_extras_can_add_custom_filename_pattern(

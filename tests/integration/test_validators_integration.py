@@ -49,7 +49,7 @@ def _run_hook(hook_path, payload, env_overrides=None):
 def test_hook_handles_benign_payload(hook_name, tmp_path):
     """Each hook must run on a benign payload without crashing.
 
-    Decision MAY be allow, deny, ask, or no-output, but the hook must not
+    Decision MAY be allow, deny, or no-output, but the hook must not
     exit nonzero for ``credential_check`` (which has no PreToolUse contract;
     it's a check helper) or with a traceback on stderr for any hook.
     """
@@ -81,7 +81,7 @@ def test_bash_validator_denies_dangerous_command(tmp_path):
     if stdout.strip():
         decision = json.loads(stdout)
         permission = decision["hookSpecificOutput"]["permissionDecision"]
-        assert permission in ("deny", "ask")
+        assert permission == "deny"
     else:
         assert rc == 2, f"expected deny, got rc={rc} stdout={stdout!r}"
 
@@ -215,7 +215,7 @@ def test_agent_output_guard_denies_output_read(tmp_path):
     assert decision["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
-def test_protected_files_asks_on_hook_edit(tmp_path):
+def test_protected_files_denies_hook_edit(tmp_path):
     hook = HOOKS_DIR / "protected_files.py"
     payload = {
         "tool_name": "Edit",
@@ -224,9 +224,9 @@ def test_protected_files_asks_on_hook_edit(tmp_path):
         "cwd": str(tmp_path),
     }
     rc, stdout, _ = _run_hook(hook, payload)
-    assert rc == 0
+    assert rc == 2
     decision = json.loads(stdout)
-    assert decision["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert decision["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 def test_subagent_scope_denies_out_of_scope_edit(tmp_path):

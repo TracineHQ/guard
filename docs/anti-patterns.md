@@ -1,8 +1,8 @@
 # Anti-patterns guard catches
 
-Concrete Claude Code anti-patterns guard either denies outright or surfaces
-for human confirmation. Each section gives an example, why the pattern is
-problematic, and what guard does about it.
+Concrete Claude Code anti-patterns guard denies, each with a reason that
+tells the agent what to do instead. Each section gives an example, why the
+pattern is problematic, and what guard does about it.
 
 ## `rm -rf /` (and friends)
 
@@ -20,10 +20,9 @@ rm -rf --no-preserve-root /
 hallucinated cleanup step can wipe a developer machine.
 
 **What guard does.** Hard deny via `bash_command_validator`. These prefixes
-are in the registry's `ALWAYS_DENY` set, so they block in both interactive
-and strict (`auto`/`dontAsk`/`bypassPermissions`) modes. Any `rm -rf`
-against a non-root path still goes through
-the normal `ASK` tier.
+are in the registry's `ALWAYS_DENY` set, so they block under `enforce` and
+`lockdown`. An `rm -rf` against a non-root path goes to Claude Code's own
+permission prompt (denied under `guard mode lockdown`).
 
 ## `git commit -C <ref>`
 
@@ -69,27 +68,30 @@ Edit: file_path=~/.aws/credentials
 into transcripts and decision logs, and edits to credential stores can
 overwrite real credentials with placeholder strings.
 
-**What guard does.** `credential_check` forces an `ask` decision when an
+**What guard does.** `credential_check` denies when an
 edit targets a known credential file (`~/.aws/credentials`, `~/.ssh/id_*`,
 `.env`, `*.pem`, `*.key`, etc.) or when a Bash command references one.
 The decision log truncates large fields so a literal key in the command
 excerpt is still capped — but the right answer is to never paste secrets
 inline.
 
-## Edits to `~/.claude/settings.json` from a subagent
+## Edits to guard's own allowlist or hook code
 
 ```
-Edit: file_path=~/.claude/settings.json
+Edit: file_path=~/.claude/guard/allowlist.json
 ```
 
-**Why it's bad.** `settings.json` is the ASK-gate that decides whether
-guard's hooks fire at all. A subagent silently editing it can disable
-every guardrail in one tool call.
+**Why it's bad.** The allowlist decides what guard lets through. An agent
+that can write it grants itself any override, and one that can rewrite the
+hook code can quietly remove a guardrail.
 
-**What guard does.** `protected_files` matches `.claude/settings.json` and
-`.claude/settings.local.json` and forces an `ask` decision. Combined with
-`subagent_scope`, edits originating from a scoped subagent are blocked
-unless the scope file explicitly allows them.
+**What guard does.** `protected_files` denies agent writes to guard's trust
+root (hook code, `registry.py`, `_utils.py`, the allowlist and
+`.claude/subagent-scope.json`) in every guard mode, `off` included. No
+allowlist entry unlocks `allowlist.json` itself; the deny tells the agent to
+ask the user, who can run `guard allowlist`. Combined with `subagent_scope`,
+edits originating from a scoped subagent are blocked unless the scope file
+explicitly allows them.
 
 ## `git add -A` / `git add .` / `git add --all`
 

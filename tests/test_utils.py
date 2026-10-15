@@ -17,7 +17,6 @@ from guard._utils import (
     all_paths_in,
     append_jsonl,
     emit_pretooluse_decision,
-    is_strict_mode,
     log_decision,
     read_permission_mode,
     sanitize_for_stderr,
@@ -39,7 +38,7 @@ def guard_decisions_jsonl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     return jsonl
 
 
-# === parse_hook_input / make_decision / safe_main (subprocess-based ports) ===
+# === parse_hook_input / safe_main (subprocess-based ports) ===
 
 
 def test_parse_hook_input_valid():
@@ -107,55 +106,17 @@ print("NONE" if result is None else "NOT_NONE")
     assert result.stdout.strip() == "NONE"
 
 
-def test_make_decision_deny():
-    script = f"""
-import sys
-sys.path.insert(0, {SRC_DIR!r})
-from guard._utils import make_decision
-print(make_decision("deny", "blocked for testing"))
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=False,
-    )
-    assert result.returncode == 0
-    output = json.loads(result.stdout)
-    assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert output["hookSpecificOutput"]["permissionDecisionReason"] == "blocked for testing"
-
-
-def test_make_decision_allow():
-    script = f"""
-import sys
-sys.path.insert(0, {SRC_DIR!r})
-from guard._utils import make_decision
-print(make_decision("allow", "safe command"))
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=False,
-    )
-    assert result.returncode == 0
-    output = json.loads(result.stdout)
-    assert output["hookSpecificOutput"]["permissionDecision"] == "allow"
-
-
 def test_safe_main_success():
     hook_script = f"""
 import sys
 sys.path.insert(0, {SRC_DIR!r})
-from guard._utils import safe_main, make_decision
+import json
+from guard._utils import safe_main, emit_pretooluse_decision
 
 def my_hook(payload):
     cmd = payload.get("tool_input", {{}}).get("command", "")
     if cmd == "dangerous":
-        print(make_decision("deny", "blocked"))
+        print(json.dumps(emit_pretooluse_decision("deny", "blocked")))
         sys.exit(2)
 
 safe_main(my_hook)
@@ -280,15 +241,6 @@ def test_emit_pretooluse_decision_omits_optional_when_none() -> None:
     assert "additionalContext" not in result["hookSpecificOutput"]
 
 
-def test_emit_pretooluse_decision_ask() -> None:
-    """Advisory hooks (e.g. protected_files) emit 'ask' to surface a prompt."""
-    result = emit_pretooluse_decision("ask", "confirm edit to protected file")
-    hso = result["hookSpecificOutput"]
-    assert hso["hookEventName"] == "PreToolUse"
-    assert hso["permissionDecision"] == "ask"
-    assert hso["permissionDecisionReason"] == "confirm edit to protected file"
-
-
 def test_read_permission_mode_default_when_missing() -> None:
     assert read_permission_mode({}) == "default"
     assert read_permission_mode(None) == "default"
@@ -309,23 +261,6 @@ def test_read_permission_mode_ignores_non_string() -> None:
     assert read_permission_mode({"permission_mode": 1}) == "default"
     assert read_permission_mode({"permission_mode": None}) == "default"
     assert read_permission_mode({"permission_mode": ""}) == "default"
-
-
-def test_is_strict_mode_true_for_unattended_modes() -> None:
-    """auto, dontAsk, bypassPermissions all imply no human at the prompt."""
-    assert is_strict_mode({"permission_mode": "auto"}) is True
-    assert is_strict_mode({"permission_mode": "dontAsk"}) is True
-    assert is_strict_mode({"permission_mode": "bypassPermissions"}) is True
-
-
-@pytest.mark.parametrize("mode", ["default", "plan", "acceptEdits"])
-def test_is_strict_mode_false_for_attended_modes(mode: str) -> None:
-    assert is_strict_mode({"permission_mode": mode}) is False
-
-
-def test_is_strict_mode_false_when_missing() -> None:
-    assert is_strict_mode({}) is False
-    assert is_strict_mode(None) is False
 
 
 # === log_decision: spec-compliant JSONL writer ===
@@ -684,7 +619,7 @@ def test_all_paths_in_skips_empty_strings():
 
 # === In-process coverage for paths that subprocess tests skip ===
 #
-# parse_hook_input / make_decision / safe_main / log_internal_error are
+# parse_hook_input / safe_main / log_internal_error are
 # covered by subprocess tests above for end-to-end behavior, but coverage.py
 # attributes those lines to the subprocess (which is dropped). The tests
 # below exercise the same code paths inside the pytest process so coverage
@@ -697,16 +632,6 @@ def test_token_basename_returns_basename():
     assert token_basename("/usr/bin/python3") == "python3"
     assert token_basename("python3") == "python3"
     assert token_basename("./foo/bar") == "bar"
-
-
-def test_make_decision_in_process_shape():
-    from guard._utils import make_decision
-
-    out = json.loads(make_decision("deny", "no"))
-    hso = out["hookSpecificOutput"]
-    assert hso["hookEventName"] == "PreToolUse"
-    assert hso["permissionDecision"] == "deny"
-    assert hso["permissionDecisionReason"] == "no"
 
 
 def test_redact_secrets_empty_string_short_circuits():
@@ -946,84 +871,6 @@ def test_safe_main_returns_when_payload_is_none(monkeypatch: pytest.MonkeyPatch)
 
     _utils.safe_main(hook_fn)
     assert called == []
-
-
-# === CLAUDE_AUTONOMOUS deprecation fallback (env-var, one-cycle window) ===
-
-
-def test_read_permission_mode_env_fallback_emits_warning(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
-    """Legacy ``CLAUDE_AUTONOMOUS=1`` escalates to ``dontAsk`` + writes a deprecation note."""
-    monkeypatch.setenv("CLAUDE_AUTONOMOUS", "1")
-    # Point sentinel dir at fresh tmp_path so it doesn't pre-exist.
-    monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "guard-home-warn"))
-    from guard import _utils
-
-    _utils._CLAUDE_AUTONOMOUS_WARNED["once"] = False  # noqa: SLF001 -- reset warn-once flag
-
-    mode = _utils.read_permission_mode({})
-    assert mode == "dontAsk"
-    err = capsys.readouterr().err
-    assert "CLAUDE_AUTONOMOUS is deprecated" in err
-
-    # Sentinel file gets created so subsequent invocations skip the stderr write.
-    sentinel = tmp_path / "guard-home-warn" / ".autonomous-warned"
-    assert sentinel.exists()
-
-
-def test_read_permission_mode_env_fallback_silent_after_sentinel(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
-    """When the sentinel exists, the warning is suppressed."""
-    monkeypatch.setenv("CLAUDE_AUTONOMOUS", "yes")
-    home = tmp_path / "guard-home-silent"
-    monkeypatch.setenv("GUARD_DATA_DIR", str(home))
-    home.mkdir(parents=True)
-    (home / ".autonomous-warned").touch()
-
-    from guard import _utils
-
-    _utils._CLAUDE_AUTONOMOUS_WARNED["once"] = False  # noqa: SLF001 -- reset warn-once flag
-
-    mode = _utils.read_permission_mode({})
-    assert mode == "dontAsk"
-    assert "deprecated" not in capsys.readouterr().err
-
-
-def test_emit_autonomous_deprecation_warning_short_circuits_after_first_call(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Once the in-process ``_CLAUDE_AUTONOMOUS_WARNED`` flag is set, the function returns early."""
-    from guard import _utils
-
-    _utils._CLAUDE_AUTONOMOUS_WARNED["once"] = True  # noqa: SLF001 -- set warn-once flag
-    _utils._emit_autonomous_deprecation_warning()  # noqa: SLF001 -- module-private
-    assert capsys.readouterr().err == ""
-
-
-def test_read_permission_mode_env_fallback_oserror_falls_back_to_in_proc_flag(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """``Path.exists`` raising ``OSError`` is suppressed; warning still fires once."""
-    monkeypatch.setenv("CLAUDE_AUTONOMOUS", "true")
-    from guard import _utils
-
-    _utils._CLAUDE_AUTONOMOUS_WARNED["once"] = False  # noqa: SLF001 -- reset warn-once flag
-
-    real_exists = Path.exists
-
-    def boom(self: Path) -> bool:
-        if self.name == ".autonomous-warned":
-            msg = "denied"
-            raise OSError(msg)
-        return real_exists(self)
-
-    monkeypatch.setattr(Path, "exists", boom)
-
-    mode = _utils.read_permission_mode({})
-    assert mode == "dontAsk"
-    assert "deprecated" in capsys.readouterr().err
 
 
 # === _shrink_to_envelope corner cases ===

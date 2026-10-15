@@ -460,7 +460,7 @@ class TestSubprocessIntegration:
 
 
 class TestAIEmailGitConfigPreflight:
-    """Pre-flight check: warn (ASK) when git user.email itself looks AI-attributed.
+    """Pre-flight check: deny when git user.email itself looks AI-attributed.
 
     The decide() function shells out to ``git config user.email`` once per
     commit attempt. If the configured email matches an AI-tool pattern (e.g.
@@ -483,9 +483,9 @@ class TestAIEmailGitConfigPreflight:
     @pytest.mark.parametrize(
         ("stdout", "returncode", "expected_decision"),
         [
-            # AI-attributed addresses → ASK
-            ("noreply@anthropic.com\n", 0, "ask"),
-            ("223556219+Copilot@users.noreply.github.com\n", 0, "ask"),
+            # AI-attributed addresses → deny
+            ("noreply@anthropic.com\n", 0, "deny"),
+            ("223556219+Copilot@users.noreply.github.com\n", 0, "deny"),
             # Benign / failure / empty → no envelope
             ("dev@company.com\n", 0, None),
             ("", 128, None),

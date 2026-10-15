@@ -1,26 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TracineHQ contributors
-"""PreToolUse hook: force ASK on edits to security-critical hook files.
+"""PreToolUse hook: deny agent writes to guard's trust root.
 
-Matches ``Edit`` and ``Write`` ``tool_input.file_path`` against a small set of
-protected path patterns. If matched, the hook emits an ``ask`` permission
-decision so a human must confirm. It never blocks — its only job is to ensure
-changes to the hook infrastructure are surfaced for review.
+Matches write-shaped tool calls (``Edit`` / ``Write`` / ``MultiEdit`` /
+``NotebookEdit`` paths and Bash write targets) against protected path
+patterns. ``guard allowlist`` / ``guard mode`` writes
+count as allowlist writes. A match is denied with a reason that tells the
+agent to take the change to the user. Other tools never match.
+
+The default list is guard's own trust root: its hook code, registry,
+allowlist and subagent scope file. ``guard mode lockdown`` adds git-exec,
+agent-instruction, MCP and cloud-profile files. Projects add patterns via
+``GUARD_PROTECTED_EXTRA`` or ``.claude/guard-protected.txt``. ``guard mode
+off`` keeps only the trust root; ``shadow`` logs other matches without
+blocking.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shlex
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from guard._safe_io import safe_read_text_capped
-from guard._utils import all_paths_in, emit_pretooluse_decision, log_decision, safe_main
-from guard.allowlist import hook_bypass_reason, load_allowlist
+from guard._utils import emit_pretooluse_decision, safe_main
+from guard.allowlist import apply_decision, load_allowlist
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 _HOOK_ID = "guard.protected_files"
 
@@ -40,24 +50,16 @@ def _normcase(s: str) -> str:
 
 
 # Trust-root patterns whose protection MUST NOT be allowlist-bypassable.
-# An attacker (or a confused agent) who lands one ASK-approved write to the
-# allowlist file, then sets ``disable_rules: ["guard.protected_files"]``,
-# would silence every subsequent edit to every protected file — including
-# subsequent edits to the allowlist itself. The same applies to
-# ``.claude/settings*.json`` (the wiring that decides whether guard's hooks
-# fire at all). For these, the allowlist override is intentionally refused;
-# the user always sees an ASK. Other protected files (their CLAUDE.md, etc.)
-# remain user-overridable through the normal allowlist mechanisms.
-_UN_OVERRIDABLE_PATTERNS: frozenset[str] = frozenset(
-    {
-        ".claude/guard/allowlist.json",
-        ".claude/settings.json",
-        ".claude/settings.local.json",
-    }
-)
+# An agent that lands one write to the allowlist file can set
+# ``disable_rules: ["guard.protected_files"]`` and silence every later check,
+# including checks on the allowlist itself. Other protected files stay
+# user-overridable through the normal allowlist mechanisms.
+_UN_OVERRIDABLE_PATTERNS: frozenset[str] = frozenset({".claude/guard/allowlist.json"})
 
-# Files that define security policy for all Claude Code sessions.
-# Changes to these affect every repo and every agent.
+# Guard's own trust root: the code that enforces policy, the allowlist that
+# configures it, and the subagent scope file it enforces. Protected in every
+# guard mode, ``off`` included: a session that rewrites these while guard is
+# off changes what runs when the user turns guard back on.
 PROTECTED_PATTERNS: list[str] = [
     "guard/hooks/bash_command_validator.py",
     "guard/hooks/git_c_validator.py",
@@ -68,12 +70,8 @@ PROTECTED_PATTERNS: list[str] = [
     "guard/hooks/subagent_scope.py",
     "guard/registry.py",
     "guard/_utils.py",
-    # Claude Code harness configuration — these are the ASK-gate that
-    # decides whether guard hooks even fire. Edits must surface for review.
-    ".claude/settings.json",
-    ".claude/settings.local.json",
-    # Subagent scope file — a subagent rewriting its own scope is a TOCTOU
-    # bypass of subagent_scope.py. Force ASK on edits.
+    # Subagent scope file: a subagent rewriting its own scope is a TOCTOU
+    # bypass of subagent_scope.py.
     ".claude/subagent-scope.json",
     # Compatibility patterns for users who installed earlier hook scripts
     # under ``~/.claude/hooks/`` rather than via the plugin layout.
@@ -86,50 +84,52 @@ PROTECTED_PATTERNS: list[str] = [
     "hooks/protected_files.py",
     "hooks/commit_message_validator.py",
     "hooks/agent_output_guard.py",
+    # Guard's own allowlist file: an agent that can write here grants itself
+    # overrides.
+    ".claude/guard/allowlist.json",
+]
+
+# Added by ``guard mode lockdown``. Writes to these turn a "harmless" file
+# edit into code execution or reshape what every later session does, so a
+# locked-down machine keeps agents off them entirely.
+LOCKDOWN_PATTERNS: list[str] = [
     # Git infrastructure: a write to .git/hooks/ replaces the repo's own
     # hook scripts, which run on every commit/push. .git/config holds
     # exec sinks (core.hooksPath, alias.* w/ !shell). .gitmodules can
     # auto-fetch attacker-controlled submodule URLs whose own hooks fire
     # during init. .git/info/attributes overrides .gitattributes (filter.*
-    # exec sinks). All of these turn a "harmless" write into RCE.
+    # exec sinks).
     ".git/hooks",
     ".git/config",
     ".git/info/attributes",
     ".git/info/exclude",
     ".gitmodules",
     ".gitattributes",
-    # Agent-config poisoning surface. Writes to these files reshape future
-    # agent behavior across every subsequent session — the lowest-friction
-    # LLM-on-LLM persistence vector. Force ASK on every edit so the human
-    # sees a behavior-change attempt before it lands.
-    # User-global instructions (every session reads these). Listed BEFORE
+    # Agent-config poisoning surface: these reshape future agent behavior
+    # across every later session. User-global instructions are listed BEFORE
     # the project-level patterns so the more specific suffix wins the
     # first-match iteration.
     ".claude/CLAUDE.md",
     ".aider.conf.yml.user",
-    # Project-level instructions read by Claude Code / Cursor / Aider.
     "CLAUDE.md",
     ".cursorrules",
     ".cursor/rules",
     ".aider.conf.yml",
     ".continue/config.json",
-    # MCP server registrations — adding one mounts new tools into the
+    # MCP server registrations: adding one mounts new tools into the
     # agent's capability surface.
     ".claude/mcp_servers",
     ".claude/mcp.json",
     # Cloud profile selection. ``~/.aws/config`` sets the default profile
-    # the agent later assumes; flipping it from "personal" to "prod-admin"
-    # is a privilege-escalation primitive that bypasses every shell matcher.
+    # the agent later assumes; flipping it is a privilege-escalation
+    # primitive that bypasses every shell matcher.
     ".aws/config",
-    # Guard's own allowlist file — an agent that can write here grants
-    # itself overrides. The ``protected_files`` ASK forces human review.
-    ".claude/guard/allowlist.json",
 ]
 
 
 # === Project-local pattern extension ===
 #
-# Two override knobs let downstream projects extend ``PROTECTED_PATTERNS``
+# Two override knobs let downstream projects extend the protected list
 # without forking. Both are stdlib-only and resolve at call time so test
 # fixtures (and live env edits) take effect without a module reload.
 #
@@ -208,18 +208,22 @@ def _extra_patterns(cwd: Path | None = None) -> list[str]:
     return _read_extra_patterns_from_env()
 
 
-def _effective_patterns(cwd: Path | None = None) -> tuple[str, ...]:
-    """Return the merged pattern tuple: built-in defaults + project extras.
+def _effective_patterns(cwd: Path | None = None, *, mode: str = "enforce") -> tuple[str, ...]:
+    """Return the pattern tuple for a guard ``mode``.
 
-    Project-extra patterns are appended AFTER the built-ins so the
-    first-match iteration in ``is_protected()`` favours specific
-    built-in suffixes (e.g. ``.claude/CLAUDE.md`` before ``CLAUDE.md``)
-    while still letting the project add its own.
+    ``off`` keeps only the trust root. ``lockdown`` adds
+    ``LOCKDOWN_PATTERNS``. Every mode but ``off`` appends the project
+    extras AFTER the built-ins so the first-match iteration in
+    ``is_protected()`` favours the built-in suffixes (the trust root first,
+    so a trust-root match is never reported as an overridable one).
     """
-    return (*PROTECTED_PATTERNS, *_extra_patterns(cwd))
+    if mode == "off":
+        return tuple(PROTECTED_PATTERNS)
+    lockdown = LOCKDOWN_PATTERNS if mode == "lockdown" else []
+    return (*PROTECTED_PATTERNS, *lockdown, *_extra_patterns(cwd))
 
 
-def is_protected(file_path: str) -> str | None:
+def is_protected(file_path: str, patterns: Sequence[str] | None = None) -> str | None:
     """Return the matched protected pattern for ``file_path``, else ``None``.
 
     A pattern matches if ``file_path`` either:
@@ -232,6 +236,8 @@ def is_protected(file_path: str) -> str | None:
     contains no ``.`` — file patterns (``.git/config``, ``.gitattributes``)
     only fire on the suffix form, so a path like ``/tmp/x/.git/config/extra``
     or ``tools/.gitattributes/templates/foo`` does NOT trigger.
+
+    ``patterns`` defaults to the ``enforce`` set (trust root + extras).
     """
     if not file_path:
         return None
@@ -241,7 +247,7 @@ def is_protected(file_path: str) -> str | None:
         return None
 
     resolved_lc = _normcase(str(resolved))
-    for pattern in _effective_patterns():
+    for pattern in patterns if patterns is not None else _effective_patterns():
         pat_lc = _normcase(pattern)
         # Exact-suffix match (file pattern).
         if (
@@ -258,7 +264,7 @@ def is_protected(file_path: str) -> str | None:
     return None
 
 
-def is_protected_parent_dir(dir_path: str) -> str | None:
+def is_protected_parent_dir(dir_path: str, patterns: Sequence[str] | None = None) -> str | None:
     """Return the matched protected pattern when ``dir_path`` is an ancestor.
 
     Used for write shapes that target a directory rather than a file (e.g.
@@ -274,7 +280,7 @@ def is_protected_parent_dir(dir_path: str) -> str | None:
         return None
 
     resolved_lc = _normcase(str(resolved).rstrip("/"))
-    for pattern in _effective_patterns():
+    for pattern in patterns if patterns is not None else _effective_patterns():
         # ``pattern`` is the suffix path of a protected file. An extraction
         # into ``resolved_str`` could write to ``<resolved_str>/<tail>`` for
         # some suffix ``tail``. We consider the dir risky if it sits anywhere
@@ -294,16 +300,55 @@ def is_protected_parent_dir(dir_path: str) -> str | None:
 # Bash redirect / file-write commands and their target-extracting regex / token
 # index. Used by ``bash_write_targets`` as a best-effort second line of
 # defense — the primary path is the Edit/Write tool guard above.
-_BASH_REDIRECT_RE = re.compile(r"(?:^|\s)>>?\s*(\S+)")
+_BASH_REDIRECT_RE = re.compile(r"(?:^|[\s&\d])>>?\|?\s*(\S+)")
 _BASH_DD_OF_RE = re.compile(r"(?:^|\s)of=(\S+)")
 
 
-def bash_write_targets(command: str) -> list[str]:
+def _split_commands(command: str) -> list[list[str]]:
+    r"""Tokenize ``command`` one command at a time, splitting at unquoted ``; | & newline``.
+
+    Splitting the raw string (not shlex tokens) keeps a quoted ``';'`` or an
+    escaped ``\;`` as an operand and still splits an unspaced ``a;b``. The
+    ``&`` and ``|`` in ``&>``, ``>&`` and ``>|`` are redirects, not operators.
+    Raises ``ValueError`` on unbalanced quotes, like ``shlex.split``.
+    """
+    segments: list[str] = []
+    start = 0
+    quote = ""
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        prev = command[i - 1] if i else ""
+        nxt = command[i + 1 : i + 2]
+        if ch == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote:
+            quote = "" if ch == quote else quote
+        elif ch in "'\"":
+            quote = ch
+        elif (
+            ch in ";\n"
+            or (ch == "|" and prev != ">")
+            or (ch == "&" and prev not in "<>" and nxt != ">")
+        ):
+            segments.append(command[start:i])
+            start = i + 1
+        i += 1
+    segments.append(command[start:])
+    return [tokens for seg in segments if (tokens := shlex.split(seg))]
+
+
+def bash_write_targets(command: str, patterns: Sequence[str] | None = None) -> list[str]:
     """Return likely write-target paths from a bash command.
 
-    Best-effort: scans for output redirects (``>``, ``>>``), ``tee``,
-    ``cp``, ``mv``, ``ln -sf``, ``install``, and ``dd of=`` targets, plus
-    in-place editor flags (``sed -i``, ``perl -i``, ``awk -i inplace``).
+    Best-effort: scans for output redirects (``>``, ``>>``, ``>|``, ``&>``),
+    ``tee``, ``cp``, ``mv``, ``ln -sf``, ``install``, and ``dd of=`` targets,
+    plus in-place editor flags (``sed -i``, ``perl -i``, ``awk -i inplace``).
+    Each command between control operators is scanned on its own.
+
+    ``patterns`` is the protected list the interpreter-eval scan looks for
+    (defaults to the ``enforce`` set).
 
     Public so other hooks (notably ``subagent_scope``) can reuse the same
     write-target enumerator instead of duplicating the bash-shape parsing.
@@ -312,15 +357,23 @@ def bash_write_targets(command: str) -> list[str]:
     targets.extend(_BASH_REDIRECT_RE.findall(command))
     targets.extend(_BASH_DD_OF_RE.findall(command))
     try:
-        tokens = shlex.split(command)
+        commands = _split_commands(command)
     except ValueError:
         return targets
-    if not tokens:
-        return targets
+    for cmd_tokens in commands:
+        targets.extend(_command_write_targets(cmd_tokens, command, patterns))
+    return targets
+
+
+def _command_write_targets(
+    tokens: list[str], command: str, patterns: Sequence[str] | None
+) -> list[str]:
+    """Write targets for one command's tokens (no control operators inside)."""
+    targets: list[str] = []
 
     # Look for ``tee``, ``cp``, ``mv``, ``ln``, ``install`` anywhere in the
-    # token stream — pipelines like ``echo x | tee /path`` mean the head
-    # token isn't the writer. We don't try to be exhaustive about flags;
+    # command: wrappers like ``sudo tee /path`` mean the head token isn't
+    # the writer. We don't try to be exhaustive about flags;
     # just skip past any ``-x``-shaped argument right after the verb.
     write_verbs = {"tee", "cp", "mv", "install", "ln"}
     for i, tok in enumerate(tokens):
@@ -362,14 +415,14 @@ def bash_write_targets(command: str) -> list[str]:
     # under a protected path, the doctrine path is implicit in ``{}``
     # substitutions invisible to argv inspection. Conservative-but-safe
     # rule: emit ``<root>`` as a candidate target. ``is_protected`` then
-    # decides if the whole command should ASK.
+    # decides if the whole command is denied.
     targets.extend(_find_exec_targets(tokens))
 
     # Per-interpreter eval-flag map: ``python -c '...'``, ``php -r '...'``,
-    # etc. Scan the eval-string body for literal protected-pattern
+    # etc. Scan a write-shaped eval-string body for literal protected-pattern
     # substrings (best-effort; dynamically-constructed paths cannot be
     # resolved statically and fall through to the Edit/Write tool guard).
-    targets.extend(_interpreter_eval_targets(tokens))
+    targets.extend(_interpreter_eval_targets(tokens, patterns))
     return targets
 
 
@@ -661,34 +714,45 @@ _INTERPRETER_EVAL_FLAG_MAP: tuple[tuple[frozenset[str], frozenset[str]], ...] = 
 
 # Hard cap on the eval-body substring scan. Bodies up to this size are
 # scanned end-to-end; beyond it we refuse to scan and instead emit a
-# sentinel target so ``protected_files`` falls through to ASK rather
-# than silently truncating and missing a literal pattern past the cap.
-# 1 MiB covers any realistic inline script; an attacker padding past it
-# pays the price of a forced ASK.
+# sentinel target so ``protected_files`` denies rather than silently
+# truncating and missing a literal pattern past the cap. 1 MiB covers any
+# realistic inline script; an attacker padding past it gets a deny.
 _EVAL_BODY_SCAN_MAX_BYTES = 1024 * 1024
 # Sentinel target emitted on overflow. Has to literally end with a
-# protected pattern so ``is_protected`` fires; ``CLAUDE.md`` is the
-# shortest universally-protected suffix.
-_EVAL_BODY_OVERFLOW_SENTINEL = "CLAUDE.md"
+# trust-root pattern so ``is_protected`` fires in every guard mode.
+_EVAL_BODY_OVERFLOW_SENTINEL = "guard/_utils.py"
+
+# An eval body that only reads (``print(open('CLAUDE.md').read())``) is not a
+# write. A protected path in the body counts only next to something that could
+# write: a write/append open mode, a write/delete/move call, a shell-out, or
+# code built at runtime. Plain substring match, so it fails closed.
+_EVAL_WRITE_INTENT_RE = re.compile(
+    r"['\"][rbt]*[wax+][rbt+]*['\"]|>|write|append|unlink|remove|rename|replace|rmtree|copy|"
+    r"move|touch|truncate|symlink|chmod|O_(?:WRONLY|RDWR|CREAT)|system|exec|spawn|popen|"
+    r"subprocess|eval|compile|__import__|FileUtils|`|delete|put_contents|\+<|\b(?:cp|rm)(?:Sync)?\b"
+)
 
 
-def _interpreter_eval_targets(tokens: list[str]) -> list[str]:
+def _interpreter_eval_targets(
+    tokens: list[str], patterns: Sequence[str] | None = None
+) -> list[str]:
     """Scan an interpreter's ``-c`` / ``-e`` / ``-r`` eval body for literal protected paths.
 
-    Best-effort static scan: looks for any ``_effective_patterns()`` entry
-    appearing as a substring inside the eval body and emits each match
-    as a candidate target. ``open('/.git/config','w')`` therefore yields
-    ``/.git/config``; ``shutil.copy(src, dst)`` where ``dst`` is a
-    runtime variable yields nothing (the static matcher cannot solve
-    that — the existing Edit/Write tool gate is the right defense).
+    Best-effort static scan. When the body shows write intent
+    (``_EVAL_WRITE_INTENT_RE``), every protected pattern appearing as a
+    substring is emitted as a candidate target, so
+    ``open('/.git/config','w')`` yields ``.git/config``. A read-only body
+    yields nothing. ``shutil.copy(src, dst)`` where ``dst`` is a runtime
+    variable yields nothing either (the static matcher cannot solve that;
+    the Edit/Write tool gate is the right defense).
 
     Bodies up to ``_EVAL_BODY_SCAN_MAX_BYTES`` (1 MiB) are scanned
     end-to-end; over that we emit ``_EVAL_BODY_OVERFLOW_SENTINEL`` so
-    ``protected_files`` ASKs instead of silently dropping content past
+    ``protected_files`` denies instead of silently dropping content past
     the cap.
     """
     out: list[str] = []
-    patterns = _effective_patterns()
+    active = patterns if patterns is not None else _effective_patterns()
     for i, tok in enumerate(tokens):
         head = tok.rsplit("/", 1)[-1]
         # Strip a trailing version suffix to the base interpreter name:
@@ -706,160 +770,156 @@ def _interpreter_eval_targets(tokens: list[str]) -> list[str]:
                     body = rest[j + 1]
                     if len(body) > _EVAL_BODY_SCAN_MAX_BYTES:
                         out.append(_EVAL_BODY_OVERFLOW_SENTINEL)
-                    else:
-                        out.extend(pat for pat in patterns if pat in body)
+                    elif _EVAL_WRITE_INTENT_RE.search(body):
+                        out.extend(pat for pat in active if pat in body)
                     break
             break
     return out
 
 
-def _bash_first_protected_match(command: str) -> str | None:
-    """Return the first protected pattern matched by a bash write target."""
-    for target in bash_write_targets(command):
-        matched = is_protected(target)
-        if matched is not None:
-            return matched
+# ``guard allowlist <verb>`` and ``guard mode <mode>`` rewrite the allowlist
+# through guard's own CLI, so they count as a write to it.
+_GUARD_ALLOWLIST_FILE = ".claude/guard/allowlist.json"
+_GUARD_ALLOWLIST_WRITES: frozenset[str] = frozenset(
+    {"disable-rule", "enable-rule", "allow-command", "remove-command"}
+)
 
-    # Tar extract-dir is a directory write target — check whether it sits
-    # anywhere on a protected file's directory chain (an extraction there
-    # could overwrite the protected file).
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        tokens = []
+
+def _guard_cli_writes_allowlist(tokens: list[str]) -> bool:
+    """Return True for a ``guard allowlist <write>`` or ``guard mode <mode>`` command."""
     for i, tok in enumerate(tokens):
-        head = tok.rsplit("/", 1)[-1]
-        if head != "tar":
+        if tok.rsplit("/", 1)[-1] != "guard":
             continue
-        extract_dir = _tar_extract_dir(tokens[i + 1 :])
-        if extract_dir is None:
-            continue
-        matched = is_protected_parent_dir(extract_dir)
+        args = [t for t in tokens[i + 1 :] if not t.startswith("-")]
+        if args[:1] == ["allowlist"]:
+            return len(args) > 1 and args[1] in _GUARD_ALLOWLIST_WRITES
+        if args[:1] == ["mode"]:
+            return len(args) > 1
+    return False
+
+
+def _bash_first_protected_match(command: str, patterns: Sequence[str]) -> str | None:
+    """Return the first protected pattern matched by a bash write target."""
+    for target in bash_write_targets(command, patterns):
+        matched = is_protected(target, patterns)
         if matched is not None:
             return matched
-    return None
-
-
-def _fallthrough_first_protected_match(tool_input: dict[str, Any]) -> str | None:
-    """Scan every path-like token in ``tool_input`` against ``is_protected``.
-
-    Defense-in-depth: any tool we don't have an explicit handler for is run
-    through the universal path scanner. If a future tool (or an existing one
-    invoked with an unexpected payload shape) targets a protected file, we
-    surface ASK rather than miss it.
-    """
-    for token in all_paths_in(tool_input):
-        matched = is_protected(token)
-        if matched is not None:
-            return matched
+    try:
+        commands = _split_commands(command)
+    except ValueError:
+        commands = []
+    for tokens in commands:
+        if _guard_cli_writes_allowlist(tokens):
+            return _GUARD_ALLOWLIST_FILE
+        # Tar extract-dir is a directory write target: an extraction anywhere
+        # on a protected file's directory chain could overwrite it.
+        for i, tok in enumerate(tokens):
+            if tok.rsplit("/", 1)[-1] != "tar":
+                continue
+            extract_dir = _tar_extract_dir(tokens[i + 1 :])
+            matched = is_protected_parent_dir(extract_dir or "", patterns)
+            if matched is not None:
+                return matched
     return None
 
 
 _FILE_PATH_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 
 
-def _excerpt_for_fallthrough(tool_input: dict[str, Any]) -> str:
-    """Return a short, human-readable excerpt for a fallthrough match."""
-    for token in all_paths_in(tool_input):
-        return token
-    return ""
-
-
-def _match_for_tool(tool_name: str, tool_input: dict[str, Any]) -> tuple[str | None, str]:
+def _match_for_tool(
+    tool_name: str, tool_input: dict[str, Any], patterns: Sequence[str]
+) -> tuple[str | None, str]:
     """Return ``(matched_pattern, excerpt)`` for the given Claude Code tool payload.
 
     Pure: no I/O, no allowlist consultation. ``matched_pattern`` is ``None``
-    when nothing protected is touched; ``excerpt`` is the human-readable
+    when nothing protected is written; ``excerpt`` is the human-readable
     string used in audit-log records.
 
-    Three cases:
-
-    * ``Write`` / ``Edit`` / ``MultiEdit`` / ``NotebookEdit`` — pull the
-      ``file_path`` (or ``notebook_path``) and run ``is_protected``.
-    * ``Bash`` — extract write targets from the command and run the bash
-      first-match scanner.
-    * Anything else — defence-in-depth scan via
-      ``_fallthrough_first_protected_match`` over every path-like token in
-      the payload.
+    * ``Write`` / ``Edit`` / ``MultiEdit`` / ``NotebookEdit``: run
+      ``is_protected`` on the ``file_path`` (or ``notebook_path``).
+    * ``Bash``: extract write targets from the command.
+    * Everything else (``Read``, ``Grep``, ``Agent``, ``AskUserQuestion``,
+      ...) never writes a file itself, so naming a protected path is fine.
     """
     if tool_name in _FILE_PATH_TOOLS:
         # NotebookEdit uses ``notebook_path``; the others use ``file_path``.
-        file_path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
-        if not isinstance(file_path, str) or not file_path:
-            return None, ""
-        return is_protected(file_path), file_path
+        target = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+        target = target if isinstance(target, str) else ""
+        return is_protected(target, patterns), target
     if tool_name == "Bash":
         command = tool_input.get("command", "")
-        if not isinstance(command, str) or not command:
-            return None, ""
-        return _bash_first_protected_match(command), command
-    # Defence-in-depth: any other tool shape gets the universal path scanner.
-    matched = _fallthrough_first_protected_match(tool_input)
-    if matched is None:
-        return None, ""
-    return matched, _excerpt_for_fallthrough(tool_input)
+        command = command if isinstance(command, str) else ""
+        return _bash_first_protected_match(command, patterns), command
+    return None, ""
 
 
-def decide(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any] | None:
-    """Return an ``ask`` envelope when a protected path is being touched.
+_TELL_THE_USER = "Don't retry or route around it. Tell the user what you want to change and why"
 
-    Pure decision logic — no logging, no allowlist consultation. Both
-    ``hook()`` (production entry, orchestrates logging + allowlist) and the
-    registry adapter (``guard test``, no side effects) call this. Splitting
-    the match logic out of ``hook()`` is what stops the two from drifting.
+
+def deny_reason(matched: str) -> str:
+    """Return the steering deny reason for a protected-pattern match."""
+    if matched in _UN_OVERRIDABLE_PATTERNS:
+        return (
+            f"Protected file: {matched}. The allowlist decides what guard lets "
+            "through, so agents never change it, by editing the file or by "
+            f"running `guard allowlist` or `guard mode`. {_TELL_THE_USER}; they "
+            "can run the guard command themselves with `! guard ...`."
+        )
+    if matched in PROTECTED_PATTERNS:
+        return (
+            f"Protected file: {matched}. guard blocks agent edits to its own code "
+            "and subagent scope so a session can't rewrite its own guardrails. "
+            f"{_TELL_THE_USER}; they can make the edit, or allow it with "
+            f"`guard allowlist allow-command --rule {_HOOK_ID} "
+            "--command '<path or exact command>' --reason '...'`."
+        )
+    if matched in LOCKDOWN_PATTERNS:
+        return (
+            f"Protected file: {matched} (guard lockdown). Lockdown keeps agents off "
+            "git hooks and config, agent instruction files, MCP registrations and "
+            f"cloud profiles. {_TELL_THE_USER}; they can make the edit, or leave "
+            "lockdown with `guard mode enforce`."
+        )
+    return (
+        f"Protected file: {matched} (project protected list). {_TELL_THE_USER}; "
+        "they can make the edit."
+    )
+
+
+def decide(
+    tool_name: str, tool_input: dict[str, Any], *, lockdown: bool = False
+) -> dict[str, Any] | None:
+    """Return a steering ``deny`` envelope when a protected path is written.
+
+    Pure decision logic for the registry adapter (``guard test``): no
+    logging, no allowlist, ``enforce`` patterns unless ``lockdown``.
+    ``hook()`` shares ``_match_for_tool`` so the two can't drift.
     """
-    matched, _ = _match_for_tool(tool_name, tool_input)
+    patterns = _effective_patterns(mode="lockdown" if lockdown else "enforce")
+    matched, _ = _match_for_tool(tool_name, tool_input, patterns)
     if matched is None:
         return None
-    return emit_pretooluse_decision("ask", f"Protected file: {matched} — confirm edit")
+    return emit_pretooluse_decision("deny", deny_reason(matched))
 
 
 def hook(payload: dict[str, Any]) -> None:
     """Top-level hook entry point."""
     tool_name = payload.get("tool_name", "")
     tool_input = payload.get("tool_input", {}) or {}
-    if not isinstance(tool_input, dict):
+    if not isinstance(tool_name, str) or not isinstance(tool_input, dict):
         return
-
-    matched, excerpt = _match_for_tool(tool_name, tool_input)
+    patterns = _effective_patterns(mode=load_allowlist().mode)
+    matched, excerpt = _match_for_tool(tool_name, tool_input, patterns)
     if matched is None:
         return
-
-    cwd_val = payload.get("cwd")
-    cwd_str = cwd_val if isinstance(cwd_val, str) else None
-    session_id = str(payload.get("session_id", ""))
-
-    # Trust-root protections are NOT allowlist-bypassable: writes to the
-    # allowlist itself or to ``.claude/settings*.json`` always go through
-    # ASK regardless of any ``disable_rules`` / ``allow_commands`` entry.
-    if matched not in _UN_OVERRIDABLE_PATTERNS:
-        bypass = hook_bypass_reason(load_allowlist(), _HOOK_ID, excerpt)
-        if bypass is not None:
-            log_decision(
-                hook_id=_HOOK_ID,
-                event="PreToolUse",
-                tool_name=tool_name,
-                decision="pass",
-                reason=bypass,
-                command_excerpt=excerpt,
-                session_id=session_id,
-                cwd=cwd_str,
-            )
-            return
-
-    reason = f"Protected file: {matched} — confirm edit"
-    envelope = emit_pretooluse_decision("ask", reason)
-    log_decision(
-        hook_id=_HOOK_ID,
-        event="PreToolUse",
-        tool_name=tool_name,
-        decision="ask",
-        reason=reason,
-        command_excerpt=excerpt,
-        session_id=session_id,
-        cwd=cwd_str,
+    apply_decision(
+        _HOOK_ID,
+        payload,
+        emit_pretooluse_decision("deny", deny_reason(matched)),
+        excerpt,
+        trust_root=matched in PROTECTED_PATTERNS,
+        overridable=matched not in _UN_OVERRIDABLE_PATTERNS,
     )
-    sys.stdout.write(json.dumps(envelope))
 
 
 if __name__ == "__main__":

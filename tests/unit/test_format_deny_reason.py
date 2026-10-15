@@ -12,34 +12,23 @@ from guard.hooks.bash_command_validator import _REQUEST_CONTEXT, _format_deny_re
 @pytest.fixture(autouse=True)
 def _reset_request_context() -> None:
     _REQUEST_CONTEXT.pop("permission_mode", None)
+    _REQUEST_CONTEXT.pop("lockdown", None)
     yield
     _REQUEST_CONTEXT.pop("permission_mode", None)
+    _REQUEST_CONTEXT.pop("lockdown", None)
 
 
-def test_interactive_footer_present() -> None:
-    _REQUEST_CONTEXT["permission_mode"] = "default"
+@pytest.mark.parametrize("mode", ["default", "auto", "dontAsk", "bypassPermissions"])
+def test_interactive_footer_in_every_permission_mode(mode: str) -> None:
+    _REQUEST_CONTEXT["permission_mode"] = mode
     result = _format_deny_reason("bash.test", "test body")
     assert "explain what this rule protects against" in result
 
 
-def test_strict_footer_present() -> None:
-    _REQUEST_CONTEXT["permission_mode"] = "dontAsk"
+def test_lockdown_footer_present() -> None:
+    _REQUEST_CONTEXT["lockdown"] = True
     result = _format_deny_reason("bash.test", "test body")
-    assert "hard fence in strict mode" in result
-
-
-def test_bypass_permissions_footer_present() -> None:
-    _REQUEST_CONTEXT["permission_mode"] = "bypassPermissions"
-    result = _format_deny_reason("bash.test", "test body")
-    assert "hard fence in strict mode" in result
-
-
-def test_auto_mode_treated_as_strict() -> None:
-    """`auto` is Claude Code's classifier-mediated unattended mode and must
-    take the strict footer / default-deny posture."""
-    _REQUEST_CONTEXT["permission_mode"] = "auto"
-    result = _format_deny_reason("bash.test", "test body")
-    assert "hard fence in strict mode" in result
+    assert "guard lockdown is on" in result
 
 
 @pytest.mark.parametrize(
@@ -55,15 +44,15 @@ def test_annunciator_prefix_carries_mode(mode: str) -> None:
 
 
 def test_annunciator_prefix_via_decide_end_to_end() -> None:
-    """End-to-end: decide() with permission_mode=dontAsk yields a deny whose
-    reason carries the strict-mode annunciator. Defends against regressions
-    that drop _REQUEST_CONTEXT threading from decide() into _format_deny_reason.
+    """End-to-end: decide() threads permission_mode and lockdown through
+    _REQUEST_CONTEXT into _format_deny_reason.
     """
     from guard.hooks.bash_command_validator import decide
 
-    strict = decide("flarbnoz --gronk", permission_mode="dontAsk")
+    strict = decide("flarbnoz --gronk", permission_mode="auto", lockdown=True)
     assert strict is not None
-    assert "permission_mode=dontAsk" in strict["permissionDecisionReason"]
+    assert "permission_mode=auto" in strict["permissionDecisionReason"]
+    assert "guard lockdown is on" in strict["permissionDecisionReason"]
 
     interactive = decide("rm -rf /", permission_mode="default")
     assert interactive is not None

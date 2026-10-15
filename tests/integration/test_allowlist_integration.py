@@ -26,6 +26,10 @@ def _is_allow(decision: dict | None) -> bool:
     return decision is not None and decision.get("permissionDecision") == "allow"
 
 
+_REGISTRY = "/repo/src/guard/registry.py"
+_ALLOWLIST = "/repo/.claude/guard/allowlist.json"
+
+
 @pytest.fixture
 def allowlist_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point ``GUARD_DATA_DIR`` at a clean tmp dir; return the dir.
@@ -214,17 +218,12 @@ def test_protected_files_disabled_by_allowlist(
     )
     payload = {
         "tool_name": "Edit",
-        "tool_input": {
-            "file_path": "/repo/CLAUDE.md",
-            "old_string": "x",
-            "new_string": "y",
-        },
+        "tool_input": {"file_path": _REGISTRY, "old_string": "x", "new_string": "y"},
         "session_id": "s1",
     }
     hook(payload)
     # No envelope emitted (Claude Code default-allows).
-    out = capsys.readouterr().out
-    assert out == ""
+    assert capsys.readouterr().out == ""
     # But the bypass IS in the audit log.
     last = json.loads(decision_log_env.read_text(encoding="utf-8").strip().splitlines()[-1])
     assert last["decision"] == "pass"
@@ -238,29 +237,36 @@ def test_protected_files_exact_path_allowlisted(
 ) -> None:
     from guard.hooks.protected_files import hook
 
-    file_path = "/repo/CLAUDE.md"
     _write_allowlist(
         allowlist_home / "allowlist.json",
         {
             "allow_commands": [
                 {
                     "rule": "guard.protected_files",
-                    "command": file_path,
-                    "reason": "intentional CLAUDE.md update for the rebrand task",
+                    "command": _REGISTRY,
+                    "reason": "intentional registry update for the release",
                 }
             ]
         },
     )
     payload = {
         "tool_name": "Edit",
-        "tool_input": {"file_path": file_path, "old_string": "x", "new_string": "y"},
+        "tool_input": {"file_path": _REGISTRY, "old_string": "x", "new_string": "y"},
         "session_id": "s1",
     }
     hook(payload)
     assert capsys.readouterr().out == ""
     last = json.loads(decision_log_env.read_text(encoding="utf-8").strip().splitlines()[-1])
     assert last["decision"] == "pass"
-    assert "intentional CLAUDE.md update" in last["reason"]
+    assert "intentional registry update" in last["reason"]
+
+
+def _protected_files_exits_deny(payload: dict, capsys: pytest.CaptureFixture[str]) -> bool:
+    from guard.hooks.protected_files import hook
+
+    with pytest.raises(SystemExit) as exc:
+        hook(payload)
+    return exc.value.code == 2 and '"deny"' in capsys.readouterr().out
 
 
 def test_protected_files_exact_path_does_not_match_other_paths(
@@ -268,112 +274,52 @@ def test_protected_files_exact_path_does_not_match_other_paths(
     decision_log_env: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from guard.hooks.protected_files import hook
-
     _write_allowlist(
         allowlist_home / "allowlist.json",
         {
             "allow_commands": [
-                {
-                    "rule": "guard.protected_files",
-                    "command": "/repo/CLAUDE.md",
-                    "reason": "x",
-                }
+                {"rule": "guard.protected_files", "command": _REGISTRY, "reason": "x"}
             ]
         },
     )
-    # Different protected file → still asks.
     payload = {
         "tool_name": "Edit",
         "tool_input": {
-            "file_path": "/repo/.cursorrules",
+            "file_path": "/repo/src/guard/_utils.py",
             "old_string": "x",
             "new_string": "y",
         },
         "session_id": "s1",
     }
-    hook(payload)
-    out = capsys.readouterr().out
-    # An "ask" envelope was emitted.
-    assert "permissionDecision" in out
-    assert "ask" in out
+    assert _protected_files_exits_deny(payload, capsys)
 
 
-# === Trust-root: allowlist cannot bypass writes to allowlist itself / settings ===
+# === Trust root: no allowlist entry can unlock the allowlist itself ===
 
 
 @pytest.mark.parametrize(
-    "trust_root_path",
+    "doc",
     [
-        "/repo/.claude/guard/allowlist.json",
-        "/repo/.claude/settings.json",
-        "/repo/.claude/settings.local.json",
-    ],
-)
-def test_protected_files_trust_root_unbypassable_by_disable_rules(
-    allowlist_home: Path,
-    decision_log_env: Path,
-    capsys: pytest.CaptureFixture[str],
-    trust_root_path: str,
-) -> None:
-    """A blanket ``disable_rules: ["guard.protected_files"]`` MUST NOT silence
-    edits to the allowlist itself or to ``.claude/settings*.json`` — those
-    files control whether guard runs at all and whether allowlist overrides
-    apply, so the user always sees an ASK for them.
-    """
-    from guard.hooks.protected_files import hook
-
-    _write_allowlist(
-        allowlist_home / "allowlist.json", {"disable_rules": ["guard.protected_files"]}
-    )
-    payload = {
-        "tool_name": "Edit",
-        "tool_input": {"file_path": trust_root_path, "old_string": "x", "new_string": "y"},
-        "session_id": "s1",
-    }
-    hook(payload)
-    out = capsys.readouterr().out
-    assert "permissionDecision" in out
-    assert "ask" in out
-
-
-@pytest.mark.parametrize(
-    "trust_root_path",
-    [
-        "/repo/.claude/guard/allowlist.json",
-        "/repo/.claude/settings.json",
-        "/repo/.claude/settings.local.json",
-    ],
-)
-def test_protected_files_trust_root_unbypassable_by_allow_command(
-    allowlist_home: Path,
-    decision_log_env: Path,
-    capsys: pytest.CaptureFixture[str],
-    trust_root_path: str,
-) -> None:
-    """An exact-path ``allow_commands`` entry for a trust-root file MUST NOT
-    silence the ASK either. Trust roots are always-ASK.
-    """
-    from guard.hooks.protected_files import hook
-
-    _write_allowlist(
-        allowlist_home / "allowlist.json",
+        {"disable_rules": ["guard.protected_files"]},
         {
             "allow_commands": [
-                {
-                    "rule": "guard.protected_files",
-                    "command": trust_root_path,
-                    "reason": "should NOT bypass — trust root",
-                }
+                {"rule": "guard.protected_files", "command": _ALLOWLIST, "reason": "x"}
             ]
         },
-    )
+    ],
+    ids=["disable_rules", "allow_commands"],
+)
+def test_protected_files_allowlist_file_is_unbypassable(
+    allowlist_home: Path,
+    decision_log_env: Path,
+    capsys: pytest.CaptureFixture[str],
+    doc: dict,
+) -> None:
+    """An allowlist that lets agents edit the allowlist grants itself anything."""
+    _write_allowlist(allowlist_home / "allowlist.json", doc)
     payload = {
         "tool_name": "Edit",
-        "tool_input": {"file_path": trust_root_path, "old_string": "x", "new_string": "y"},
+        "tool_input": {"file_path": _ALLOWLIST, "old_string": "x", "new_string": "y"},
         "session_id": "s1",
     }
-    hook(payload)
-    out = capsys.readouterr().out
-    assert "permissionDecision" in out
-    assert "ask" in out
+    assert _protected_files_exits_deny(payload, capsys)

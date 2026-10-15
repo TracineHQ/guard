@@ -13,11 +13,15 @@ from typing import TYPE_CHECKING
 
 from guard.hooks.protected_files import (
     _bash_first_protected_match,
+    _effective_patterns,
     bash_write_targets,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+# Most shapes here target the lockdown-only list (.git/config, CLAUDE.md, ...).
+_LOCKDOWN = _effective_patterns(mode="lockdown")
 
 
 # === awk -i inplace (regression — already supported, must stay green) ===
@@ -129,22 +133,9 @@ def test_find_without_exec_does_not_emit_root() -> None:
     assert "/etc" not in targets
 
 
-def test_find_exec_on_claude_md_dir_flagged_as_protected() -> None:
-    """Real bypass: find on a project's CLAUDE.md tree with -exec."""
-    cmd = "find /Users/me/proj/.claude -name settings.json -exec sh -c 'cat > $1' _ {} \\;"
-    matched = _bash_first_protected_match(cmd)
-    # The root ``/Users/me/proj/.claude`` isn't itself a protected pattern,
-    # but the recursive search WITHIN it inevitably touches protected files.
-    # We intentionally don't try to be clever about the inner path —
-    # the conservative rule is: emit the root, let is_protected decide.
-    # ``.claude`` isn't a protected pattern by itself, so this returns None.
-    # The real win is when the root IS protected.
-    del matched  # not asserting on this — the next test does the protected case
-
-
 def test_find_exec_on_dot_git_hooks_root_flagged() -> None:
     cmd = "find /repo/.git/hooks -exec rm {} \\;"
-    matched = _bash_first_protected_match(cmd)
+    matched = _bash_first_protected_match(cmd, _LOCKDOWN)
     assert matched == ".git/hooks"
 
 
@@ -173,7 +164,7 @@ def test_find_fprint0_emits_file_target() -> None:
 
 def test_find_fprint_on_protected_path_flagged() -> None:
     """Real bypass: ``find . -fprint .git/config`` overwrites the protected file."""
-    matched = _bash_first_protected_match("find . -fprint /repo/.git/config")
+    matched = _bash_first_protected_match("find . -fprint /repo/.git/config", _LOCKDOWN)
     assert matched == ".git/config"
 
 
@@ -191,7 +182,7 @@ def test_nvim_headless_plus_command_extracts_target() -> None:
 
 
 def test_nvim_headless_on_protected_path_flagged() -> None:
-    matched = _bash_first_protected_match("nvim --headless -c 'wq' /repo/CLAUDE.md")
+    matched = _bash_first_protected_match("nvim --headless -c 'wq' /repo/CLAUDE.md", _LOCKDOWN)
     assert matched == "CLAUDE.md"
 
 
@@ -200,14 +191,14 @@ def test_nvim_headless_on_protected_path_flagged() -> None:
 
 def test_python_dash_c_with_protected_path_literal_extracted() -> None:
     cmd = "python -c \"open('/repo/.git/config','w').write('x')\""
-    targets = bash_write_targets(cmd)
+    targets = bash_write_targets(cmd, _LOCKDOWN)
     # The pattern ``.git/config`` should appear among extracted targets.
     assert ".git/config" in targets
 
 
 def test_python_dash_c_without_protected_literal_yields_none() -> None:
     cmd = "python -c 'print(2 + 2)'"
-    targets = bash_write_targets(cmd)
+    targets = bash_write_targets(cmd, _LOCKDOWN)
     # No protected pattern literal in body → no eval-derived targets.
     # (Other extractors might add other things; we only assert no protected ones.)
     assert ".git/config" not in targets
@@ -215,66 +206,65 @@ def test_python_dash_c_without_protected_literal_yields_none() -> None:
 
 def test_php_dash_r_with_protected_path_literal_extracted() -> None:
     cmd = "php -r \"file_put_contents('CLAUDE.md','x');\""
-    targets = bash_write_targets(cmd)
+    targets = bash_write_targets(cmd, _LOCKDOWN)
     assert "CLAUDE.md" in targets
 
 
 def test_perl_dash_e_with_protected_path_literal_extracted() -> None:
     cmd = "perl -e \"open(F,'>','CLAUDE.md');print F 'x'\""
-    targets = bash_write_targets(cmd)
+    targets = bash_write_targets(cmd, _LOCKDOWN)
     assert "CLAUDE.md" in targets
 
 
 def test_node_dash_e_with_protected_path_literal_extracted() -> None:
     cmd = "node -e \"require('fs').writeFileSync('.cursorrules','x')\""
-    targets = bash_write_targets(cmd)
+    targets = bash_write_targets(cmd, _LOCKDOWN)
     assert ".cursorrules" in targets
 
 
 def test_ruby_dash_e_with_protected_path_literal_extracted() -> None:
     cmd = "ruby -e \"File.write('CLAUDE.md','x')\""
-    targets = bash_write_targets(cmd)
+    targets = bash_write_targets(cmd, _LOCKDOWN)
     assert "CLAUDE.md" in targets
 
 
 def test_python3_versioned_basename_handled() -> None:
     """``python3.11 -c '...'`` should still match the python interpreter rule."""
     cmd = "python3.11 -c \"open('/repo/CLAUDE.md','w')\""
-    targets = bash_write_targets(cmd)
+    targets = bash_write_targets(cmd, _LOCKDOWN)
     assert "CLAUDE.md" in targets
 
 
 def test_php_without_dash_r_does_not_extract() -> None:
     """``php -f script.php`` reads from a file — no eval body to scan."""
     cmd = "php -f /tmp/script.php"
-    targets = bash_write_targets(cmd)
+    targets = bash_write_targets(cmd, _LOCKDOWN)
     # ``/tmp/script.php`` is the script SOURCE, not a protected pattern.
     assert "CLAUDE.md" not in targets
 
 
-# === Eval-body overflow → forced-ASK sentinel ===
+# === Eval-body overflow → forced-deny sentinel ===
 
 
 def test_eval_body_under_cap_scans_normally() -> None:
     """A 64 KiB body containing a protected literal still surfaces it."""
     pad = "x" * (64 * 1024)
     cmd = f"python -c \"{pad};open('/repo/.git/config','w')\""
-    targets = bash_write_targets(cmd)
+    targets = bash_write_targets(cmd, _LOCKDOWN)
     assert ".git/config" in targets
 
 
 def test_eval_body_over_cap_emits_overflow_sentinel() -> None:
     """An eval body padded past the 1 MiB cap MUST NOT silently drop a
-    literal sitting in the tail. The sentinel target ``CLAUDE.md`` forces
-    ``protected_files`` through ASK regardless of body content.
+    literal sitting in the tail. The trust-root sentinel target forces a
+    deny regardless of body content, in every guard mode.
     """
     # 1 MiB + 1 KiB padding — the protected literal at the end is NEVER
     # reached by the substring scan because the body is >= cap.
     pad = "x" * (1024 * 1024 + 1024)
     cmd = f"python -c \"{pad};open('/repo/.git/config','w')\""
-    targets = bash_write_targets(cmd)
-    # Sentinel triggers the CLAUDE.md protected-pattern match.
-    assert "CLAUDE.md" in targets
+    targets = bash_write_targets(cmd, _LOCKDOWN)
+    assert "guard/_utils.py" in targets
 
 
 def test_eval_body_over_cap_protected_match_is_forced() -> None:
@@ -284,5 +274,5 @@ def test_eval_body_over_cap_protected_match_is_forced() -> None:
     """
     pad = "x" * (1024 * 1024 + 1024)
     cmd = f"python -c \"{pad};open('/repo/.git/config','w')\""
-    matched = _bash_first_protected_match(cmd)
+    matched = _bash_first_protected_match(cmd, _LOCKDOWN)
     assert matched is not None

@@ -7,11 +7,9 @@ Provides:
   ``~/.claude/guard-decisions.jsonl`` (schema v1, see
   ``docs/output-format.md``)
 - ``log_decision()`` — the single canonical writer hooks call when they
-  emit an allow/deny/ask decision
+  emit an allow/deny decision
 - ``read_permission_mode(hook_input)`` — extract the documented Claude Code
-  ``permission_mode`` from a PreToolUse payload
-- ``is_strict_mode(hook_input)`` — convenience predicate for
-  ``permission_mode in {auto, dontAsk, bypassPermissions}``
+  ``permission_mode`` from a PreToolUse payload (logged, never a policy input)
 - ``sanitize_for_stderr()`` — strip control chars before writing user input
   to stderr
 
@@ -76,98 +74,19 @@ def _log_debug(msg: str) -> None:
         sys.stderr.write(f"[guard] {msg}\n")
 
 
-# Strict modes route through guard's default-deny path; the rest pass through
-# advisory-mode evaluation. The documented Claude Code permission_mode values
-# are default / plan / acceptEdits / auto / dontAsk / bypassPermissions. ``auto``
-# is Anthropic's classifier-mediated unattended-operation mode (no human at the
-# keyboard) — same threat model as ``dontAsk``/``bypassPermissions``, so it
-# routes through default-deny too.
-STRICT_PERMISSION_MODES: frozenset[str] = frozenset({"auto", "dontAsk", "bypassPermissions"})
-
-
-_CLAUDE_AUTONOMOUS_TRUTHY = frozenset({"1", "true", "yes", "on"})
-_CLAUDE_AUTONOMOUS_WARNED: dict[str, bool] = {"once": False}
-
-
-def _autonomous_deprecation_sentinel_path() -> Path:
-    """Resolve the sentinel path against the current ``GUARD_DATA_DIR``.
-
-    Computed lazily (not at module import) so test fixtures that point
-    ``GUARD_DATA_DIR`` at a per-test tmpdir get an isolated sentinel.
-    """
-    return (
-        Path(os.environ.get("GUARD_DATA_DIR", str(Path.home() / ".claude" / "guard")))
-        / ".autonomous-warned"
-    )
-
-
-def _emit_autonomous_deprecation_warning() -> None:
-    """Emit the CLAUDE_AUTONOMOUS deprecation warning at most once per machine.
-
-    Each PreToolUse hook is a fresh Python subprocess, so a module-level
-    "warned" flag fires the warning on every invocation. A sentinel file in
-    ``GUARD_HOME`` survives subprocesses; once it exists, subsequent
-    invocations skip the stderr write. Failure to create the sentinel falls
-    back to the in-process flag so warnings still appear.
-    """
-    if _CLAUDE_AUTONOMOUS_WARNED["once"]:
-        return
-    sentinel = _autonomous_deprecation_sentinel_path()
-    try:
-        if sentinel.exists():
-            _CLAUDE_AUTONOMOUS_WARNED["once"] = True
-            return
-    except OSError:
-        pass
-    sys.stderr.write(
-        "guard: CLAUDE_AUTONOMOUS is deprecated; set Claude Code's "
-        "permission_mode (dontAsk/bypassPermissions/auto) instead. "
-        "The env-var fallback will be removed in v1.5.0.\n"
-    )
-    _CLAUDE_AUTONOMOUS_WARNED["once"] = True
-    with contextlib.suppress(OSError):
-        sentinel.parent.mkdir(parents=True, exist_ok=True)
-        sentinel.touch()
-
-
 def read_permission_mode(hook_input: dict[str, Any] | None) -> str:
     """Return ``permission_mode`` from a PreToolUse hook-input payload.
 
     Defaults to ``"default"`` when the field is absent or non-string.
-    Unknown literal values are returned as-is so downstream callers can
-    emit a one-line warning and treat them as advisory.
-
-    Backwards compatibility for one minor cycle: if the payload carries no
-    ``permission_mode`` field at all AND the legacy ``CLAUDE_AUTONOMOUS``
-    env var is set to a truthy value, escalate to ``"dontAsk"`` and emit a
-    one-time stderr deprecation warning. An explicit ``"default"`` from
-    Claude Code is honored as-is — the env var no longer overrides an
-    explicit payload value. The env-var path will be removed in v1.5.0.
+    Unknown literal values are returned as-is. The value is recorded in the
+    decision log for context; it never changes what guard decides. Strict
+    default-deny is opt-in through ``guard mode lockdown``.
     """
-    explicit_mode: str | None = None
     if hook_input is not None:
         raw = hook_input.get("permission_mode")
         if isinstance(raw, str) and raw.strip():
-            explicit_mode = raw.strip()
-    if explicit_mode is not None:
-        return explicit_mode
-    env = os.environ.get("CLAUDE_AUTONOMOUS", "").strip().lower()
-    if env in _CLAUDE_AUTONOMOUS_TRUTHY:
-        _emit_autonomous_deprecation_warning()
-        return "dontAsk"
+            return raw.strip()
     return "default"
-
-
-def is_strict_mode(hook_input: dict[str, Any] | None) -> bool:
-    """Return True when ``permission_mode`` is a strict (default-deny) mode.
-
-    Strict modes (``auto``, ``dontAsk``, ``bypassPermissions``) all indicate
-    unattended operation: ``auto`` is Claude Code's classifier-mediated
-    unattended mode; the other two are explicit opt-ins. All three trigger
-    guard's default-deny path. Other modes (``default``, ``plan``,
-    ``acceptEdits``) stay in advisory evaluation.
-    """
-    return read_permission_mode(hook_input) in STRICT_PERMISSION_MODES
 
 
 # === Shared Hook Utilities ===
@@ -396,7 +315,7 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
     hook_id: str,
     event: str,
     tool_name: str | None,
-    decision: Literal["allow", "deny", "ask", "pass", "defer"],
+    decision: Literal["allow", "deny", "pass", "defer"],
     reason: str,
     command_excerpt: str | None = None,
     session_id: str = "",
@@ -411,7 +330,7 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
 
     - ``v: 1`` -- short schema-version alias for fast consumers
     - ``schema_version: 1`` -- long form, kept for backward compatibility
-    - ``mode`` -- effective enforcement posture (``enforce``/``shadow``/``off``);
+    - ``mode`` -- effective guard mode (``enforce``/``shadow``/``off``/``lockdown``);
       callers pass the value resolved from the allowlist via the ``mode``
       kwarg, defaulting to ``"enforce"`` when omitted
     - ``timestamp`` -- ISO-8601 UTC with microsecond precision and ``Z`` suffix
@@ -424,7 +343,7 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
         hook_id: Namespaced hook id, e.g. ``"guard.bash_command_validator"``.
         event: Claude Code event name (typically ``"PreToolUse"``).
         tool_name: ``Bash``/``Edit``/``Read``/etc., or ``None``.
-        decision: One of ``allow``/``deny``/``ask``/``pass``/``defer``.
+        decision: One of ``allow``/``deny``/``pass``/``defer``.
         reason: Human-readable rationale (truncated to 1024 chars).
         command_excerpt: Optional bash-command excerpt (truncated to 4096).
         session_id: Claude Code session id.
@@ -563,28 +482,8 @@ def log_permission_request(  # noqa: PLR0913 -- mirror log_decision's keyword-on
     append_jsonl(GUARD_DECISIONS_PATH, record)
 
 
-def make_decision(decision: str, reason: str) -> str:
-    """Build a ``hookSpecificOutput`` JSON string for PreToolUse decisions.
-
-    Args:
-        decision: ``"allow"``, ``"deny"``, or ``"ask"``.
-        reason: Human-readable explanation.
-
-    Returns:
-        JSON string ready to print to stdout.
-    """
-    output = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": decision,
-            "permissionDecisionReason": reason,
-        }
-    }
-    return json.dumps(output)
-
-
 def emit_pretooluse_decision(
-    decision: Literal["allow", "deny", "ask"],
+    decision: Literal["allow", "deny"],
     reason: str,
     *,
     updated_input: dict[str, Any] | None = None,
@@ -593,11 +492,11 @@ def emit_pretooluse_decision(
     """Build a PreToolUse decision envelope.
 
     Args:
-        decision: ``"allow"``, ``"deny"``, or ``"ask"``. ``"ask"`` is permitted
-            because advisory hooks (e.g. ``protected_files``) exist precisely
-            to surface a permission prompt; authoritative validators stick to
-            ``"allow"``/``"deny"``.
-        reason: Human-readable rationale surfaced to the user/agent.
+        decision: ``"allow"`` or ``"deny"``. Guard never emits ``"ask"``: a
+            flagged call is denied with a reason that steers the agent to a
+            safer form or back to the user.
+        reason: Human-readable rationale surfaced to the user/agent. For a
+            deny, say what to do instead.
         updated_input: Optional rewritten tool input merged into the envelope.
         additional_context: Optional extra context string for the agent.
 
@@ -735,8 +634,9 @@ def safe_main(hook_fn: Callable[[dict[str, Any]], None]) -> None:
 
     Args:
         hook_fn: Callable that takes a dict payload. May call
-            ``sys.exit(2)`` for hard deny, or ``print(make_decision(...))``
-            for decisions. No return value is required for passthrough.
+            ``sys.exit(2)`` for hard deny, or print an
+            ``emit_pretooluse_decision(...)`` envelope for decisions. No
+            return value is required for passthrough.
     """
     payload: dict[str, Any] | None = None
     try:

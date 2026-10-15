@@ -130,13 +130,13 @@ class TestAskSubcommands:
             "fetch",
         ],
     )
-    def test_write_subcommands_ask(self, subcmd):
+    def test_write_subcommands_deny(self, subcmd):
         decision, _ = _run(f"git -C /path {subcmd}")
-        assert decision == "ask"
+        assert decision == "deny"
 
     def test_config_write(self):
         decision, _ = _run("git -C /path config user.email foo@bar.com")
-        assert decision == "ask"
+        assert decision == "deny"
 
 
 class TestSecurity:
@@ -158,7 +158,7 @@ class TestSecurity:
 
     def test_config_trailing_get_bypass(self):
         decision, _ = _run("git -C /path config user.email evil --get")
-        assert decision == "ask"
+        assert decision == "deny"
 
     def test_lowercase_c_after_capital_c(self):
         # `-c` arg is consumed; `status` is the subcommand
@@ -331,7 +331,7 @@ class TestStashUnknownAction:
     @pytest.mark.parametrize("action", ["apply", "push", "save", "branch"])
     def test_unknown_stash_action_resolves(self, action):
         decision, _ = _run(f"git -C /tmp/repo stash {action}")
-        assert decision in {"allow", "ask"}, f"stash {action} fallthrough broken: got {decision}"
+        assert decision == "allow", f"stash {action} fallthrough broken: got {decision}"
 
     def test_destructive_stash_actions_denied(self):
         for action in ("pop", "drop", "clear"):
@@ -463,9 +463,9 @@ class TestClassifySubcommandDirect:
         "sub",
         ["push", "pull", "commit", "checkout", "switch", "merge", "rebase", "fetch", "cherry-pick"],
     )
-    def test_unknown_asks(self, sub):
+    def test_unknown_denies(self, sub):
         env = _classify_subcommand(sub, [])
-        assert _envelope_decision(env) == "ask"
+        assert _envelope_decision(env) == "deny"
 
     def test_destructive_flag_branch_dash_D(self):
         env = _classify_subcommand("branch", ["-D", "feature"])
@@ -493,22 +493,22 @@ class TestDecideConfigDirect:
         env = _decide_config([flag, "user.email"])
         assert _envelope_decision(env) == "allow"
 
-    def test_write_asks(self):
+    def test_write_denies(self):
         env = _decide_config(["user.email", "foo@bar.com"])
-        assert _envelope_decision(env) == "ask"
+        assert _envelope_decision(env) == "deny"
 
-    def test_add_asks(self):
+    def test_add_denies(self):
         env = _decide_config(["--add", "remote.origin.fetch", "+refs/heads/*"])
-        assert _envelope_decision(env) == "ask"
+        assert _envelope_decision(env) == "deny"
 
-    def test_unset_asks(self):
+    def test_unset_denies(self):
         env = _decide_config(["--unset", "user.email"])
-        assert _envelope_decision(env) == "ask"
+        assert _envelope_decision(env) == "deny"
 
-    def test_empty_asks(self):
-        # `git -C x config` with no remaining args -> write-ish branch (ask).
+    def test_empty_denies(self):
+        # `git -C x config` with no remaining args -> write-ish branch (deny).
         env = _decide_config([])
-        assert _envelope_decision(env) == "ask"
+        assert _envelope_decision(env) == "deny"
 
 
 class TestDecideStashDirect:
@@ -685,11 +685,6 @@ class TestHookEntryPointDirect:
         assert excinfo.value.code == 2
         out = capsys.readouterr().out.strip()
         assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-    def test_ask_envelope(self, capsys):
-        hook({"tool_name": "Bash", "tool_input": {"command": "git -C /repo push"}})
-        env = json.loads(capsys.readouterr().out.strip())
-        assert env["hookSpecificOutput"]["permissionDecision"] == "ask"
 
     def test_shell_operator_falls_through_silent(self, capsys):
         hook(

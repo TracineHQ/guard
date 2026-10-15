@@ -4,11 +4,11 @@ Two override knobs, both read from JSON files:
 
 1. **disable_rules** — a list of ``rule_id`` strings (e.g.
    ``"bash.disk_destruction"``, ``"guard.protected_files"``). When a hook is
-   about to deny / ask under one of these rule_ids, it falls through to
+   about to deny under one of these rule_ids, it falls through to
    allow instead. Useful when a matcher fires repeatedly on legitimate
    project workflows.
 2. **allow_commands** — a list of ``{rule, command, reason}`` entries. When
-   a deny/ask is about to fire under ``rule`` AND the original input string
+   a deny is about to fire under ``rule`` AND the original input string
    exactly equals ``command``, the decision is downgraded to allow. The
    ``reason`` is included in the audit-log record so every bypass is
    traceable to a written justification.
@@ -45,10 +45,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from guard._utils import GUARD_HOME
+from guard._utils import GUARD_HOME, log_decision
 
-Mode = Literal["enforce", "shadow", "off"]
-_VALID_MODES: frozenset[str] = frozenset(("enforce", "shadow", "off"))
+# ``lockdown`` is ``enforce`` plus strict default-deny for bash and the
+# extended protected-file list. It is opt-in only: Claude Code's
+# ``permission_mode`` never switches it on.
+Mode = Literal["enforce", "shadow", "off", "lockdown"]
+_VALID_MODES: frozenset[str] = frozenset(("enforce", "shadow", "off", "lockdown"))
 _DEFAULT_MODE: Mode = "enforce"
 
 PROJECT_ALLOWLIST_RELPATH = Path(".claude") / "guard" / "allowlist.json"
@@ -170,7 +173,7 @@ class Allowlist:
     disable_rules: frozenset[str] = field(default_factory=frozenset)
     allow_commands: tuple[AllowEntry, ...] = ()
     sources: tuple[Path, ...] = ()  # files actually read (for diagnostics)
-    mode: Mode = _DEFAULT_MODE  # enforce | shadow | off; project overrides global
+    mode: Mode = _DEFAULT_MODE  # enforce | shadow | off | lockdown; project overrides global
 
     def is_rule_disabled(self, rule_id: str) -> bool:
         """True if ``rule_id`` is in ``disable_rules``."""
@@ -308,6 +311,50 @@ def hook_bypass_reason(allowlist: Allowlist, hook_id: str, excerpt: str) -> str 
     if entry is not None:
         return f"allowlist: {entry.reason} (rule={hook_id})"
     return None
+
+
+def apply_decision(  # noqa: PLR0913 -- hook id, payload, envelope, excerpt + two policy flags
+    hook_id: str,
+    payload: dict[str, Any],
+    envelope: dict[str, Any],
+    excerpt: str,
+    *,
+    trust_root: bool = False,
+    overridable: bool = True,
+) -> None:
+    """Log a hook's decision and hand it to Claude Code, honoring guard mode.
+
+    ``off`` emits nothing and ``shadow`` logs a deny without emitting it,
+    except for ``trust_root`` decisions (guard's own files), which hold in
+    every mode. An allowlist entry for ``hook_id`` turns the decision into
+    a logged pass unless ``overridable`` is False. A deny exits 2.
+    """
+    allowlist = load_allowlist()
+    hso = envelope["hookSpecificOutput"]
+    decision = hso["permissionDecision"]
+    if allowlist.mode == "off" and not trust_root:
+        return
+    tool_name = payload.get("tool_name")
+    cwd = payload.get("cwd")
+    record: dict[str, Any] = {
+        "hook_id": hook_id,
+        "event": "PreToolUse",
+        "tool_name": tool_name if isinstance(tool_name, str) else None,
+        "command_excerpt": excerpt,
+        "session_id": str(payload.get("session_id", "")),
+        "cwd": cwd if isinstance(cwd, str) else None,
+        "mode": allowlist.mode,
+    }
+    bypass = hook_bypass_reason(allowlist, hook_id, excerpt) if overridable else None
+    if bypass is not None:
+        log_decision(decision="pass", reason=bypass, **record)
+        return
+    log_decision(decision=decision, reason=hso["permissionDecisionReason"], **record)
+    if decision == "deny" and allowlist.mode == "shadow" and not trust_root:
+        return
+    sys.stdout.write(json.dumps(envelope))
+    if decision == "deny":
+        sys.exit(2)
 
 
 # === Mutation API (CLI helpers) ===

@@ -14,8 +14,7 @@ install step, no binary.
 The diagnostic CLI is a separate entry point (`guard = "guard.cli:main"` in
 `pyproject.toml`). It is NOT installed by default. `uv sync` only puts it in
 `.venv/bin/guard`, which is not on `PATH` -- and its absolute path is not a
-guard-recognized invocation, so a strict (`permission_mode=auto`) session
-denies it.
+guard-recognized invocation, so a `guard mode lockdown` session denies it.
 
 guard's bash matcher whitelists `guard corpus`, `guard status`, etc. as
 read-only subcommands, but only for the bare `guard` head (or `uv run guard` /
@@ -27,11 +26,11 @@ uv tool install --editable /Users/dev/develop/guard --force
 ```
 
 `--editable` means source edits are reflected with no reinstall. After this,
-`guard corpus` runs from the local tree and stays allowlisted even in strict
-sessions. Re-run the install only after a dependency change (a new entry in
+`guard corpus` runs from the local tree and stays allowlisted even under
+lockdown. Re-run the install only after a dependency change (a new entry in
 `pyproject.toml`), not after ordinary source edits.
 
-The install itself is a privileged action that strict mode fences, so it is a
+The install itself is a privileged action that lockdown fences, so it is a
 one-time human bootstrap (run it from a normal shell, or via `!` in a session).
 
 ### Official vs local

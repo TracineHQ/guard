@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TracineHQ contributors
-"""End-to-end: when permission_mode is dontAsk/bypassPermissions,
-bash_command_validator default-denies unsafe segments and surfaces
-STRICT_FEEDBACK custom messages.
+"""End-to-end: in guard lockdown mode, bash_command_validator default-denies
+unsafe segments and surfaces STRICT_FEEDBACK custom messages.
 
 Locks in the strict-mode safety net for subagents / driven agents so it can't
 silently regress again.
@@ -21,6 +20,7 @@ import pytest
 from guard.registry import STRICT_FEEDBACK
 from tests._helpers import REPO_ROOT as REPO
 from tests._helpers import decision_from_stdout as _decision
+from tests._helpers import lockdown_guard_home
 
 HOOK = REPO / "src" / "guard" / "hooks" / "bash_command_validator.py"
 
@@ -35,6 +35,8 @@ def _run(
     env["PYTHONPATH"] = str(REPO / "src")
     if decisions_path is not None:
         env["GUARD_DECISIONS_PATH"] = str(decisions_path)
+    if strict:
+        env["GUARD_DATA_DIR"] = str(lockdown_guard_home(env.get("GUARD_DATA_DIR")))
     proc = subprocess.run(
         [sys.executable, str(HOOK)],
         input=json.dumps(
@@ -44,7 +46,7 @@ def _run(
                 "tool_input": {"command": command},
                 "hook_event_name": "PreToolUse",
                 "cwd": "/tmp",
-                "permission_mode": "dontAsk" if strict else "default",
+                "permission_mode": "auto",
             }
         ),
         capture_output=True,
@@ -71,17 +73,6 @@ def test_strict_allows_safe_command(tmp_path: Path) -> None:
     _rc, stdout, stderr = _run("ls -la", strict=True, decisions_path=tmp_path / "log.jsonl")
     decision = _decision(stdout)
     assert decision == "allow", f"expected allow, got {decision!r} stderr={stderr[:300]}"
-
-
-def test_interactive_passes_through_unknown(tmp_path: Path) -> None:
-    """With permission_mode=default, an unknown command falls through (no deny envelope).
-
-    Claude Code's normal permission prompt handles it.
-    """
-    _rc, stdout, _stderr = _run(
-        "flarbnoz --gronk", strict=False, decisions_path=tmp_path / "log.jsonl"
-    )
-    assert _decision(stdout) is None, f"expected passthrough, got stdout={stdout[:300]}"
 
 
 @pytest.mark.parametrize("strict", [True, False])
@@ -152,18 +143,6 @@ def test_strict_allows_neutral_safe_prefix(tmp_path: Path) -> None:
     assert _decision(stdout) == "allow", f"git status not allowed: {stdout[:300]}"
 
 
-def test_interactive_unchanged_for_unknown_command(tmp_path: Path) -> None:
-    """Interactive mode (permission_mode=default) must still passthrough unknown commands.
-
-    The inverted-default behavior is strict-mode-only; interactive mode
-    is unchanged and continues to passthrough unknown commands.
-    """
-    _rc, stdout, _stderr = _run(
-        "flarbnoz --gronk", strict=False, decisions_path=tmp_path / "log.jsonl"
-    )
-    assert _decision(stdout) is None, f"interactive should passthrough: {stdout[:300]}"
-
-
 def test_strict_queue_path_is_writable(tmp_path: Path) -> None:
     """Verify the strict-deny queue gets a record when a denial happens.
 
@@ -173,6 +152,7 @@ def test_strict_queue_path_is_writable(tmp_path: Path) -> None:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO / "src")
     env["GUARD_STRICT_DENY_QUEUE_PATH"] = str(queue)
+    env["GUARD_DATA_DIR"] = str(lockdown_guard_home(env.get("GUARD_DATA_DIR")))
     proc = subprocess.run(
         [sys.executable, str(HOOK)],
         input=json.dumps(
@@ -182,7 +162,7 @@ def test_strict_queue_path_is_writable(tmp_path: Path) -> None:
                 "tool_input": {"command": "flarbnoz --gronk"},
                 "hook_event_name": "PreToolUse",
                 "cwd": "/tmp",
-                "permission_mode": "dontAsk",
+                "permission_mode": "auto",
             }
         ),
         capture_output=True,

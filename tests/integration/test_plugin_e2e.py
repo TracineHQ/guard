@@ -45,7 +45,7 @@ EXPECTED_PRE_TOOL_USE_HOOK_NAMES = {
 EXPECTED_PERMISSION_REQUEST_HOOK_NAMES = {"permission_request_logger"}
 EXPECTED_HOOK_NAMES = EXPECTED_PRE_TOOL_USE_HOOK_NAMES | EXPECTED_PERMISSION_REQUEST_HOOK_NAMES
 MAX_RECORD_BYTES = 4096
-VALID_DECISIONS = {"allow", "deny", "ask", "pass", "defer"}
+VALID_DECISIONS = {"allow", "deny", "pass", "defer"}
 
 # AI-attribution trailer assembled at runtime so the test source itself
 # does not contain the literal string (avoids tripping content scanners
@@ -212,7 +212,7 @@ CASES: list[tuple[str, str, dict[str, object], str]] = [
     ),
     # git_c_validator
     ("git -C status", "git_c_validator.py", _bash_payload("git -C /repo status"), "allow"),
-    ("git -C commit", "git_c_validator.py", _bash_payload("git -C /repo commit"), "ask"),
+    ("git -C commit", "git_c_validator.py", _bash_payload("git -C /repo commit"), "deny"),
     # commit_message_validator
     (
         "AI commit msg",
@@ -242,21 +242,15 @@ CASES: list[tuple[str, str, dict[str, object], str]] = [
     ("read README", "agent_output_guard.py", _read_payload("/tmp/README.md"), "passthrough"),
     # protected_files
     (
-        "settings.json",
+        "guard registry",
         "protected_files.py",
-        _edit_payload("/Users/x/.claude/settings.json"),
-        "ask",
-    ),
-    (
-        "settings.local.json",
-        "protected_files.py",
-        _edit_payload("/home/x/.claude/settings.local.json"),
-        "ask",
+        _edit_payload("/repo/src/guard/registry.py"),
+        "deny",
     ),
     ("ordinary file pf", "protected_files.py", _edit_payload("/tmp/foo.py"), "passthrough"),
     # credential_check — use patterns matched independent of user $HOME
-    ("pem file", "credential_check.py", _edit_payload("/tmp/server.pem"), "ask"),
-    ("dotenv file", "credential_check.py", _edit_payload("/tmp/proj/.env"), "ask"),
+    ("pem file", "credential_check.py", _edit_payload("/tmp/server.pem"), "deny"),
+    ("dotenv file", "credential_check.py", _edit_payload("/tmp/proj/.env"), "deny"),
     ("ordinary file cc", "credential_check.py", _edit_payload("/tmp/main.py"), "passthrough"),
 ]
 

@@ -26,9 +26,9 @@ def _run(payload: dict, *, log_path: Path, cwd: Path | None = None) -> subproces
     env = {
         "PATH": "/usr/bin:/bin",
         "GUARD_DECISIONS_PATH": str(log_path),
+        # Never fall back to the developer's real ~/.claude/guard config.
+        "GUARD_DATA_DIR": str((cwd or log_path.parent) / ".claude" / "guard"),
     }
-    if cwd is not None:
-        env["GUARD_DATA_DIR"] = str(cwd / ".claude" / "guard")
     return subprocess.run(
         [sys.executable, str(HOOK_PATH)],
         input=json.dumps(payload),

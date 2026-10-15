@@ -1,7 +1,7 @@
 ---
 name: guard
 description: Configure guard's safety hooks and explain what each hook catches — bash command validation (rm -rf, force-push, interpreter eval, shell wrappers, pipe-to-shell), git safety (-c config injection, core.hooksPath/attributesFile, destructive flags), credential scanning, commit-message rules, protected files, agent output, subagent scope.
-when_to_use: When the user asks to enable/disable a guard hook, change the decision log path, set advisory mode, troubleshoot guard's output, or asks "why did guard block X" / "what does <hook> catch".
+when_to_use: When the user asks to enable/disable a guard hook, change the decision log path, switch guard mode (enforce / shadow / off / lockdown), troubleshoot guard's output, or asks "why did guard block X" / "what does <hook> catch".
 ---
 
 # Guard configuration
@@ -36,32 +36,35 @@ authoritative references. Quick map:
   (`Co-Authored-By: Claude`, `Generated with Claude Code`); also denies
   opaque message sources (`-F <stream>`, `--file=-`, paths outside cwd).
 - `credential_check` — secret patterns in Edit/Write/Bash payloads.
-- `protected_files` — Edit/Write to `.git/hooks`, `.claude/settings.json`,
-  `.claude/guard/allowlist.json`, `CLAUDE.md`, etc. (extensible via
-  `GUARD_PROTECTED_EXTRA` and `.claude/guard-protected.txt`).
+- `protected_files` — Edit/Write (and Bash writes) to guard's own hook code,
+  `.claude/guard/allowlist.json` and `.claude/subagent-scope.json`; lockdown
+  adds `.git/hooks`, `CLAUDE.md`, `.cursorrules`, MCP config and
+  `.aws/config` (extensible via `GUARD_PROTECTED_EXTRA` and
+  `.claude/guard-protected.txt`). Reads never trip it.
 - `agent_output_guard` — denies tool calls whose input references a Claude
   Code subagent output transcript (`/tmp/claude-<pid>/.../tasks/<id>.output`).
   Stops the main agent from inlining noisy JSONL transcripts into context.
 - `subagent_scope` — file edits outside the declared `.claude/subagent-scope.json` allowlist.
 
-## Strict mode
+## Deny, never ask
 
-Strict default-deny activates from Claude Code's `permission_mode` field in
-PreToolUse hook input. The strict modes are:
+Guard never emits an `ask`. Every block is a deny whose reason steers the
+agent: what was blocked, why, and what to do instead (usually stop and tell
+the user, with the command or `guard allowlist` override they can run).
 
-- `auto` -- Claude Code's classifier-mediated unattended mode
-- `dontAsk` -- explicit unattended opt-in
-- `bypassPermissions` -- explicit unattended opt-in
+## Modes
 
-All three imply "no human at the prompt" and route the command through
-guard's default-deny path (anything not on the safe-prefix allowlist is
-denied with a `STRICT_FEEDBACK` message). Modes `default`, `plan`, and
-`acceptEdits` use advisory evaluation.
+`guard mode <enforce|shadow|off|lockdown>` (project by default, `--global`
+for the per-user file). Every hook honors it.
 
-Requires a Claude Code release that emits `permission_mode` on PreToolUse
-payloads. For one minor cycle, a deprecated `CLAUDE_AUTONOMOUS=1` env var
-fallback escalates missing/default modes to `dontAsk` with a stderr
-warning; remove before the next minor release.
+- `enforce` (default) -- deny what matches, pass the rest through.
+- `shadow` -- log would-be denies with `mode: "shadow"`; only trust-root denies block.
+- `off` -- hooks go quiet, except edits to guard's own code and allowlist.
+- `lockdown` -- opt-in strict default-deny for driven or unattended agents.
+  Any Bash command not on the safe-prefix allowlist is denied with a
+  `STRICT_FEEDBACK` message, and `protected_files` adds its lockdown list.
+  Claude Code's `permission_mode` (`auto`, `dontAsk`, `bypassPermissions`)
+  never turns it on.
 
 ## Environment variables
 
@@ -76,7 +79,7 @@ warning; remove before the next minor release.
 
 ## Extending protected_files patterns
 
-`protected_files` ships with a built-in pattern list (`.git/hooks`, `.claude/settings.json`, `CLAUDE.md`, etc.). Projects with their own kill-switch / doctrine paths can extend that list two ways without forking:
+`protected_files` ships with a built-in pattern list (guard's own code and allowlist, plus `.git/hooks`, `CLAUDE.md` and friends under lockdown). Projects with their own kill-switch / doctrine paths can extend that list two ways without forking:
 
 1. **Env var** `GUARD_PROTECTED_EXTRA="bin,standards,dispatch"` — comma-separated. Whitespace trimmed; blank entries skipped.
 2. **Project file** `.claude/guard-protected.txt` (rooted at the working directory):
@@ -113,8 +116,8 @@ Both files use the same JSON schema; the project file wins on per-rule conflicts
   "allow_commands": [
     {
       "rule": "guard.protected_files",
-      "command": "/repo/CLAUDE.md",
-      "reason": "intentional CLAUDE.md update for the rebrand task"
+      "command": "/repo/src/guard/registry.py",
+      "reason": "intentional registry update for the release"
     }
   ]
 }
@@ -138,12 +141,9 @@ Mutation commands write to the project allowlist by default. Pass `--global` to 
 
 ### Trust-root: un-overridable protections
 
-Three paths under `protected_files` are NOT allowlist-bypassable. Even with `disable_rules: ["guard.protected_files"]` or an exact-path `allow_commands` entry, edits to these always go through ASK:
+`.claude/guard/allowlist.json` is NOT allowlist-bypassable. Even with `disable_rules: ["guard.protected_files"]` or an exact-path `allow_commands` entry, agent edits to it are denied: an allowlist that lets agents edit the allowlist grants itself anything. Edit it yourself or through `guard allowlist`.
 
-- `.claude/guard/allowlist.json` — the allowlist itself (writes here would let an attacker grant themselves further overrides).
-- `.claude/settings.json`, `.claude/settings.local.json` — Claude Code wiring (writes here could remove guard's hooks entirely).
-
-Other protected files (your `CLAUDE.md`, `.cursorrules`, etc.) are user-overridable through the normal mechanisms.
+Guard's own hook code and `.claude/subagent-scope.json` stay protected in every mode, `off` included, but you can allowlist them like any other protected file.
 
 ### Audit trail
 

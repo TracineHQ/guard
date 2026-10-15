@@ -38,4 +38,3 @@ def test_critical_imports_resolve() -> None:
     assert callable(_utils.log_decision)
     assert callable(_utils.emit_pretooluse_decision)
     assert callable(_utils.read_permission_mode)
-    assert callable(_utils.is_strict_mode)

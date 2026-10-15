@@ -789,9 +789,9 @@ COMMANDS: list[CommandRule] = [
     ),
     # --- Interpreter RCE DENY ---
     # `python -c`, `python3 -c`, `node -e`, `node --eval` are canonical RCE
-    # primitives — denied unconditionally in both interactive and strict
-    # modes. Note: `_is_safe_interpreter` further restricts ANY flagged form
-    # in strict mode; these entries exist so even interactive mode denies.
+    # primitives — denied under enforce and lockdown. Note:
+    # `_is_safe_interpreter` further restricts ANY flagged form in lockdown;
+    # these entries exist so enforce denies them too.
     CommandRule(
         "python -c",
         Safety.DENY,
@@ -952,8 +952,8 @@ COMMANDS: list[CommandRule] = [
 # === Guard's own read-only CLI subcommands (auto-registered, drift-tested) ===
 # These guard subcommands are dry-run / read-only by construction: they print or
 # inspect state, and ``guard test <cmd>`` analyzes a command string WITHOUT
-# executing it. Registering them keeps strict mode (auto/dontAsk/bypass) from
-# default-denying guard's own diagnostic tooling -- the friction that made
+# executing it. Registering them keeps lockdown's default-deny from blocking
+# guard's own diagnostic tooling -- the friction that made
 # ``uv run guard test`` itself undeniable in an unattended session. WRITE
 # subcommands (``mode``, ``migrate-log``, and the ``allowlist`` mutators) are
 # excluded: they change guard's config and must not be blanket-allowed. The
@@ -980,7 +980,7 @@ _GUARD_SAFE_PREFIXES: frozenset[str] = frozenset(
 # === convo: first-party read-only conversation-history CLI ===
 # convo (TracineHQ/convo) is guard's sibling diagnostic -- it queries an index of
 # Claude Code transcripts. Its query subcommands print analytics and mutate no
-# repo or system state, so registering them keeps strict mode from default-denying
+# repo or system state, so registering them keeps lockdown from default-denying
 # the agent's (and the control plane's) own introspection tooling -- the same
 # friction guard's own ``test`` / ``corpus`` subcommands hit before they were
 # registered. Unlike GUARD_READ_ONLY_SUBCOMMANDS, this list is NOT drift-tested
@@ -988,7 +988,7 @@ _GUARD_SAFE_PREFIXES: frozenset[str] = frozenset(
 # fail-safe: write-side subcommands (``backup`` / ``restore`` / ``index`` /
 # ``index-guard``, which rebuild or restore convo's local DB cache) and any
 # future convo subcommand are simply
-# absent, which means strict mode still denies them (passthrough interactive) --
+# absent, which means lockdown still denies them (enforce passes them through) --
 # drift can only under-permit, never silently auto-allow something new. The
 # behavior is pinned by tests/corpus/convo.jsonl.
 CONVO_READ_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(

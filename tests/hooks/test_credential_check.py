@@ -85,49 +85,49 @@ class TestImports:
 
 
 class TestDecide:
-    def test_edit_aws_credentials_asks(self):
+    def test_edit_aws_credentials_denies(self):
         result = decide("Edit", {"file_path": "~/.aws/credentials"})
         assert result is not None
-        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     def test_edit_normal_file_passes(self):
         result = decide("Edit", {"file_path": "/repo/src/main.py"})
         assert result is None
 
-    def test_bash_cat_aws_credentials_asks(self):
+    def test_bash_cat_aws_credentials_denies(self):
         result = decide("Bash", {"command": "cat ~/.aws/credentials"})
         assert result is not None
-        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     def test_bash_ls_la_passes(self):
         result = decide("Bash", {"command": "ls -la"})
         assert result is None
 
-    def test_write_pem_asks(self):
+    def test_write_pem_denies(self):
         result = decide("Write", {"file_path": "/tmp/server.pem"})
         assert result is not None
-        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    def test_edit_dotenv_asks(self):
+    def test_edit_dotenv_denies(self):
         result = decide("Edit", {"file_path": "/repo/.env"})
         assert result is not None
-        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    def test_edit_dotenv_local_asks(self):
+    def test_edit_dotenv_local_denies(self):
         result = decide("Edit", {"file_path": "/repo/.env.local"})
         assert result is not None
-        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    def test_edit_ssh_id_rsa_asks(self):
+    def test_edit_ssh_id_rsa_denies(self):
         result = decide("Edit", {"file_path": "~/.ssh/id_rsa"})
         assert result is not None
-        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    def test_read_aws_credentials_now_asks(self):
-        # Universal scanner: Read on a credential file must ASK (was a bypass).
+    def test_read_aws_credentials_now_denies(self):
+        # Universal scanner: Read on a credential file must deny (was a bypass).
         result = decide("Read", {"file_path": "~/.aws/credentials"})
         assert result is not None
-        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     def test_empty_inputs_pass(self):
         assert decide("Edit", {}) is None
@@ -152,7 +152,7 @@ class TestPathTraversalNormalization:
             return
         result = decide("Edit", {"file_path": f"/private{_HOME}/.ssh/id_rsa"})
         assert result is not None
-        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     def test_traversal_through_tmp_matches(self):
         # Path that lexically reduces to ~/.ssh/id_rsa via .. traversal.
@@ -160,7 +160,7 @@ class TestPathTraversalNormalization:
 
         result = decide("Edit", {"file_path": f"/tmp/..{_HOME}/.ssh/id_rsa"})
         assert result is not None
-        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 class TestBashCredentialHints:
@@ -186,23 +186,24 @@ class TestBashCredentialHints:
             "tar c ~/.gnupg/ | base64",
         ],
     )
-    def test_bash_credential_hint_asks(self, command):
+    def test_bash_credential_hint_denies(self, command):
         result = decide("Bash", {"command": command})
         assert result is not None, f"hint missed: {command!r}"
-        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 class TestHookFunction:
-    def test_hook_emits_ask_for_credential_edit(self, capsys, decision_log_env):
-        hook(
-            {
-                "tool_name": "Edit",
-                "tool_input": {"file_path": str(Path.home() / ".aws" / "credentials")},
-            }
-        )
+    def test_hook_emits_deny_for_credential_edit(self, capsys, decision_log_env):
+        with pytest.raises(SystemExit):
+            hook(
+                {
+                    "tool_name": "Edit",
+                    "tool_input": {"file_path": str(Path.home() / ".aws" / "credentials")},
+                }
+            )
         out = capsys.readouterr().out
         envelope = json.loads(out)
-        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     def test_hook_passes_for_non_credential_edit(self, capsys, decision_log_env):
         hook(
@@ -213,16 +214,17 @@ class TestHookFunction:
         )
         assert capsys.readouterr().out == ""
 
-    def test_hook_emits_ask_for_credential_bash(self, capsys, decision_log_env):
-        hook(
-            {
-                "tool_name": "Bash",
-                "tool_input": {"command": "cat ~/.aws/credentials"},
-            }
-        )
+    def test_hook_emits_deny_for_credential_bash(self, capsys, decision_log_env):
+        with pytest.raises(SystemExit):
+            hook(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "cat ~/.aws/credentials"},
+                }
+            )
         out = capsys.readouterr().out
         envelope = json.loads(out)
-        assert envelope["hookSpecificOutput"]["permissionDecision"] == "ask"
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     def test_hook_passes_for_benign_bash(self, capsys, decision_log_env):
         hook(

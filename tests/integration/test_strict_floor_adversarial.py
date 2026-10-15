@@ -4,7 +4,7 @@ After the friction-fix relaxations (FP-1 interpreter ``-m`` allowlist, FP-2
 read-only ``$(...)``, FP-3 advisory course-correction, FP-4 heredoc-body mask,
 NEW-Q quoted-char masking, NEW-C diagnostics, NEW-G ``[`` builtin, the
 secret-value detector), this asserts none of them opened a bypass: every
-payload below stays denied under strict (default-deny) ``permission_mode``.
+payload below stays denied under guard lockdown (strict default-deny).
 A regression here is a hole, not a test to update.
 """
 
@@ -15,8 +15,6 @@ from __future__ import annotations
 import pytest
 
 from guard.hooks.bash_command_validator import decide
-
-STRICT_MODES = ["auto", "dontAsk", "bypassPermissions"]
 
 MUST_DENY = [
     # destructive
@@ -97,9 +95,8 @@ MUST_DENY = [
 ]
 
 
-@pytest.mark.parametrize("mode", STRICT_MODES)
 @pytest.mark.parametrize("command", MUST_DENY)
-def test_strict_floor_denies(command: str, mode: str) -> None:
-    res = decide(command, permission_mode=mode)
+def test_strict_floor_denies(command: str) -> None:
+    res = decide(command, lockdown=True)
     decision = res.get("permissionDecision") if res else None
-    assert decision == "deny", f"[{mode}] expected deny, got {res!r} for {command!r}"
+    assert decision == "deny", f"expected deny, got {res!r} for {command!r}"

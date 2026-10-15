@@ -510,8 +510,8 @@ def test_test_routes_credential_check_for_tar_create() -> None:
 
     payload, _ = cmd_test(["tar --create -f /tmp/x.tar ~/.aws/credentials"])
     decisions = {r["hook_id"]: r["decision"] for r in payload["commands"][0]["results"]}
-    assert decisions.get("guard.credential_check") == "ask", (
-        f"credential_check should ask on tar --create against an AWS "
+    assert decisions.get("guard.credential_check") == "deny", (
+        f"credential_check should deny tar --create against an AWS "
         f"credential path; got {decisions.get('guard.credential_check')!r}. "
         f"Full results: {payload['commands'][0]['results']}"
     )

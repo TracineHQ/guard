@@ -7,6 +7,7 @@ records, and status counters.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -106,21 +107,28 @@ def test_counters_aggregate_by_type(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
 
 def test_healthcheck_returns_healthy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The probes ignore the user's own config: guard switched off with the
+    floor rule disabled still checks out healthy, and the live mode is reported."""
     monkeypatch.setenv("GUARD_DECISIONS_PATH", str(tmp_path / "log.jsonl"))
+    monkeypatch.chdir(tmp_path)
+    user_allowlist = Path(os.environ["GUARD_DATA_DIR"]) / "allowlist.json"
+    user_allowlist.parent.mkdir(parents=True, exist_ok=True)
+    user_allowlist.write_text(json.dumps({"mode": "off", "disable_rules": ["bash.always_deny"]}))
     from guard.cli import cmd_healthcheck
 
     payload, pretty = cmd_healthcheck()
     assert payload["healthy"] is True
+    assert payload["mode"] == "off"
+    assert "your mode: off" in pretty
     assert payload["elapsed_ms"] >= 0
     assert "OK" in pretty
     probes = payload["probes"]
     assert len(probes) >= 2, "healthcheck should run multiple probes"
-    modes_seen = {probe["permission_mode"] for probe in probes}
-    assert {"default", "dontAsk"} <= modes_seen, (
-        f"healthcheck must cover both interactive and strict modes; saw {modes_seen}"
+    modes_seen = {probe["mode"] for probe in probes}
+    assert modes_seen == {"enforce", "lockdown"}, (
+        f"healthcheck must cover both enforce and lockdown; saw {modes_seen}"
     )
     for probe in probes:
         assert probe["passed"] is True, f"probe failed: {probe}"
         assert probe["command"]
         assert probe["expected_rule"]
-        assert probe["permission_mode"] in {"default", "dontAsk"}

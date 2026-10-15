@@ -3,7 +3,8 @@
 """PreToolUse hook: validate ``git -C <path>`` commands.
 
 Allows read-only git subcommands invoked with ``-C <path>``, denies
-destructive ones, and asks for unknown subcommands. Works at any path depth
+destructive ones, and denies unknown subcommands with a steer to run them
+from inside the repo (``cd <path> && git ...``). Works at any path depth
 (bypasses the glob ``*`` vs ``/`` limitation in permission rules).
 
 IMPORTANT: this hook only evaluates a single, operator-free command.
@@ -14,13 +15,11 @@ boundaries — fallthrough lets the normal permission system handle them.
 
 from __future__ import annotations
 
-import json
 import shlex
-import sys
 from typing import Any
 
-from guard._utils import emit_pretooluse_decision, log_decision, safe_main
-from guard.allowlist import hook_bypass_reason, load_allowlist
+from guard._utils import emit_pretooluse_decision, safe_main
+from guard.allowlist import apply_decision
 from guard.registry import git_read_exec_violation, git_ref_violation
 
 _HOOK_ID = "guard.git_c_validator"
@@ -60,9 +59,9 @@ DENIED_SUBCOMMANDS: frozenset[str] = frozenset({"clean", "reset"})
 # Read-only-by-default subcommands that become destructive with certain flags or
 # flags (branch -D, tag -d, remote add/remove, log --output=, grep
 # --open-files-in-pager) are classified by the shared ``git_read_exec_violation``
-# (RCE-class -> deny) and ``git_ref_violation`` (ref mutation -> deny; bare
-# creation -> ASK) predicates in registry.py -- one source of truth with the bash
-# matcher, so the strict and interactive paths cannot drift.
+# (RCE-class -> deny) and ``git_ref_violation`` (ref create/mutate -> deny)
+# predicates in registry.py -- one source of truth with the bash matcher, so
+# the two paths cannot drift.
 
 # Stash sub-subcommands that are destructive
 DENIED_STASH_ACTIONS: frozenset[str] = frozenset({"pop", "drop", "clear"})
@@ -146,11 +145,17 @@ _CONFIG_READ_FLAGS: frozenset[str] = frozenset(
 )
 
 
-def _decide_config(remaining: list[str]) -> dict[str, Any]:
+def _decide_config(remaining: list[str], *, path: str = "<repo>") -> dict[str, Any]:
     """Decide a ``git -C ... config ...`` invocation."""
     if remaining and remaining[0] in _CONFIG_READ_FLAGS:
         return emit_pretooluse_decision("allow", "git -C: 'config' with read-only flag")
-    return _ask_envelope("git -C: 'config' write requires confirmation")
+    return emit_pretooluse_decision(
+        "deny",
+        "git -C: 'config' writes are blocked because they can point git at "
+        f"hooks or exec helpers in another repo. Run it from inside the repo "
+        f"(`cd {path} && git config ...`) so the change is visible in context, "
+        "or tell the user which setting you need.",
+    )
 
 
 def _decide_stash(remaining: list[str]) -> dict[str, Any] | None:
@@ -165,10 +170,12 @@ def _decide_stash(remaining: list[str]) -> dict[str, Any] | None:
     return None
 
 
-def _classify_subcommand(subcommand: str, remaining: list[str]) -> dict[str, Any]:
-    """Classify a parsed subcommand into an allow/deny/ask envelope."""
+def _classify_subcommand(
+    subcommand: str, remaining: list[str], *, path: str = "<repo>"
+) -> dict[str, Any]:
+    """Classify a parsed subcommand into an allow/deny envelope."""
     if subcommand == "config":
-        return _decide_config(remaining)
+        return _decide_config(remaining, path=path)
     if subcommand == "stash":
         stash_decision = _decide_stash(remaining)
         if stash_decision is not None:
@@ -197,7 +204,11 @@ def _classify_subcommand(subcommand: str, remaining: list[str]) -> dict[str, Any
         )
     if subcommand in ALLOWED_SUBCOMMANDS:
         return emit_pretooluse_decision("allow", f"git -C: '{subcommand}' is read-only")
-    return _ask_envelope(f"git -C: '{subcommand}' is not in the allow list")
+    return emit_pretooluse_decision(
+        "deny",
+        f"git -C: '{subcommand}' isn't on the read-only list. Run it from inside "
+        f"the repo instead: `cd {path} && git {subcommand} ...`.",
+    )
 
 
 _COMMIT_HEAD_TOKENS = 3  # ['git', 'commit', <at least one more arg>]
@@ -387,12 +398,7 @@ def decide(command: str) -> dict[str, Any] | None:
     path, subcommand, remaining = parse_git_c_command(command)
     if path is None or subcommand is None:
         return None
-    return _classify_subcommand(subcommand, remaining)
-
-
-def _ask_envelope(reason: str) -> dict[str, Any]:
-    """Return an ``ask`` envelope via the modern PreToolUse helper."""
-    return emit_pretooluse_decision("ask", reason)
+    return _classify_subcommand(subcommand, remaining, path=path)
 
 
 def hook(payload: dict[str, Any]) -> None:
@@ -423,43 +429,9 @@ def hook(payload: dict[str, Any]) -> None:
     if not has_config_or_dir_flag and "commit" not in rest:
         return
 
-    cwd_val = payload.get("cwd")
-    cwd_str = cwd_val if isinstance(cwd_val, str) else None
-    bypass = hook_bypass_reason(load_allowlist(), _HOOK_ID, command)
-    if bypass is not None:
-        log_decision(
-            hook_id=_HOOK_ID,
-            event="PreToolUse",
-            tool_name="Bash",
-            decision="pass",
-            reason=bypass,
-            command_excerpt=command,
-            session_id=str(payload.get("session_id", "")),
-            cwd=cwd_str,
-        )
-        return
-
     envelope = decide(command)
-    if envelope is None:
-        return
-
-    hso = envelope.get("hookSpecificOutput", {})
-    decision = hso.get("permissionDecision")
-    cwd = payload.get("cwd")
-    if decision in ("allow", "deny", "ask"):
-        log_decision(
-            hook_id=_HOOK_ID,
-            event="PreToolUse",
-            tool_name="Bash",
-            decision=decision,
-            reason=hso.get("permissionDecisionReason", ""),
-            command_excerpt=command,
-            session_id=str(payload.get("session_id", "")),
-            cwd=cwd if isinstance(cwd, str) else None,
-        )
-    sys.stdout.write(json.dumps(envelope))
-    if decision == "deny":
-        sys.exit(2)
+    if envelope is not None:
+        apply_decision(_HOOK_ID, payload, envelope, command)
 
 
 if __name__ == "__main__":

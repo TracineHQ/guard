@@ -25,15 +25,14 @@ To disable any hook, remove its entry from the `PreToolUse` block in
 ### What it checks
 
 Validates the `command` string in `Bash` tool input. Behavior splits on
-`permission_mode`:
+guard mode, never on Claude Code's `permission_mode`:
 
-- **Strict modes** (`auto`, `dontAsk`, `bypassPermissions` -- any unattended
-  mode) are default-deny: a segment must match a known-safe registry prefix
-  to pass, and `ASK`-tier commands are denied with a queued-for-session-end
-  message instead of prompting.
-- **Interactive modes** (`default`, `acceptEdits`) pass unknown segments
-  through to Claude Code's normal permission prompt. Only the dangerous floor
-  below forces a hard `deny`.
+- **Lockdown** (`guard mode lockdown`, opt-in) is default-deny: a segment
+  must match a known-safe registry prefix to pass, and everything else is
+  denied with a queued-for-session-end message.
+- **Enforce** (the default) passes unknown segments through to Claude Code's
+  normal permission prompt. Only the dangerous floor and the elevated-risk
+  tier below force a `deny`.
 
 In both modes the validator:
 
@@ -47,12 +46,16 @@ In both modes the validator:
   non-allowlisted `-m` modules), command substitution whose inner command is
   itself dangerous, heredoc bodies feeding a shell/eval sink, credential
   leaks (`gh auth token`), and high-entropy secret values.
+- Denies the elevated-risk tier in enforce and lockdown with a specific rule_id:
+  non-sudo escalation (`su`, `doas`, `pkexec`), host power control
+  (`reboot`, `shutdown`), and package-registry redirection
+  (`npm config set registry`).
 - Looks up each segment in the registry (`src/guard/registry.py`) — `ALLOW`
-  prefixes pass, `ASK` prefixes are surfaced (denied in strict mode), and
-  `ALWAYS_DENY` prefixes block hard.
+  prefixes pass, `ASK` prefixes fall through to Claude Code's own prompt
+  (denied in lockdown), and `ALWAYS_DENY` prefixes block hard.
 
-Read-only command substitution (e.g. `echo $(git rev-parse HEAD)`) passes in
-interactive mode; the same construct is re-evaluated for a dangerous inner
+Read-only command substitution (e.g. `echo $(git rev-parse HEAD)`) passes
+outside lockdown; the same construct is re-evaluated for a dangerous inner
 command and denied if one is found, in either mode.
 
 ### Example block
@@ -86,12 +89,15 @@ Additional denials beyond the simple subcommand list:
 - **`git commit -C <ref>` and `git commit --reuse-message=<ref>`** are
   denied (silent message reuse — the commit-message validator can't see
   the reused body).
-- **Ref creation and mutation** are denied, not merely ASK'd, via the shared
+- **Ref creation and mutation** are denied via the shared
   `git_ref_violation` predicate (`include_creation=True`) -- the same ref-write
   floor the bare-`git` path enforces as `bash.git_ref_mutation`. Covers
   `branch <name>` / `tag <name>` creation, `branch -d/-D/-m/-M`, `tag -a/-d`,
   and `remote add/remove/rename/set-url`. Bare listing (`branch -a`, `tag -l`)
   still auto-allows.
+- **Config writes and unknown subcommands** under `git -C` are denied with a
+  steer to run the same command as `cd <path> && git ...`, where the normal
+  bare-`git` rules apply.
 
 If the command contains shell operators (`&&`, `||`, `;`, `|`) the hook
 declines to auto-allow and falls through to the rest of the chain.
@@ -111,7 +117,7 @@ git -C: 'reset' is destructive and blocked
 
 ### What it checks
 
-Surfaces an `ask` decision when any tool touches a known credential file.
+Denies any tool call that touches a known credential file.
 A universal path scanner (`decide()`) extracts every path-like token in
 `tool_input` regardless of `tool_name` and checks it against the credential
 matchers; `Bash` additionally gets copy-source and variable-indirection
@@ -124,15 +130,16 @@ implementation that fired only on `Edit`/`Write`/`Bash` let a direct read
 of credential material through silently (see the `credential_check.py`
 module docstring and `decide()`).
 
-The hook never blocks; it forces a human prompt so a misrouted edit can't
-leak secrets silently.
+The deny steers the agent to let the tool use its own auth, or to ask the
+user for the specific non-secret value it needs.
 
-### Example prompt
+### Example deny
 
 ```
-Credential file access — confirm intent. Touching credential material
-(AWS/SSH/.env/*.pem/*.key/etc.) requires an explicit human OK so a
-misrouted edit can't leak secrets.
+Credential file access blocked. Touching credential material
+(AWS/SSH/.env/*.pem/*.key/etc.) puts secrets in the transcript. Let the tool
+use its own auth (aws, gh, ssh read their credentials themselves), or ask the
+user for the specific non-secret value you need.
 ```
 
 ---
@@ -192,24 +199,32 @@ transcripts that waste context. Use the appropriate query CLI for this data.
 
 ### What it checks
 
-Forces an `ask` decision on `Edit`/`Write` to security-critical files —
-the validator modules themselves, `registry.py`, `_utils.py`, and the
-Claude Code settings files (`.claude/settings.json`,
-`.claude/settings.local.json`). Backwards-compat patterns also cover the
-original `hooks/` layout for forks.
+Denies writes to guard's trust root: the validator modules, `registry.py`,
+`_utils.py`, `.claude/guard/allowlist.json` and `.claude/subagent-scope.json`.
+Backwards-compat patterns also cover the original `hooks/` layout for forks.
+The trust root stays protected in every guard mode, `off` included. Under
+`guard mode lockdown` the list grows to git hooks and config, agent
+instruction files (`CLAUDE.md`, `.cursorrules`, ...), MCP registrations and
+`~/.aws/config`. Project patterns from `.claude/guard-protected.txt` or
+`GUARD_PROTECTED_EXTRA` apply in every mode but `off`.
 
-Bash write-redirects (`echo ... > .claude/settings.json`) are also matched:
-`_match_for_tool` routes `Bash` payloads through `bash_write_targets`,
-which extracts the redirect / `tee` / `cp` / `dd of=` / in-place-editor
-targets and runs each through `is_protected`.
+Bash writes are matched too: `_match_for_tool` routes `Bash` payloads through
+`bash_write_targets`, which extracts redirect / `tee` / `cp` / `dd of=` /
+in-place-editor targets per command (operands stop at `&&`, `|`, `;`) and
+runs each through `is_protected`. Operators inside quotes stay operands.
+`guard allowlist <write>` and `guard mode <mode>` count as writes to the
+allowlist, so the agent can't reconfigure guard through its CLI. Every other
+tool passes (`Read`, `Grep`, `Glob`, `WebFetch`, `Agent`, `AskUserQuestion`,
+...), and interpreter bodies count only when they show write intent.
 
-The hook never denies; it only surfaces edits to the policy surface for
-review.
-
-### Example prompt
+### Example deny
 
 ```
-Protected file: guard/registry.py — confirm edit
+Protected file: guard/registry.py. guard blocks agent edits to its own code
+and subagent scope so a session can't rewrite its own guardrails. Don't retry
+or route around it. Tell the user what you want to change and why; they can
+make the edit, or allow it with `guard allowlist allow-command --rule
+guard.protected_files --command '<path or exact command>' --reason '...'`.
 ```
 
 ---
