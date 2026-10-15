@@ -60,8 +60,9 @@ adheres to [Semantic Versioning](https://semver.org/).
   into a script or module (`python3 tool.py`, `python3 -m json.tool`) passes
   in every mode. Network output (`curl`, `wget`, `nc`, `ssh`, `gh api`, ...)
   piped into any shell or interpreter, or fed to one through a substitution, is
-  denied whatever its arguments (`wget -qO- x | python3 tool.py`);
-  `| python3 -m json.tool` and `| jq` pass.
+  denied whatever its arguments (`wget -qO- x | python3 tool.py`).
+  `| python3 -m json.tool`, `| jq` and a literal `-c` / `-e` program with no
+  code sink (`| python3 -c 'import json,sys; ...'`) only parse it and pass.
 
 ### Fixed
 

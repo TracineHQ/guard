@@ -5670,16 +5670,61 @@ def _literal_inline_program(segment: str, *, piped: bool, dynamic_heredocs: froz
     shell ``-c`` string is judged by its own segments, which
     ``_get_always_deny`` checks next.
     """
+    if _shell_head(segment):
+        return _shell_c_payload(_payload_tokens(segment), 1)[1] is not None
+    scan = _scan_inline_program(segment, dynamic_heredocs)
+    if scan is None:
+        return False
+    family, programs, stdin_source, line_loop = scan
+    if programs:
+        return not _program_evals_stdin(family, "\n".join(programs), line_loop=line_loop)
+    # An AppleScript read from a heredoc or a file can't have its shell commands
+    # checked (see ``_osascript_floor``), so only ``osascript -e`` is literal.
+    return not piped and stdin_source == "literal" and family != "osascript"
+
+
+def _shell_head(segment: str) -> bool:
+    """True when the first word of ``segment`` names a shell."""
+    words = _raw_words(segment)
+    return bool(words) and _basename("".join(_shlex_tokens(words[0]))) in DANGEROUS_SHELL_WRAPPERS
+
+
+def _reads_input_as_data(segment: str) -> bool:
+    """True when ``segment`` runs a literal ``-c`` / ``-e`` program with no code sink.
+
+    Such a program (``python3 -c 'import json,sys; print(json.load(sys.stdin))'``)
+    can only parse what it reads, like ``jq``, so network output piped into it
+    is data. A shell, a script file, a program read from stdin, and a literal
+    program with any sink (``exec``, ``os.system``, ...) are not.
+    """
+    if _shell_head(segment):
+        return False
+    scan = _scan_inline_program(segment, frozenset())
+    if scan is None or not scan[1]:
+        return False
+    sink = _STDIN_EVAL_SINKS.get(scan[0])
+    return sink is not None and not sink.search("\n".join(scan[1]))
+
+
+def _scan_inline_program(
+    segment: str, dynamic_heredocs: frozenset[str]
+) -> tuple[str, list[str], str, bool] | None:
+    """``(family, programs, stdin_source, line_loop)`` for an interpreter's literal program.
+
+    ``programs`` are the ``-c`` / ``-e`` texts, ``stdin_source`` is
+    ``"literal"`` / ``"dynamic"`` for a heredoc or ``<`` file program, and
+    ``line_loop`` marks a perl / ruby ``-n`` / ``-p`` loop. ``None`` when the
+    program is not literal: built from an expansion, read from a here-string
+    or another descriptor, a script, a module, or followed by ``-i``.
+    """
     words = _raw_words(segment)
     values = ["".join(_shlex_tokens(w)) for w in words]
-    if values and _basename(values[0]) in DANGEROUS_SHELL_WRAPPERS:
-        return _shell_c_payload(_payload_tokens(segment), 1)[1] is not None
     start = next((i for i, v in enumerate(values) if _is_interpreter_name(_basename(v))), None)
     if start is None:
-        return False
+        return None
     family = _interpreter_family(_basename(values[start]))
     if family not in _LITERAL_PROGRAM_FAMILIES:
-        return False
+        return None
     programs: list[str] = []
     line_loop = False
     argv = False  # past the program: the rest is its own argv
@@ -5695,7 +5740,7 @@ def _literal_inline_program(segment: str, *, piped: bool, dynamic_heredocs: froz
                 target, j = words[j], j + 1
             op = redirect.group(1)
             if op in {"<<<", "<&"} or (op == "<" and _stdin_like_target(target)):
-                return False
+                return None
             if op in {"<<", "<<-"}:
                 delim = "".join(_shlex_tokens(target))
                 quoted = any(ch in target for ch in "'\"\\")
@@ -5706,7 +5751,7 @@ def _literal_inline_program(segment: str, *, piped: bool, dynamic_heredocs: froz
         if argv:
             continue
         if _interactive_flag(family, value):
-            return False  # reads more code from stdin after the program
+            return None  # reads more code from stdin after the program
         if len(value) > 1 and value.startswith("-") and value != "--":
             line_loop = line_loop or _line_loop_flag(family, value)
             kind, attached = _classify_interpreter_flag(family, value)
@@ -5714,16 +5759,16 @@ def _literal_inline_program(segment: str, *, piped: bool, dynamic_heredocs: froz
                 program = word
                 if _program_word_follows(family, value):
                     if j >= len(words):
-                        return False
+                        return None
                     program, j = words[j], j + 1
                 if _word_expands(program):
-                    return False
+                    return None
                 programs.append(program)
                 # python's -c ends its options; perl / osascript take more -e.
                 argv = family == "python"
                 continue
             if kind == "module":
-                return False
+                return None
             if kind == "value" and not attached:
                 j += 1
             continue
@@ -5731,12 +5776,8 @@ def _literal_inline_program(segment: str, *, piped: bool, dynamic_heredocs: froz
             argv = True
             continue
         if value != "--":
-            return False  # a script, /dev/fd/N or an operand this walk can't place
-    if programs:
-        return not _program_evals_stdin(family, "\n".join(programs), line_loop=line_loop)
-    # An AppleScript read from a heredoc or a file can't have its shell commands
-    # checked (see ``_osascript_floor``), so only ``osascript -e`` is literal.
-    return not piped and stdin_source == "literal" and family != "osascript"
+            return None  # a script, /dev/fd/N or an operand this walk can't place
+    return family, programs, stdin_source, line_loop
 
 
 def _get_always_deny(
@@ -7354,7 +7395,11 @@ def _fetches_from_network(segment: str, depth: int = 0) -> bool:
 
 
 def _code_consumer(segment: str) -> bool:
-    """True when ``segment`` (wrappers peeled) is a shell or interpreter, bar a data-only module."""
+    """True when ``segment`` (wrappers peeled) is a shell or interpreter that may run its input.
+
+    A data-only module (``python3 -m json.tool``) and a literal program with
+    no code sink (see ``_reads_input_as_data``) only parse it.
+    """
     layer = segment.strip()
     for _ in range(_PIPE_CONSUMER_UNWRAP_CAP):
         tokens = _payload_tokens(layer.lstrip("({!"))
@@ -7367,7 +7412,7 @@ def _code_consumer(segment: str) -> bool:
             module = next(
                 (tokens[k + 1] for k in range(len(tokens) - 1) if tokens[k] == "-m"), None
             )
-            return module not in _DATA_ONLY_MODULES
+            return module not in _DATA_ONLY_MODULES and not _reads_input_as_data(layer)
         peeled = _peel_pipe_consumer(layer)
         if peeled is None or peeled.strip() == layer:
             return False
