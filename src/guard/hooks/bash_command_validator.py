@@ -1350,8 +1350,10 @@ def _has_dangerous_env_sink(normalized: str) -> bool:
     """Return True for ``GIT_SSH_COMMAND=… cmd`` / ``LD_PRELOAD=… cmd`` etc.
 
     Covers both the bare ``K=V cmd`` form and the explicit ``env K=V cmd``
-    form. The middle case ``sudo K=V cmd`` is handled separately in
-    ``_strip_sudo`` (which strips sudo, then re-evaluates).
+    form, with ``env`` options skipped first (``env -i LD_PRELOAD=... cmd``,
+    ``env -u X DYLD_INSERT_LIBRARIES=... cmd``, ``env -- BASH_ENV=... cmd``).
+    The middle case ``sudo K=V cmd`` is handled separately in ``_strip_sudo``
+    (which strips sudo, then re-evaluates).
     """
     tokens = normalized.split()
     if not tokens:
@@ -1359,7 +1361,8 @@ def _has_dangerous_env_sink(normalized: str) -> bool:
     if _has_dangerous_env_assignment(tokens):
         return True
     if tokens[0] == "env" and len(tokens) > 1:
-        return _has_dangerous_env_assignment(tokens[1:])
+        start = _env_options_end(tokens)
+        return _has_dangerous_env_assignment(tokens[1 if start is None else start :])
     return False
 
 

@@ -20,7 +20,9 @@ adheres to [Semantic Versioning](https://semver.org/).
   against the floor. Other permission modes, `lockdown` and allowlist
   overrides behave exactly as before.
 - The floor holds against the wrappers that used to hide a command from it.
-  `env` options are peeled (`env -i`, `-u NAME`, `-C DIR`, `--`), shell
+  `env` options are peeled (`env -i`, `-u NAME`, `-C DIR`, `--`) and the
+  assignments after them still meet `bash.dangerous_env_sink`
+  (`env -i LD_PRELOAD=... cmd`), shell
   options before `-c` are skipped (`bash -o pipefail -c`, `bash -c --`),
   `ssh host --`, `docker container exec`, `docker compose exec` and `nsenter`
   payloads are checked, a shell reading a here-string or process

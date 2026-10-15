@@ -62,6 +62,10 @@
 {"command": "env -i rm -rf ~", "expected": "deny", "mode": "auto", "source": "curated", "note": "FLOOR: env options are peeled and the inner rm hits the floor"}
 {"command": "timeout 5 env -i rm -rf /", "expected": "deny", "mode": "auto", "source": "curated", "note": "FLOOR: runner plus env -i still peels to rm -rf /"}
 {"command": "env -u FOO rm -rf ~", "expected": "deny", "mode": "auto", "source": "curated", "note": "FLOOR: env -u NAME is peeled"}
+{"command": "LD_PRELOAD=/tmp/x.so ls", "expected": "deny", "mode": "auto", "source": "curated", "note": "FLOOR: loader hijack env assignment"}
+{"command": "env -i LD_PRELOAD=/tmp/x.so ls", "expected": "deny", "mode": "auto", "source": "curated", "note": "FLOOR: env options do not hide a loader hijack assignment"}
+{"command": "env -u X DYLD_INSERT_LIBRARIES=/tmp/x.dylib ls", "expected": "deny", "mode": "auto", "source": "curated", "note": "FLOOR: env -u does not hide a DYLD_ assignment"}
+{"command": "env -- BASH_ENV=/tmp/x bash script.sh", "expected": "deny", "mode": "auto", "source": "curated", "note": "FLOOR: env -- does not hide BASH_ENV"}
 {"command": "R=rm; $R -rf ~", "expected": "deny", "mode": "auto", "source": "curated", "note": "FLOOR: variable command head"}
 {"command": "/bin/r? -rf ~", "expected": "deny", "mode": "auto", "source": "curated", "note": "FLOOR: glob command head"}
 {"command": "\"$@\" rm -rf ~", "expected": "deny", "mode": "auto", "source": "curated", "note": "FLOOR: positional-parameter command head"}

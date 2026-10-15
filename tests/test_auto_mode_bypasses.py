@@ -29,6 +29,15 @@ BYPASSES: list[str] = [
     "env -C /tmp rm -rf ~",
     "env -iu FOO rm -rf ~",
     "sudo env -i rm -rf /",
+    # 1b. Assignments peeled from an env prefix still meet the env-sink floor.
+    "LD_PRELOAD=/tmp/x.so ls",
+    "env LD_PRELOAD=/tmp/x.so ls",
+    "env -i LD_PRELOAD=/tmp/x.so ls",
+    "env -u X DYLD_INSERT_LIBRARIES=/tmp/x.dylib ls",
+    "env -- BASH_ENV=/tmp/x bash script.sh",
+    "env -C /tmp GIT_SSH_COMMAND='sh -c id' git fetch",
+    "timeout 5 env -i LD_AUDIT=/tmp/x.so ls",
+    "sudo env -i LD_PRELOAD=/tmp/x.so ls",
     # 2. A variable or glob command head hides the command.
     "R=rm; $R -rf ~",
     "$SHELL -c 'rm -rf ~'",
