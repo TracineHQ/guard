@@ -15,6 +15,15 @@ adheres to [Semantic Versioning](https://semver.org/).
   `-c` / `-e` / `-p` / `-r`, a program on stdin, `python -m timeit`), and a
   family-aware flag scan keeps forms like `node -p`, `perl -pe`, `php -r` and
   `python3 <<EOF` denied.
+- `agent_output_guard` no longer blocks reading background command output.
+  Claude Code writes background Bash output and subagent transcripts to the
+  same `tasks/<id>.output` directory; the hook now resolves each path on disk
+  and denies only subagent transcripts (a symlink into `subagents/` or a
+  `.jsonl` file, or a file whose first line is a transcript record), wildcards
+  under `tasks/`, and paths it cannot verify (missing, not a regular file,
+  unreadable). `cat`, `tail`, `grep` and Read on a plain-text output file
+  pass, whatever its size. The deny reason now points at the subagent's
+  returned result instead of an unnamed query CLI.
 
 ## [1.5.0] - 2026-06-03
 
