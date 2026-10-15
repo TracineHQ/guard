@@ -1,8 +1,8 @@
 """Project allowlist trust: a git-tracked project file can only tighten.
 
 A repo anyone can clone could ship ``.claude/guard/allowlist.json`` with
-``{"mode": "off"}``. Guard trusts the project file only when it sits in a git
-work tree and is not tracked (untracked or gitignored). Anything else may
+``{"mode": "off"}``. Guard trusts the project file only when it sits at a git
+work-tree root and is not tracked (untracked or gitignored). Anything else may
 only tighten the mode; its ``disable_rules`` and ``allow_commands`` are
 ignored. Every test here uses a real temp git repo.
 """
@@ -57,18 +57,62 @@ def _global(doc: dict[str, Any]) -> None:
     _write(Path(os.environ["GUARD_DATA_DIR"]) / "allowlist.json", doc)
 
 
-def _count_git_queries(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
-    """Record every ``git ls-files`` trust query while still running it."""
+def _count_git_queries(
+    monkeypatch: pytest.MonkeyPatch, envs: list[dict[str, str]] | None = None
+) -> list[list[str]]:
+    """Record every ``git ls-files`` trust query (and its env) while still running it."""
     calls: list[list[str]] = []
     real_run = subprocess.run
 
     def spy(argv: Any, *args: Any, **kwargs: Any) -> Any:
         if isinstance(argv, list) and "ls-files" in argv:
             calls.append(list(argv))
+            if envs is not None:
+                envs.append(dict(kwargs.get("env") or {}))
         return real_run(argv, *args, **kwargs)
 
-    monkeypatch.setattr("guard.allowlist.subprocess.run", spy)
+    # Patch the module itself: guard imports subprocess lazily, on first use.
+    monkeypatch.setattr(subprocess, "run", spy)
     return calls
+
+
+def _patch_git(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
+    monkeypatch.setattr(subprocess, "run", fake)
+
+
+def _clone_with_entries(tmp_path: Path, entries: list[str], *, precompose: bool = True) -> Path:
+    """Clone a repo whose index holds ``entries`` (all ``{"mode": "off"}``).
+
+    Index entries are written straight with ``update-index`` so they can
+    differ only in case or Unicode form, which a case- and
+    normalization-insensitive filesystem (APFS) folds into one directory.
+    """
+    src = init_git_repo(tmp_path / "src")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    argv = ["git", "-C", str(src), "hash-object", "-w", "--stdin"]
+    blob = (
+        subprocess.run(
+            argv,
+            input=b'{"mode": "off"}',
+            capture_output=True,
+            env=env,
+            check=True,
+        )
+        .stdout.decode()
+        .strip()
+    )
+    cfg = ("-c", f"core.precomposeunicode={str(precompose).lower()}")
+    for entry in entries:
+        git(src, *cfg, "update-index", "--add", "--cacheinfo", f"100644,{blob},{entry}")
+    git(
+        src,
+        *cfg,
+        *("-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"),
+        *("commit", "-q", "--no-verify", "-m", "x"),
+    )
+    dst = tmp_path / "clone"
+    git(tmp_path, "clone", "-q", str(src), str(dst))
+    return dst
 
 
 # === Untrusted (tracked) files can only tighten ===
@@ -88,8 +132,10 @@ def test_tracked_mode_off_is_ignored_and_warns(
     err = capsys.readouterr().err
     assert str(path) in err
     assert "tracked by git" in err
-    assert "gitignore" in err
-    assert "--global" in err
+    assert "guard status" in err
+    # On a deny this reaches the model: never spell out the way to trust it.
+    assert "git rm" not in err
+    assert "gitignore" not in err
 
 
 def test_tracked_mode_off_falls_back_to_global_mode(tmp_path: Path) -> None:
@@ -266,9 +312,9 @@ def test_file_outside_any_git_repo_is_untrusted(
             subprocess.CompletedProcess(["git"], 128, b"", b"fatal: index file corrupt"),
             "git failed",
         ),
-        (subprocess.CompletedProcess(["git"], 0, b"", b""), "did not list"),
+        (PermissionError(13, "Permission denied"), "git could not run"),
     ],
-    ids=["missing", "timeout", "error", "unlisted"],
+    ids=["missing", "timeout", "error", "oserror"],
 )
 def test_git_failure_means_untrusted(
     tmp_path: Path,
@@ -287,7 +333,7 @@ def test_git_failure_means_untrusted(
             raise outcome
         return outcome
 
-    monkeypatch.setattr("guard.allowlist.subprocess.run", broken_git)
+    _patch_git(monkeypatch, broken_git)
 
     al = load_allowlist(cwd=repo)
 
@@ -296,7 +342,12 @@ def test_git_failure_means_untrusted(
     assert reason_fragment in capsys.readouterr().err
 
 
-def test_git_failure_is_not_cached(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_git_failure_is_cached_briefly_then_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow or broken git isn't re-run on every hook, but isn't pinned either."""
+    import time
+
     from guard.allowlist import project_allowlist_trust
 
     repo = init_git_repo(tmp_path / "repo")
@@ -306,15 +357,40 @@ def test_git_failure_is_not_cached(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         raise subprocess.TimeoutExpired(["git"], 2.0)
 
     with monkeypatch.context() as m:
-        m.setattr("guard.allowlist.subprocess.run", timeout)
+        m.setattr(subprocess, "run", timeout)
         first = project_allowlist_trust(repo)
-    monkeypatch.setattr("guard.allowlist._TRUST_MEMO", {})  # next hook process
-
     assert first is not None
     assert first.trusted is False
+
+    calls = _count_git_queries(monkeypatch)
+    monkeypatch.setattr("guard.allowlist._TRUST_MEMO", {})  # next hook process
     second = project_allowlist_trust(repo)
-    assert second is not None
-    assert second.trusted is True
+    assert second == first
+    assert calls == []  # still inside the short window: served from the cache
+
+    later = time.time() + 61
+    monkeypatch.setattr(time, "time", lambda: later)
+    monkeypatch.setattr("guard.allowlist._TRUST_MEMO", {})
+    third = project_allowlist_trust(repo)
+    assert third is not None
+    assert third.trusted is True
+    assert len(calls) == 1
+
+
+def test_git_runs_with_c_locale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Error text guard inspects must not depend on the user's locale."""
+    from guard.allowlist import project_allowlist_trust
+
+    repo = init_git_repo(tmp_path / "repo")
+    _project(repo, _LOOSE_DOC)
+    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
+    envs: list[dict[str, str]] = []
+    _count_git_queries(monkeypatch, envs)
+
+    project_allowlist_trust(repo)
+
+    assert envs
+    assert envs[0]["LC_ALL"] == "C"
 
 
 # === Path tricks that would dodge a naive check ===
@@ -372,6 +448,144 @@ def test_tracked_file_under_other_case_is_untrusted(tmp_path: Path) -> None:
     assert load_allowlist(cwd=repo).mode == "enforce"
 
 
+# Case splits: the index tracks ``.claude/guard/allowlist.json``, but an
+# earlier entry makes the clone create a parent directory under another case
+# (or Unicode form). On APFS the tracked file then lands in that directory,
+# where guard still reads it. On a case-sensitive filesystem these are
+# separate directories, and the assertions hold trivially.
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [".claude/GUARD/a", ".claude/guard/allowlist.json"],
+        [".CLAUDE/x", ".claude/guard/allowlist.json"],
+        [".claude/guard/allowli\u017ft.json"],  # APFS folds U+017F (long s) to "s"
+    ],
+    ids=["guard-dir-case", "claude-dir-case", "long-s-filename"],
+)
+def test_case_split_clone_is_untrusted(tmp_path: Path, entries: list[str]) -> None:
+    from guard.allowlist import load_allowlist, project_allowlist_trust
+
+    clone = _clone_with_entries(tmp_path, entries)
+    if not (clone / _REL).exists():
+        pytest.skip("this filesystem keeps the split names apart")
+
+    assert load_allowlist(cwd=clone).mode == "enforce"
+    trust = project_allowlist_trust(clone)
+    assert trust is not None
+    assert trust.trusted is False
+    assert trust.reason == "tracked by git"
+
+
+@pytest.mark.parametrize(
+    ("entries", "precompose", "subdir"),
+    [
+        # U+017F (long s): APFS puts "\u017frc/" and "src/" in one directory.
+        (["src/README", "\u017frc/.claude/guard/allowlist.json"], True, "src"),
+        # NFC "\u00e9t\u00e9/" and NFD "e\u0301te\u0301/": one directory on APFS.
+        (
+            ["\u00e9t\u00e9/README", "e\u0301te\u0301/.claude/guard/allowlist.json"],
+            False,
+            "\u00e9t\u00e9",
+        ),
+    ],
+    ids=["long-s-subdir", "nfd-subdir"],
+)
+def test_unicode_split_subdir_clone_is_untrusted(
+    tmp_path: Path, entries: list[str], *, precompose: bool, subdir: str
+) -> None:
+    from guard.allowlist import load_allowlist
+
+    clone = _clone_with_entries(tmp_path, entries, precompose=precompose)
+
+    assert load_allowlist(cwd=clone / subdir).mode == "enforce"
+
+
+# === Only a file at the repository root can be trusted ===
+
+
+def test_gitignored_dependency_tree_is_untrusted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A package can ship the file inside a gitignored node_modules/ or .venv/."""
+    from guard.allowlist import load_allowlist, project_allowlist_trust
+
+    repo = init_git_repo(tmp_path / "repo")
+    (repo / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    pkg = repo / "node_modules" / "evil-pkg"
+    _project(pkg, _LOOSE_DOC)
+
+    assert load_allowlist(cwd=pkg).mode == "enforce"
+    assert "not at the repository root" in capsys.readouterr().err
+    trust = project_allowlist_trust(pkg)
+    assert trust is not None
+    assert trust.trusted is False
+    assert trust.reason == "not at the repository root"
+
+
+def test_untracked_file_in_a_subdirectory_is_untrusted(tmp_path: Path) -> None:
+    from guard.allowlist import load_allowlist
+
+    repo = init_git_repo(tmp_path / "repo")
+    _project(repo / "pkg", {"mode": "off"})
+
+    assert load_allowlist(cwd=repo / "pkg").mode == "enforce"
+
+
+def test_invalid_git_dir_is_skipped_like_git_does(tmp_path: Path) -> None:
+    """An empty ``proj/.git`` is not a repo: the real work tree is the parent."""
+    from guard.allowlist import project_allowlist_trust
+
+    repo = init_git_repo(tmp_path / "repo")
+    proj = repo / "proj"
+    _project(proj, {"mode": "off"})
+    (proj / ".git").mkdir()
+
+    trust = project_allowlist_trust(proj)
+    assert trust is not None
+    assert trust.reason == "not at the repository root"
+
+
+def test_cache_keys_on_the_real_index_past_an_invalid_git_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty ``.git`` dir below the root must not become the cache key."""
+    from guard.allowlist import load_allowlist
+
+    repo = init_git_repo(tmp_path / "repo")
+    _project(repo, {"mode": "off"})
+    (repo / ".claude" / "guard" / ".git").mkdir()
+    assert load_allowlist(cwd=repo).mode == "off"
+
+    git(repo, "add", "-f", str(_REL))
+    monkeypatch.setattr("guard.allowlist._TRUST_MEMO", {})  # next hook process
+    assert load_allowlist(cwd=repo).mode == "enforce"
+
+
+def test_global_allowlist_read_as_project_file_is_not_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With cwd = HOME the project path is the global file itself."""
+    from guard.allowlist import load_allowlist, project_allowlist_trust
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("GUARD_DATA_DIR", str(home / ".claude" / "guard"))
+    _global({"mode": "shadow", "disable_rules": ["bash.npx_remote"]})
+    calls = _count_git_queries(monkeypatch)
+
+    al = load_allowlist(cwd=home)
+
+    assert al.mode == "shadow"
+    assert al.disable_rules == {"bash.npx_remote"}
+    assert capsys.readouterr().err == ""
+    assert calls == []
+    trust = project_allowlist_trust(home)
+    assert trust is not None
+    assert trust.trusted is True
+    assert trust.reason == "it is the global allowlist"
+
+
 # === Cost: git runs only when it matters, and its verdict is cached ===
 
 
@@ -384,10 +598,21 @@ def test_no_project_file_runs_no_git(tmp_path: Path, monkeypatch: pytest.MonkeyP
     def no_subprocess(*_args: Any, **_kwargs: Any) -> Any:
         pytest.fail("no project allowlist, so guard must not spawn git")
 
-    monkeypatch.setattr("guard.allowlist.subprocess.run", no_subprocess)
+    _patch_git(monkeypatch, no_subprocess)
 
     assert load_allowlist(cwd=repo).mode == "shadow"
     assert project_allowlist_trust(repo) is None
+
+
+def test_loading_guard_allowlist_does_not_import_subprocess() -> None:
+    """Hooks with no project file shouldn't pay for importing subprocess."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    probe = "import sys, guard.allowlist; print('subprocess' in sys.modules)"
+    out = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, env=env, check=True
+    )
+    assert out.stdout.strip() == "False"
 
 
 def test_trust_verdict_cached_until_index_changes(

@@ -182,6 +182,7 @@ def test_list_reports_untrusted_project_file(isolated_scopes: tuple[Path, Path])
     assert payload["project_allowlist"]["trusted"] is False
     assert payload["project_allowlist"]["reason"] == "tracked by git"
     assert "UNTRUSTED: tracked by git" in pretty
+    assert "git rm --cached" in pretty
 
 
 def test_list_reports_no_project_file(isolated_scopes: tuple[Path, Path]) -> None:

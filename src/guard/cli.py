@@ -382,6 +382,24 @@ def _project_trust_report(cwd: Path | None = None) -> dict[str, Any]:
     }
 
 
+_TRUST_FIXES: dict[str, str] = {
+    "tracked by git": (
+        f"add it to .gitignore and untrack it (git rm --cached {PROJECT_ALLOWLIST_RELPATH})"
+    ),
+    "not at the repository root": (
+        f"keep it at {PROJECT_ALLOWLIST_RELPATH} in the git repository root, untracked"
+    ),
+    "not inside a git work tree": "keep it in a git repository, untracked",
+    "reached through a symlink": "make it a regular file, not a symlink",
+}
+
+
+def _project_trust_fix(report: dict[str, Any]) -> str:
+    """How to make an untrusted project file trusted. CLI output only, never the hooks."""
+    fix = _TRUST_FIXES.get(report["reason"], "check that git runs in this directory")
+    return f"to trust it, {fix}; or move its entries to your global allowlist with --global"
+
+
 def _project_trust_line(report: dict[str, Any]) -> str:
     if not report["exists"]:
         return "project allowlist: none"
@@ -389,7 +407,8 @@ def _project_trust_line(report: dict[str, Any]) -> str:
         return f"project allowlist: {report['path']} (trusted: {report['reason']})"
     return (
         f"project allowlist: {report['path']} "
-        f"(UNTRUSTED: {report['reason']}; it can only tighten guard)"
+        f"(UNTRUSTED: {report['reason']}; it can only tighten guard)\n"
+        f"  {_project_trust_fix(report)}"
     )
 
 
@@ -397,11 +416,11 @@ def _warn_untrusted_project_write(report: dict[str, Any]) -> None:
     """Tell the user an entry they just wrote to the project file is inert."""
     if report["trusted"] is not False:
         return
+    fix = _project_trust_fix(report)
     sys.stderr.write(
-        f"guard: warning: {report['path']} is {report['reason']}, so this entry won't take "
-        "effect: guard ignores disable_rules and allow_commands in a project allowlist that "
-        "git tracks or can't vouch for. To fix: add it to .gitignore and untrack it "
-        f"(git rm --cached {PROJECT_ALLOWLIST_RELPATH}), or rerun with --global.\n"
+        f"guard: warning: {report['path']} is untrusted ({report['reason']}), so this entry "
+        "won't take effect: guard ignores disable_rules and allow_commands in a project "
+        f"allowlist it can't trust. {fix[0].upper()}{fix[1:]}.\n"
     )
 
 
@@ -946,6 +965,8 @@ def cmd_mode(
         "  default: enforce",
         "(precedence: project > global > default; an untrusted project file can only tighten)",
     ]
+    if project["trusted"] is False:
+        lines.append(_project_trust_fix(project))
     return payload, "\n".join(lines) + "\n"
 
 

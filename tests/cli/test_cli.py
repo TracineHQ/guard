@@ -192,6 +192,9 @@ def test_status_reports_untrusted_project_allowlist(
     }
     assert f"project allowlist: {target}" in pretty
     assert "UNTRUSTED: tracked by git" in pretty
+    # The fix lives in the CLI, never in the hook warning that can reach the model.
+    assert "git rm --cached .claude/guard/allowlist.json" in pretty
+    assert "--global" in pretty
 
 
 def test_status_reports_missing_project_allowlist(
