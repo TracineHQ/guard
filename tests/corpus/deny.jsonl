@@ -166,3 +166,14 @@
 {"command": "GH_PAT=github_pat_11ABCDE0aBcDeFgHiJ_kLmNoPqRsTuVwXyZ0123456789AbCdEfGhIjKlMnOpQr", "expected": "deny", "mode": "default", "source": "adversarial", "note": "R-G: fine-grained github_pat_ under an unlisted name bypasses arm1 (ghp_ only) + arm2 (PAT not a name hint)"}
 {"command": "MY_DB=postgres://admin:s3cr3tP4ssw0rd@db.internal:5432/prod", "expected": "deny", "mode": "default", "source": "adversarial", "note": "R-G/DSN: connection string with inline user:password@ creds bypasses both arms (: breaks the assignment alphabet)"}
 {"command": "CONN=mysql://root:hunter2Pw9@10.0.0.5/app", "expected": "deny", "mode": "default", "source": "adversarial", "note": "R-G/DSN: second scheme, inline creds"}
+{"command": "uv run python - <<'EOF'\nimport os\nEOF", "expected": "deny", "mode": "default", "source": "curated", "note": "interpreter program read from stdin (heredoc) is inline code"}
+{"command": "python3 <<EOF\nprint(1)\nEOF", "expected": "deny", "mode": "default", "source": "adversarial", "note": "heredoc with no script path is the program on stdin"}
+{"command": "python3 0<<EOF\nprint(1)\nEOF", "expected": "deny", "mode": "default", "source": "adversarial", "note": "fd-prefixed heredoc must not read as a script path"}
+{"command": "python3 < x.py", "expected": "deny", "mode": "default", "source": "adversarial", "note": "program on stdin via < redirect; run the script path instead"}
+{"command": "node -p 'process.version'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "node -p evaluates its argument (family-aware eval flag)"}
+{"command": "php -r 'echo 1;'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "php -r runs inline code"}
+{"command": "perl -pe 's/a/b/' f", "expected": "deny", "mode": "default", "source": "adversarial", "note": "perl -pe cluster carries -e"}
+{"command": "python3 -Ic 'import os'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "python short-flag cluster ending in c"}
+{"command": "python -m timeit 'code'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "timeit runs its arguments as statements, same primitive as -c"}
+{"command": "uv run python tools/dev.py frog-run g1", "expected": "deny", "mode": "lockdown", "source": "curated", "note": "lockdown default-denies script runs (not on the safe-prefix allowlist)"}
+{"command": "python -m http.server", "expected": "deny", "mode": "lockdown", "source": "curated", "note": "lockdown default-denies module runs outside the safe-module set"}

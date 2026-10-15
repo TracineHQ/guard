@@ -15,9 +15,11 @@ decisions to `~/.claude/guard-decisions.jsonl`.
 authoritative references. Quick map:
 
 - `bash_command_validator` — `rm -rf` against `/`, `/*`, `~`, `$HOME`;
-  force-push (`--force`, `-f`, `--force-with-lease`, `+refspec`); interpreter
-  eval (`python -c`, `node -e`, `pypy`, `bun`, `deno`, plus runner wrappers
-  `uvx`/`pipx`); shell wrappers (`bash -c`, `sh -lc`); `eval`/`source`/`.`;
+  force-push (`--force`, `-f`, `--force-with-lease`, `+refspec`); inline
+  interpreter code (`python -c`, `node -e`/`-p`, `perl -pe`, `php -r`,
+  `python - <<EOF`, `pypy`, `bun`, `deno`, plus runner wrappers
+  `uvx`/`pipx`/`uv run`; script and `-m` module runs are left to Claude
+  Code's permission flow); shell wrappers (`bash -c`, `sh -lc`); `eval`/`source`/`.`;
   dangerous env-var sinks (`GIT_SSH_COMMAND`, `LD_PRELOAD`, etc.); pipe-to-shell
   (`curl ... | sh`); credential leaks (`gh auth token`, `aws sts get-session-token`);
   **admin-CLI default-deny** for `aws`, `gcloud`, `az`, `kubectl`, `launchctl` —

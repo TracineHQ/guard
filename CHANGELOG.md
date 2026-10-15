@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `bash.dangerous_interpreter` no longer blocks running a script or module
+  (`uv run python tools/dev.py`, `python3 scripts/x.py`, `python -m pytest`).
+  Those runs now pass through to Claude Code's own permission flow; lockdown
+  still denies them. The rule now targets inline code only (eval flags such as
+  `-c` / `-e` / `-p` / `-r`, a program on stdin, `python -m timeit`), and a
+  family-aware flag scan keeps forms like `node -p`, `perl -pe`, `php -r` and
+  `python3 <<EOF` denied.
+
 ## [1.5.0] - 2026-06-03
 
 - Reduce bash-matcher friction, add corpus harness (#64)

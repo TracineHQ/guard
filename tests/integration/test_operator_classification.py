@@ -92,7 +92,7 @@ def test_sequence_into_shell_is_not_pipe_to_shell() -> None:
     )
 
 
-# === FP-6b: uv-run interpreter execution denies in strict mode ===
+# === FP-6b: uv-run inline interpreter code denies in every mode ===
 
 
 @pytest.mark.parametrize(
@@ -100,17 +100,35 @@ def test_sequence_into_shell_is_not_pipe_to_shell() -> None:
     [
         "uv run python -c 'import os'",
         "uv run python3 -c 'x=1'",
-        "uv run python -m http.server",
-        "uv run python -m http.server 9000",
         "uv run --with requests python -c 'import requests'",
-        "uv run --python 3.12 python -m http.server",
-        "uv run python /tmp/attacker.py",
+        "uv run python - <<'EOF'\nimport os\nEOF",
     ],
 )
-def test_uv_run_interpreter_denies_strict(cmd: str) -> None:
-    decision = decide(cmd, lockdown=True)
+@pytest.mark.parametrize("lockdown", [False, True])
+def test_uv_run_inline_interpreter_code_denies(cmd: str, lockdown: bool) -> None:  # noqa: FBT001 -- bool from parametrize
+    decision = decide(cmd, lockdown=lockdown)
     assert _is_deny(decision), cmd
     assert "interpreter" in decision["permissionDecisionReason"].lower()
+
+
+# === uv-run script / module runs: pass through in enforce, deny in lockdown ===
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "uv run python -m http.server",
+        "uv run python -m http.server 9000",
+        "uv run --python 3.12 python -m http.server",
+        "uv run python /tmp/attacker.py",
+        "uv run python tools/dev.py frog-run g1",
+    ],
+)
+def test_uv_run_script_or_module_passes_through_enforce(cmd: str) -> None:
+    # Not denied, and not auto-allowed by the `uv run python` safe prefix:
+    # Claude Code's own permission flow decides.
+    assert decide(cmd) is None, cmd
+    assert _is_deny(decide(cmd, lockdown=True)), cmd
 
 
 # === FP-6b: regression — uv-run non-interpreter tooling still allowed ===

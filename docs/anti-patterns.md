@@ -124,8 +124,9 @@ env -i bash -c '...'
 `-e` form is allowed, every other validator in the chain can be bypassed
 by stuffing the real command into the eval string.
 
-**What guard does.** Hard deny in the registry. Bare `python` / `python3`
-/ `node` / `env` are still allowed for legitimate uses (running a script,
-inspecting environment) — only the re-exec flag forms are blocked. `env -i`
-is denied unconditionally because clearing the environment is a common RCE
-wrapper.
+**What guard does.** Hard deny, along with the other inline-code shapes
+(`node -p`, `perl -pe`, `php -r`, a program on stdin like `python - <<EOF`).
+The deny tells the agent to write the code to a script file and run that.
+Running a script or module (`python3 scripts/x.py`, `python -m pytest`) is
+not blocked; Claude Code's own permission flow decides it. `env -i` is denied
+unconditionally because clearing the environment is a common RCE wrapper.

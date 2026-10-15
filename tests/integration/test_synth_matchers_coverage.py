@@ -84,6 +84,56 @@ def test_interpreter_bare_eval_flag_denied(command: str) -> None:
     assert _is_deny(decide(command)), f"bare-eval bypass: {command!r}"
 
 
+# Inline code that only the old "any positional is a script" heuristic caught.
+# The family-aware scan must keep every one denied now that script runs pass.
+INTERPRETER_INLINE_CODE_DENY = [
+    # per-family eval flags beyond -c / -e
+    "node -p 'process.version'",
+    "node -pe 'process.version'",
+    "node --print 'process.version'",
+    "node --eval=process.exit()",
+    "bun -p '1'",
+    "bun --print '1'",
+    "deno repl --eval 'Deno.exit()'",
+    "php -r 'echo 1;'",
+    "php -R 'echo $argn;'",
+    "perl -pe 's/a/b/' f",
+    "perl -lne 'print' f",
+    "perl -E 'say 1'",
+    "ruby -ne 'puts 1'",
+    # python short-flag clusters ending in c
+    "python3 -Ic 'import os'",
+    "python3 -uc 'import os'",
+    # eval flag after flags whose value can't be told from a script path
+    "python3 -X dev -c 'x'",
+    "python3 -W ignore -c 'x'",
+    "node -r ./x.js -e 'x'",
+    "node --title ./x.js -e 'x'",
+    "python3 2> /dev/null -c 'x'",
+    # program on stdin
+    "python3 -",
+    "uv run python - <<'EOF'\nimport os\nEOF",
+    "python3 <<EOF\nprint(1)\nEOF",
+    "python3 0<<EOF\nprint(1)\nEOF",
+    "python3 < x.py",
+    "python3 /dev/stdin <<EOF\nx\nEOF",
+    "python3 /dev/fd/3 3<<EOF\nx\nEOF",
+    "python3 -i x.py <<EOF\nx\nEOF",  # -i reads more code from stdin
+    "node - <<EOF\nx\nEOF",
+    "ruby <<EOF\nx\nEOF",
+    # wrappers peel to the inner interpreter
+    "stdbuf -o0 python3 -Ic 'x'",
+    "uvx --from x python -Ic 'x'",
+]
+
+
+@pytest.mark.parametrize("command", INTERPRETER_INLINE_CODE_DENY)
+def test_interpreter_inline_code_denied(command: str) -> None:
+    res = decide(command)
+    assert _is_deny(res), f"inline-code bypass: {command!r} -> {res}"
+    assert _is_deny(decide(command, lockdown=True)), f"inline-code bypass: {command!r}"
+
+
 @pytest.mark.parametrize("command", INTERPRETER_LEGIT)
 def test_interpreter_help_version_not_denied(command: str) -> None:
     res = decide(command)
@@ -93,24 +143,29 @@ def test_interpreter_help_version_not_denied(command: str) -> None:
 # ============================================================================
 # python -m / python <script> — module + script execution
 # ============================================================================
+# Script and module runs are project work: not denied in enforce (they pass
+# through to Claude Code's own permission flow), but never known-safe, so
+# lockdown default-denies them.
 
-INTERPRETER_MODULE_OR_SCRIPT_DENY = [
+INTERPRETER_MODULE_OR_SCRIPT_RUNS = [
     # --- network / listener / encode / archive / installer modules ---
     "python -m http.server 9000",
     "python -m http.server",
-    "python -mhttp.server",  # fused unsafe
+    "python -mhttp.server",  # fused
     "python -m base64",
     "python -m base64 -d secret.b64",
-    "python -m zipfile -e a.zip .",
+    "python -m zipfile -e a.zip .",  # -e belongs to zipfile, not python
     "python -m tarfile",
     "python -m pip install requests",
     "python3 -m pip install foo",
+    "python -m pip install -e .",
     "python -m ftplib",
     "python -m smtplib",
     "python -m socketserver",
-    "python -m pdb /tmp/x.py",  # debugger can exec arbitrary code
-    "python -m code",  # interactive interpreter
     "python -m runpy /tmp/x.py",
+    "python -m unittest",
+    "python -munittest",
+    "pypy3 -m unittest",
     # --- unknown / not-in-set modules ---
     "python -m some_unknown_module",
     "python -m os",
@@ -119,32 +174,71 @@ INTERPRETER_MODULE_OR_SCRIPT_DENY = [
     # --- submodule of a safe top-level (exact-match miss) ---
     "python -m json.tool.foo",
     "python -m venv.something",
-    # --- bare script paths (no -m at all) ---
+    # --- script paths (no -m at all) ---
     "python /tmp/attacker.py",
     "python3 /tmp/x.py",
+    "python3 x.py -c cfg",  # -c is the script's argv, not python's
+    "python3 -u scripts/x.py",
+    "python3 -X dev scripts/x.py",
+    "python3 scripts/x.py < data.json",  # stdin is data for the script
     "node /tmp/x.js",
+    "node scripts/build.js -e prod",
     "ruby /tmp/x.rb",
     "ruby a.rb",
     "perl /tmp/x.pl",
     "php /tmp/x.php",
+    "osascript /tmp/evil.scpt",
+    "osascript ~/Library/x.scpt",
     "python ./local_script.py",
+    "deno run -A main.ts",
+    # --- wrapped runs (env / runner wrappers are peeled for lockdown) ---
+    "env python -m http.server",
+    "env python /tmp/x.py",
+    "uv run python tools/dev.py frog-run g1-claims",
+    "uv run --python 3.12 python -m http.server",
+    "uvx --from somepkg python -m http.server",
     # --- malformed bare -m (no module) ---
     "python -m",
-    # --- code-executing stdlib modules: NOT in the safe set (adversarial pass) ---
-    # timeit's -s runs arbitrary setup code; unittest -m imports/runs a module.
-    # Neither has a SAFE_PREFIX backstop, so they must hard-deny like any -m RCE.
-    "python -m timeit",
-    "python -m timeit -s \"__import__('os').system('id')\" pass",
-    "python -munittest",
-    "python -m unittest",
-    "pypy3 -m unittest",
-    "python -mtimeit",
 ]
 
 
-@pytest.mark.parametrize("command", INTERPRETER_MODULE_OR_SCRIPT_DENY)
-def test_interpreter_module_or_script_denied(command: str) -> None:
-    assert _is_deny(decide(command)), f"module/script bypass: {command!r}"
+@pytest.mark.parametrize("command", INTERPRETER_MODULE_OR_SCRIPT_RUNS)
+def test_interpreter_module_or_script_not_denied(command: str) -> None:
+    res = decide(command)
+    assert not _is_deny(res), f"script/module run denied: {command!r} -> {res}"
+    assert res is None or res.get("permissionDecision") != "allow", (
+        f"script/module run auto-allowed: {command!r} -> {res}"
+    )
+
+
+@pytest.mark.parametrize("command", INTERPRETER_MODULE_OR_SCRIPT_RUNS)
+def test_interpreter_module_or_script_denied_in_lockdown(command: str) -> None:
+    assert _is_deny(decide(command, lockdown=True)), f"lockdown let it run: {command!r}"
+
+
+# Modules whose argv is program text (timeit statements, pdb / IPython /
+# idlelib ``-c``) or that read code from stdin (code / asyncio REPLs) are the
+# same primitive as ``python -c`` and stay denied in every mode.
+INTERPRETER_INLINE_CODE_MODULE_DENY = [
+    "python -m timeit",
+    "python -m timeit 'code'",
+    "python -m timeit -s \"__import__('os').system('id')\" pass",
+    "python -mtimeit",
+    "uv run python -m timeit 'x'",
+    "python -m pdb /tmp/x.py",
+    "python -m pdb -c continue x.py",
+    "python -m code",
+    "python -m asyncio",
+    "python -m IPython -c 'x'",
+    "python -m idlelib -c 'x'",
+]
+
+
+@pytest.mark.parametrize("command", INTERPRETER_INLINE_CODE_MODULE_DENY)
+def test_interpreter_inline_code_module_denied(command: str) -> None:
+    res = decide(command)
+    assert _is_deny(res), f"inline-code module bypass: {command!r}"
+    assert "bash.dangerous_interpreter" in res["permissionDecisionReason"]
 
 
 # ============================================================================
@@ -182,28 +276,36 @@ def test_interpreter_safe_module_not_denied(command: str) -> None:
     assert not _is_deny(res), f"safe-module false deny: {command!r} -> {res}"
 
 
-INTERPRETER_FP1_ADVERSARIAL_DENY = [
+# The safe-module set only decides which ``-m`` runs a broad safe prefix
+# (``uv run python``) may cover, so spoofing it matters under lockdown, where
+# anything not known-safe is denied.
+INTERPRETER_FP1_ADVERSARIAL_LOCKDOWN_DENY = [
     # Safe module name as a prefix of an unsafe module — must NOT match
     "python -m json.tooling",  # not 'json.tool'
     "python -m venvil",  # not 'venv'
     "python -m pytestx",  # not 'pytest'
     "python -m sitecustomize",  # not 'site'
     "python -m thisthing",  # not 'this'
+    "uv run python -m json.tooling",
+    "uv run python -m pytestx",
     # Safe-module token in the wrong position (not the -m operand)
     "python /tmp/json.tool",  # bare script literally named json.tool
     "python json.tool",  # positional, no -m → script path
+    "uv run python json.tool",
     "python -m http.server json.tool",  # first module after -m is unsafe
-    # -m appears but eval flag also present → eval arm must still deny
-    "python -m json.tool -c 'import os'",  # -c is the operative RCE
+    "python -m json.tool -c 'import os'",  # bare python is never a safe prefix
     "python -c 'import json.tool'",  # eval flag, not a module run
     # Fused -m with safe-prefix-but-unsafe-full module
     "python -mjson.tooling",
     "python -mbase64",
+    "uv run python -mbase64",
     # Double -m (only the first is the module; pathological)
-    "python -m http.server -m json.tool",  # first -m unsafe → deny
-    # env-prefixed unsafe (candidate-forms peels env → still hits matcher)
+    "python -m http.server -m json.tool",  # first -m unsafe
+    "uv run python -m http.server -m json.tool",
+    # env-prefixed unsafe (candidate-forms peels env)
     "env python -m http.server",
     "env python /tmp/x.py",
+    "env X=1 uv run python /tmp/x.py",
     # sudo / wrapper-stacked unsafe
     "sudo python -m http.server",
     # osascript -e (eval arm, listed as dangerous interpreter)
@@ -211,9 +313,15 @@ INTERPRETER_FP1_ADVERSARIAL_DENY = [
 ]
 
 
-@pytest.mark.parametrize("command", INTERPRETER_FP1_ADVERSARIAL_DENY)
-def test_interpreter_fp1_adversarial_denied(command: str) -> None:
-    assert _is_deny(decide(command)), f"adversarial bypass: {command!r}"
+@pytest.mark.parametrize("command", INTERPRETER_FP1_ADVERSARIAL_LOCKDOWN_DENY)
+def test_interpreter_fp1_adversarial_denied_in_lockdown(command: str) -> None:
+    assert _is_deny(decide(command, lockdown=True)), f"adversarial bypass: {command!r}"
+
+
+def test_uv_run_python_safe_module_allowed_in_lockdown() -> None:
+    res = decide("uv run python -m json.tool", lockdown=True)
+    assert res is not None, res
+    assert res.get("permissionDecision") == "allow", res
 
 
 INTERPRETER_FP1_ADVERSARIAL_ALLOW = [
@@ -332,8 +440,8 @@ def test_fd_exec_not_allowed_in_strict(command: str) -> None:
 ENV_BARE_INTERPRETER_DENY = [
     "env python3 -c 'import os'",
     "env node -e '1'",
-    "env python -m http.server",
-    "env python /tmp/x.py",
+    "env node -p '1'",
+    "env python3 -Ic 'import os'",
     'env python3 -c"x=1"',
 ]
 
@@ -691,8 +799,7 @@ OSASCRIPT_EVAL_DENY = [
     "osascript -e 'do shell script \"rm -rf /Users/dev\"'",
     'osascript -e "do shell script \\"id\\""',
     "osascript -l JavaScript -e 'foo'",
-    "osascript /tmp/evil.scpt",
-    "osascript ~/Library/x.scpt",
+    'osascript - <<EOF\ndo shell script "id"\nEOF',
 ]
 
 
@@ -1532,8 +1639,9 @@ def test_a3_force_refspec_3token_denied(command: str) -> None:
     assert _is_deny(decide(command)), f"3-token refspec bypass: {command!r}"
 
 
-# A4: bun run/test/x with script-file path (RCE)
-A4_BUN_SCRIPT_PATH_DENY = [
+# A4: bun run/test/x with a script-file path is a script run (not a package
+# script name): not denied in enforce, never known-safe, denied in lockdown.
+A4_BUN_SCRIPT_PATH_RUNS = [
     "bun run /tmp/attacker.js",
     "bun run ./evil.js",
     "bun run script.ts",
@@ -1551,9 +1659,11 @@ A4_BUN_SCRIPT_NAME_LEGIT = [
 ]
 
 
-@pytest.mark.parametrize("command", A4_BUN_SCRIPT_PATH_DENY)
-def test_a4_bun_script_path_denied(command: str) -> None:
-    assert _is_deny(decide(command)), f"bun script-path bypass: {command!r}"
+@pytest.mark.parametrize("command", A4_BUN_SCRIPT_PATH_RUNS)
+def test_a4_bun_script_path_is_a_script_run(command: str) -> None:
+    res = decide(command)
+    assert not _is_deny(res), f"bun script run denied: {command!r} -> {res}"
+    assert _is_deny(decide(command, lockdown=True)), f"lockdown let it run: {command!r}"
 
 
 @pytest.mark.parametrize("command", A4_BUN_SCRIPT_NAME_LEGIT)

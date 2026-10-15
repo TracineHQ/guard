@@ -42,10 +42,14 @@ In both modes the validator:
   literals do not split.
 - Enforces a dangerous floor regardless of mode: destructive commands
   (`rm -rf`, `dd`, `mkfs`, fork bombs), pipe-to-shell (`curl ... | sh`),
-  interpreter RCE (`python -c`, `node -e`, `python -m http.server` and other
-  non-allowlisted `-m` modules), command substitution whose inner command is
-  itself dangerous, heredoc bodies feeding a shell/eval sink, credential
-  leaks (`gh auth token`), and high-entropy secret values.
+  inline interpreter code (`python -c`, `node -e` / `-p`, `perl -pe`,
+  `php -r`, `python - <<EOF`, `python -m timeit`), command substitution
+  whose inner command is itself dangerous, heredoc bodies feeding a
+  shell/eval sink, credential leaks (`gh auth token`), and high-entropy
+  secret values.
+- Leaves script and module runs (`uv run python tools/dev.py`,
+  `python -m pytest`) to Claude Code's own permission flow: never denied
+  under enforce, never auto-allowed, and default-denied in lockdown.
 - Denies the elevated-risk tier in enforce and lockdown with a specific rule_id:
   non-sudo escalation (`su`, `doas`, `pkexec`), host power control
   (`reboot`, `shutdown`), and package-registry redirection

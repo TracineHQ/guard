@@ -555,6 +555,89 @@ def test_bare_python_version_still_safe():
     assert res is None or res.get("permissionDecision") != "deny"
 
 
+# === Interpreter boundary: script / module runs pass, inline code denies ===
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "uv run python tools/dev.py frog-run g1-claims",
+        "uv run python tools/dev.py frog-run g1",
+        "python3 scripts/x.py --flag",
+        "uv run python -m pytest",
+        "python -m pip install -e .",
+        "python3 x.py -c cfg",
+    ],
+)
+def test_interpreter_script_and_module_runs_not_denied_in_enforce(cmd):
+    assert not _is_deny(decide(cmd)), f"script/module run denied: {cmd!r}"
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "cd tools && uv run python dev.py frog-run g1",
+        "ls && python3 scripts/x.py --flag",
+    ],
+)
+def test_interpreter_script_run_in_sequence_passes_through(cmd):
+    # The `uv run python` safe prefix must not turn a script run into an
+    # explicit allow: guard stays out of it and Claude Code decides.
+    assert decide(cmd) is None, cmd
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "uv run python tools/dev.py frog-run g1-claims",
+        "python3 scripts/x.py --flag",
+        "python -m http.server",
+    ],
+)
+def test_interpreter_script_and_module_runs_denied_in_lockdown(cmd):
+    assert _is_deny(decide(cmd, lockdown=True)), f"lockdown let it run: {cmd!r}"
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "python3 -c 'print(1)'",
+        "uv run python - <<'EOF'\nimport os\nprint(1)\nEOF",
+        "node -e 'console.log(1)'",
+        "node -p 'process.version'",
+        "php -r 'echo 1;'",
+        "perl -pe 's/a/b/' f",
+        "python3 -Ic 'import os'",
+        "python3 <<EOF\nprint(1)\nEOF",
+        "python3 0<<EOF\nprint(1)\nEOF",
+        "python3 < x.py",
+        "python -m timeit 'code'",
+    ],
+)
+def test_interpreter_inline_code_denied_in_enforce(cmd):
+    assert _is_deny(decide(cmd)), f"inline code not denied: {cmd!r}"
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "uv run python - <<'EOF'\nimport os\nEOF",
+        "node -p 'process.version'",
+        "php -r 'echo 1;'",
+        "perl -pe 's/a/b/' f",
+        "python3 -Ic 'import os'",
+        "python3 <<EOF\nprint(1)\nEOF",
+        "python -m timeit 'code'",
+    ],
+)
+def test_interpreter_inline_code_deny_names_the_rule(cmd):
+    # Shapes with no always-deny literal must land on the interpreter rule,
+    # whose reason steers to writing a script file.
+    reason = decide(cmd)["permissionDecisionReason"]
+    assert "bash.dangerous_interpreter" in reason, reason
+    assert "script file" in reason, reason
+
+
 # === Dangerous rm shapes ===
 
 
