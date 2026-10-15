@@ -55,7 +55,7 @@ section is the contract. Consumers can opt-in by reading the env var directly
 | `v` | int | yes | schema version, currently `1`. Short alias of `schema_version`. |
 | `schema_version` | int | yes | long form, kept for backward compatibility |
 | `type` | enum string | optional | record-shape discriminator. Defaults to `"decision"` when absent. Currently one of `"decision"`, `"internal_error"`, or `"permission_request"` (§3.4, §3.5). Consumers MUST filter on `type` to avoid blending non-decision records into decision tallies. |
-| `mode` | enum string | yes (decision) | one of `"enforce"`, `"shadow"`, `"off"`, `"lockdown"`. Set per-record from the resolved allowlist mode (project > global > default `"enforce"`). `"shadow"` decisions are logged but not enforced; `"off"` short-circuits the hook and emits no record, except trust-root denies from `protected_files`. |
+| `mode` | enum string | yes (decision) | one of `"enforce"`, `"shadow"`, `"off"`, `"lockdown"`. Set per-record from the resolved allowlist mode (trusted project > global > default `"enforce"`; an untrusted project file can only tighten). `"shadow"` decisions are logged but not enforced; `"off"` short-circuits the hook and emits no record, except trust-root denies from `protected_files`. |
 | `timestamp` | string (ISO-8601 UTC, microsecond precision, `Z` suffix) | yes | e.g. `"2026-04-29T14:32:11.123456Z"` |
 | `hook_id` | string | yes (decision) | namespaced: `guard.<hook_module>` (e.g. `guard.bash_command_validator`) |
 | `event` | string | yes (decision) | matches Claude Code event names (`PreToolUse`, `PostToolUse`) |
@@ -87,7 +87,9 @@ As of v1.4.0, the writer emits the resolved allowlist mode on every
 decision record (default `"enforce"`). Operators flip mode with
 `guard mode <enforce|shadow|off|lockdown> [--project|--global]`, which writes a
 top-level `"mode"` field into `.claude/guard/allowlist.json`. Project
-beats global beats the default. `"shadow"` is useful for testing a new
+beats global beats the default, as long as git doesn't track the project
+file; a tracked (untrusted) project file only counts when its mode is
+stricter. `"shadow"` is useful for testing a new
 rule against real sessions without blocking: the writer still logs
 `decision: "deny"` with `mode: "shadow"`, but the hook exits 0 with an
 empty stdout so Claude Code's normal permission flow takes over (trust-root

@@ -107,10 +107,21 @@ When guard's default policy is too strict for a specific command or file, the al
 
 ### File locations
 
-Both files use the same JSON schema; the project file wins on per-rule conflicts.
+Both files use the same JSON schema.
 
-- **Project**: `.claude/guard/allowlist.json` (rooted at the working directory — committable to the repo).
+- **Project**: `.claude/guard/allowlist.json`, rooted at the working directory. Keep it out of git (gitignore it): see the trust rule below.
 - **Global**: `~/.claude/guard/allowlist.json` (per-user, applies to every project).
+
+### Project trust
+
+Any repo you clone could ship a project allowlist that switches guard off, so guard trusts the project file only when it is a regular file inside a git work tree and git does not track it (untracked or gitignored). That is the normal home for your own local entries.
+
+- **Trusted**: its `mode` beats the global mode, and its `disable_rules` and `allow_commands` apply.
+- **Untrusted** (tracked by git, outside any git work tree, reached through a symlink, or unverifiable because git is missing, fails or times out): it can only tighten. Its `mode` applies only when stricter than the global/default mode (`off` < `shadow` < `enforce` < `lockdown`), and its `disable_rules` and `allow_commands` are ignored. Each hook run prints one stderr warning naming the file and the reason.
+
+To use a tracked file's entries, gitignore it and untrack it (`git rm --cached .claude/guard/allowlist.json`), or move them to your global allowlist with `--global`. A committed `{"mode": "lockdown"}` still works for a team that wants every clone locked down. `guard status`, `guard mode` and `guard allowlist list` show whether the project file is trusted and why.
+
+Guard asks git (one `git ls-files`) only when the project file would loosen something, and caches the answer in `project-trust-cache.json` next to the global allowlist, keyed on the file and the repo's git index. A tool call pays for git only after one of them changes.
 
 ### Schema
 
@@ -141,7 +152,7 @@ guard allowlist allow-command --rule <rule-id> --command "<cmd>" --reason "..."
 guard allowlist remove-command --rule <rule-id> --command "<cmd>"
 ```
 
-Mutation commands write to the project allowlist by default. Pass `--global` to write the per-user file at `~/.claude/guard/allowlist.json` instead (or `--project` to be explicit; the two flags are mutually exclusive).
+Mutation commands write to the project allowlist by default. Pass `--global` to write the per-user file at `~/.claude/guard/allowlist.json` instead (or `--project` to be explicit; the two flags are mutually exclusive). If the project file is untrusted (for example, tracked by git), `disable-rule` and `allow-command` still write the entry but warn that it won't take effect.
 
 ### Trust-root: un-overridable protections
 
