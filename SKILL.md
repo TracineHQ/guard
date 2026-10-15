@@ -114,14 +114,14 @@ Both files use the same JSON schema.
 
 ### Project trust
 
-Any repo you clone could ship a project allowlist that switches guard off, so guard trusts the project file only when it is a regular file inside a git work tree and git does not track it (untracked or gitignored). That is the normal home for your own local entries.
+Any repo you clone could ship a project allowlist that switches guard off, so guard trusts the project file only when it is a regular file in the `.claude/guard/` directory at the root of a git work tree and git does not track it (untracked or gitignored). That is the normal home for your own local entries. Guard checks tracking by file identity: if any path git tracks is the same file, even one spelled in another case or Unicode form that a case-insensitive filesystem folds together, the file is tracked.
 
 - **Trusted**: its `mode` beats the global mode, and its `disable_rules` and `allow_commands` apply.
-- **Untrusted** (tracked by git, outside any git work tree, reached through a symlink, or unverifiable because git is missing, fails or times out): it can only tighten. Its `mode` applies only when stricter than the global/default mode (`off` < `shadow` < `enforce` < `lockdown`), and its `disable_rules` and `allow_commands` are ignored. Each hook run prints one stderr warning naming the file and the reason.
+- **Untrusted** (tracked by git; below the repository root, for example inside a gitignored `node_modules/` or `.venv/`; outside any git work tree; reached through a symlink; or unverifiable because git is missing, fails or times out): it can only tighten. Its `mode` applies only when stricter than the global/default mode (`off` < `shadow` < `enforce` < `lockdown`), and its `disable_rules` and `allow_commands` are ignored. Each hook run prints one stderr warning naming the file and the reason, and pointing at `guard status`.
 
-To use a tracked file's entries, gitignore it and untrack it (`git rm --cached .claude/guard/allowlist.json`), or move them to your global allowlist with `--global`. A committed `{"mode": "lockdown"}` still works for a team that wants every clone locked down. `guard status`, `guard mode` and `guard allowlist list` show whether the project file is trusted and why.
+`guard status`, `guard mode` and `guard allowlist list` show whether the project file is trusted, why, and how to fix it. To use a tracked file's entries, gitignore it and untrack it (`git rm --cached .claude/guard/allowlist.json`), or move them to your global allowlist with `--global`. A committed `{"mode": "lockdown"}` still works for a team that wants every clone locked down. When the working directory is your home directory, the project path is the global allowlist itself, and guard treats it as the global file.
 
-Guard asks git (one `git ls-files`) only when the project file would loosen something, and caches the answer in `project-trust-cache.json` next to the global allowlist, keyed on the file and the repo's git index. A tool call pays for git only after one of them changes.
+Guard asks git (one `git ls-files`) only when the project file would loosen something, and caches the answer in `project-trust-cache.json` next to the global allowlist, keyed on the file and the repo's git index. A tool call pays for git only after one of them changes. An unverifiable answer is cached for about a minute, so a slow or broken git isn't re-run on every tool call.
 
 ### Schema
 

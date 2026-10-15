@@ -87,9 +87,9 @@ As of v1.4.0, the writer emits the resolved allowlist mode on every
 decision record (default `"enforce"`). Operators flip mode with
 `guard mode <enforce|shadow|off|lockdown> [--project|--global]`, which writes a
 top-level `"mode"` field into `.claude/guard/allowlist.json`. Project
-beats global beats the default, as long as git doesn't track the project
-file; a tracked (untrusted) project file only counts when its mode is
-stricter. `"shadow"` is useful for testing a new
+beats global beats the default, as long as the project file is trusted
+(untracked, at the repository root); an untrusted one, such as a file git
+tracks, only counts when its mode is stricter. `"shadow"` is useful for testing a new
 rule against real sessions without blocking: the writer still logs
 `decision: "deny"` with `mode: "shadow"`, but the hook exits 0 with an
 empty stdout so Claude Code's normal permission flow takes over (trust-root

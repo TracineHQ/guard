@@ -63,12 +63,15 @@ The validators are written with that in mind:
 - A repo is attacker-influenceable too, so a project allowlist
   (`.claude/guard/allowlist.json`) that git tracks can only tighten guard:
   its `disable_rules` and `allow_commands` are ignored and its mode counts
-  only when stricter. Only an untracked or gitignored regular file in a git
-  work tree can loosen (see [Project trust](SKILL.md#project-trust)). The
-  check is the one subprocess on the hook path: a fixed-argv
-  `git ls-files` (no shell, `core.fsmonitor` off, inherited `GIT_*`
-  overrides dropped, 2 s timeout) that fails closed and runs only when a
-  project file would loosen something.
+  only when stricter. Only an untracked or gitignored regular file at a git
+  work-tree root can loosen (see [Project trust](SKILL.md#project-trust)),
+  and "untracked" means no tracked path is the same file (device and
+  inode), since a case- or normalization-insensitive filesystem lets an
+  index entry spelled differently land on it. The check is the one
+  subprocess on the hook path: a fixed-argv `git ls-files` (no shell,
+  `core.fsmonitor` off, inherited `GIT_*` overrides dropped, C locale, 2 s
+  timeout) that fails closed and runs only when a project file would
+  loosen something.
 
 ## AWS allow/deny policy
 
@@ -309,7 +312,10 @@ known and explicitly deferred:
   agent that already has a shell from changing that state, for example
   `git rm --cached .claude/guard/allowlist.json` or an edit to the trust
   cache (`~/.claude/guard/project-trust-cache.json`), either of which can
-  make a tracked file trusted.
+  make a tracked file trusted. It also can't tell a repo you made from one
+  you unpacked: a downloaded archive that contains its own `.git` is a work
+  tree of its own, so an untracked allowlist at its root is trusted when
+  you work there.
 - **Laundering after an allowed copy.** Once the user allowlists or runs
   `cp creds /tmp/x`, subsequent reads of `/tmp/x` are unguarded. The
   destination is not a credential path. This is inherent to path matching,
