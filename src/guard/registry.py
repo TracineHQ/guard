@@ -1555,7 +1555,8 @@ RULE_TIERS: dict[str, TierEntry] = {
     "bash.wrapper_stacking": TierEntry(_F, "nesting past the unwrap limit hides the inner command"),
     "bash.dangerous_rm": TierEntry(_F, "recursive rm of /, ~, $HOME or cwd"),
     "bash.function_definition:fork_bomb": TierEntry(
-        _F, "a function that pipes into or backgrounds itself exhausts the process table"
+        _F,
+        "a function whose body pipes into or backgrounds a call back to itself exhausts the process table",
     ),
     "bash.conditional_denied_flag:root": TierEntry(
         _F,
@@ -1607,6 +1608,12 @@ RULE_TIERS: dict[str, TierEntry] = {
     "bash.dangerous_construct": TierEntry(
         _S,
         "command / process substitution, here-string, file redirect; bodies are still floor-checked",
+    ),
+    "bash.dangerous_interpreter:literal": TierEntry(
+        _S,
+        "inline program written out literally (python3 -c '...', python3 - <<'EOF', node -e, "
+        "osascript / ruby / perl -e): as visible as a script file, which already passes. "
+        "A program from a pipe, a variable or a substitution stays FLOOR",
     ),
     "bash.eval_builtin:source": TierEntry(_S, "source / . of a file, e.g. loading a .env"),
     "bash.exec_wrapper": TierEntry(_S, "the peeled inner command is matched by its own rule"),

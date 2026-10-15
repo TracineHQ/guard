@@ -44,8 +44,33 @@ adheres to [Semantic Versioning](https://semver.org/).
   matched (command substitution, process substitution, here-string,
   redirect, arithmetic expansion). A redirect is steered to the Write or
   Edit tool or to a pipe instead of being reported as a substitution.
+- An inline program written out literally (`python3 -c '...'`,
+  `python3 - <<'EOF'`, `node -e`, `node --input-type=module < file.mjs`,
+  `osascript -e`, `ruby -e`, `perl -e`) is STEER in `auto` under
+  `bash.dangerous_interpreter:literal`: it is as visible as a script file,
+  which already passes. A program from a pipe, a variable, a substitution or
+  an unquoted heredoc that expands stays FLOOR. Default mode and `lockdown`
+  still deny it.
+- Pipe-to-shell denies only when the consumer reads its program from stdin
+  (`curl ... | sh`, `cat s | python3`, `cat s | python3 -`). Piping data
+  into a script or module (`python3 tool.py`, `python3 -m json.tool`) passes
+  in every mode.
 
 ### Fixed
+
+- Over-blocking in `auto` found by replaying real agent commands:
+  - The fork bomb check reads only the function body, so `f() { ...; } && f`,
+    `f 2>&1` and `f | head` pass, and its deny says "fork bomb".
+  - Heredoc bodies are data. A body written to a file or fed to a filter no
+    longer trips line-based rules (a code fence, a lone `]`, prose starting
+    "at"). A heredoc read by a shell, `ssh` or `docker exec` is still
+    commands, and `$(...)` / backticks in an unquoted body are still checked
+    against the floor.
+  - A `-c` string's command heads are found with its quotes and `$(...)`
+    intact (`sh -c 'f=$(basename "$1"); ...'`).
+  - An awk command that starts with a literal (`cmd = "wc -l " $1`) is
+    checked by that literal; only a command built entirely at run time
+    (`system($0)`) is denied.
 
 - Read-only guard CLI calls (`guard status`, `guard allowlist list`,
   `guard mode --help`, `guard allowlist --help`) no longer trip

@@ -110,14 +110,6 @@ SHELL_FRAGMENTS: frozenset[str] = frozenset(
     {"do", "done", "then", "else", "fi", "elif", "esac", "in"}
 )
 
-# Commands that, when piped into a shell, form the classic ``curl ... | sh``
-# RCE pattern. Denied unconditionally regardless of mode. Anything that
-# produces bytes followed by ``| <shell>`` is always a deliberate RCE in an
-# agent context — the producer set is intentionally broad.
-_PIPE_SHELL_CMDS: frozenset[str] = frozenset(
-    DANGEROUS_SHELL_WRAPPERS | DANGEROUS_INTERPRETERS | {"ruby", "perl", "php", "lua", "tclsh"}
-)
-
 
 _SPEC_DECISION_MAP: dict[str, Literal["allow", "deny", "pass"]] = {
     "allow": "allow",
@@ -1810,6 +1802,7 @@ _VALUE_LETTERS: dict[str, frozenset[str]] = {
     "perl": frozenset("dDFiImMx"),
     "ruby": frozenset("CEFiIrx"),
     "php": frozenset("cdfFStz"),
+    "osascript": frozenset("ls"),
 }
 # Letters that take no value. A positional after only these flags is the
 # program operand. ``-i`` is left out on purpose: it makes python / node read
@@ -5555,7 +5548,153 @@ def _expand_runner_payload_segments(seg: str) -> list[str]:
     return split_pipeline(inner_canon)
 
 
-def _get_always_deny(segments: list[str]) -> tuple[dict[str, str], str] | None:
+# Inline programs that are STEER in auto mode when written out literally:
+# ``python3 -c '...'``, ``python3 - <<'EOF'``, ``node -e`` / ``--eval`` / ``-p``,
+# ``node --input-type=module < file.mjs``, ``osascript -e``, ``ruby -e``,
+# ``perl -e``. A script file already passes, and literal code is no less
+# visible to the auto-mode classifier than a file.
+_LITERAL_PROGRAM_FAMILIES = frozenset({"python", "node", "osascript", "ruby", "perl"})
+_INTERPRETER_ALWAYS_DENY_KEYS = frozenset(
+    always_deny_key(p) for p in ("python -c", "python3 -c", "node -e", "node --eval")
+)
+_LITERAL_PROGRAM_KEY = "bash.dangerous_interpreter:literal"
+
+
+def _word_expands(word: str) -> bool:
+    r"""True when a raw shell word holds ``$X``, ``${X}``, ``$(...)`` or a backtick.
+
+    Nothing expands inside single quotes, and ``\`` escapes the next
+    character. ``$'...'`` is a quoting form, not an expansion.
+    """
+    quote = ""
+    i = 0
+    while i < len(word):
+        c = word[i]
+        if quote == "'":
+            quote = "" if c == "'" else quote
+        elif c == "\\":
+            i += 1
+        elif c == "`" or (
+            c == "$"
+            and i + 1 < len(word)
+            and (word[i + 1].isalnum() or word[i + 1] in "_{(@*#?$!-")
+        ):
+            return True
+        elif c == '"':
+            quote = "" if quote == '"' else '"'
+        elif c == "'" and not quote:
+            quote = "'"
+        i += 1
+    return False
+
+
+def _stdin_like_target(target: str) -> bool:
+    """A ``<`` target that is a process substitution or another descriptor, not a file."""
+    value = "".join(_shlex_tokens(target))
+    return target.startswith("(") or value in _STDIN_PROGRAMS or bool(_FD_PROGRAM_RE.match(value))
+
+
+def _interactive_flag(family: str, word: str) -> bool:
+    """``python -i`` / ``node -i``: after the program, keep reading code from stdin."""
+    if family == "node":
+        return word in {"-i", "--interactive"}
+    if family != "python" or not word.startswith("-") or word.startswith("--"):
+        return False
+    for letter in word[1:]:
+        if letter == "i":
+            return True
+        if letter in _VALUE_LETTERS["python"] or letter in "cm":
+            return False
+    return False
+
+
+def _program_word_follows(family: str, flag: str) -> bool:
+    """True when an eval flag takes its program from the next word (``-c``, ``-pe``, ``--eval``)."""
+    if flag.startswith("--"):
+        return "=" not in flag
+    return flag[-1:] in _EVAL_LETTERS.get(family, frozenset()) | {"c", "e"}
+
+
+def _literal_inline_program(segment: str, *, piped: bool, dynamic_heredocs: frozenset[str]) -> bool:
+    """True when ``segment`` runs inline interpreter code written out literally.
+
+    The program is an eval-flag word with no expansion (``python3 -c
+    'print(1)'``), a quoted heredoc or an unquoted one whose body does not
+    expand (``python3 - <<'EOF'``), or a file on a ``<`` redirect (``node
+    --input-type=module < build.mjs``). A program read from a pipe or a
+    here-string, built from a variable or a substitution, or fed by an
+    unquoted heredoc that expands is not literal. A shell ``-c`` string is
+    judged by its own segments, which ``_get_always_deny`` checks next.
+    """
+    words = _raw_words(segment)
+    values = ["".join(_shlex_tokens(w)) for w in words]
+    if values and _basename(values[0]) in DANGEROUS_SHELL_WRAPPERS:
+        return _shell_c_payload(_payload_tokens(segment), 1)[1] is not None
+    start = next((i for i, v in enumerate(values) if _is_interpreter_name(_basename(v))), None)
+    if start is None:
+        return False
+    family = _interpreter_family(_basename(values[start]))
+    if family not in _LITERAL_PROGRAM_FAMILIES:
+        return False
+    has_program = False
+    argv = False  # past the program: the rest is its own argv
+    stdin_source = ""
+    j = start + 1
+    while j < len(words):
+        word, value = words[j], values[j]
+        j += 1
+        redirect = _INTERPRETER_REDIRECT_RE.match(word)
+        if redirect:
+            target = word[redirect.end() :]
+            if not target and j < len(words):
+                target, j = words[j], j + 1
+            op = redirect.group(1)
+            if op in {"<<<", "<&"} or (op == "<" and _stdin_like_target(target)):
+                return False
+            if op in {"<<", "<<-"}:
+                delim = "".join(_shlex_tokens(target))
+                quoted = any(ch in target for ch in "'\"\\")
+                stdin_source = "literal" if quoted or delim not in dynamic_heredocs else "dynamic"
+            elif op == "<":
+                stdin_source = "literal"
+            continue
+        if argv:
+            continue
+        if _interactive_flag(family, value):
+            return False  # reads more code from stdin after the program
+        if len(value) > 1 and value.startswith("-") and value != "--":
+            kind, attached = _classify_interpreter_flag(family, value)
+            if kind == "eval":
+                program = word
+                if _program_word_follows(family, value):
+                    if j >= len(words):
+                        return False
+                    program, j = words[j], j + 1
+                if _word_expands(program):
+                    return False
+                # python's -c ends its options; perl / osascript take more -e.
+                has_program, argv = True, family == "python"
+                continue
+            if kind == "module":
+                return False
+            if kind == "value" and not attached:
+                j += 1
+            continue
+        if has_program or value in _STDIN_PROGRAMS:
+            argv = True
+            continue
+        if value != "--":
+            return False  # a script, /dev/fd/N or an operand this walk can't place
+    if has_program:
+        return True
+    return not piped and stdin_source == "literal"
+
+
+def _get_always_deny(
+    segments: list[str],
+    seg_ops: list[str] | None = None,
+    dynamic_heredocs: frozenset[str] = frozenset(),
+) -> tuple[dict[str, str], str] | None:
     """Return ``(deny_envelope, rule_id)`` if any segment hits ALWAYS_DENY, else ``None``.
 
     Checks both registry literals (via ``_match_always_deny``) and synthetic
@@ -5564,10 +5703,25 @@ def _get_always_deny(segments: list[str]) -> tuple[dict[str, str], str] | None:
     invocations (``bash -c "..."``), recursively re-evaluates the inner
     payload as a full pipeline.
 
+    An inline interpreter program written out literally (see
+    ``_literal_inline_program``) is checked under the STEER key
+    ``bash.dangerous_interpreter:literal``, so auto mode defers it; every
+    other mode denies it as before. ``seg_ops`` marks pipe consumers and
+    ``dynamic_heredocs`` the unquoted heredoc delimiters whose body expands.
+
     The ``rule_id`` returned is the allowlist key. Registry literals all map
     to the coarse-grained ``"bash.always_deny"``; synthetic matchers each
     have their own fine-grained id (see ``_PER_FORM_MATCHERS``).
     """
+    piped = {
+        seg for seg, op in zip(segments, seg_ops or [""] * len(segments), strict=True) if op == "|"
+    }
+
+    def literal_fires(key: str) -> bool:
+        if key == "bash.dangerous_interpreter" or key in _INTERPRETER_ALWAYS_DENY_KEYS:
+            return _fires(_LITERAL_PROGRAM_KEY)
+        return _fires(key)
+
     queue: list[str] = list(segments)
     seen: set[str] = set()
     while queue:
@@ -5575,7 +5729,11 @@ def _get_always_deny(segments: list[str]) -> tuple[dict[str, str], str] | None:
         if seg in seen:
             continue
         seen.add(seg)
-        prefix = _match_always_deny(seg, _fires)
+        literal = _literal_inline_program(
+            seg, piped=seg in piped, dynamic_heredocs=dynamic_heredocs
+        )
+        accept = literal_fires if literal else _fires
+        prefix = _match_always_deny(seg, accept)
         if prefix is not None:
             rule_reason = _ALWAYS_DENY_REASONS.get(prefix)
             body = (
@@ -5584,7 +5742,7 @@ def _get_always_deny(segments: list[str]) -> tuple[dict[str, str], str] | None:
                 else f"Blocked: `{seg[:_SEGMENT_DISPLAY_TRUNC]}` is on the always-deny list"
             )
             return _deny(_format_deny_reason("bash.always_deny", body)), "bash.always_deny"
-        synth = _match_synthetic_deny(seg, _fires)
+        synth = _match_synthetic_deny(seg, accept)
         if synth is not None:
             if len(synth) == 3:
                 label, rule_id, body = synth
@@ -5869,6 +6027,198 @@ def _heredoc_body_blank_spans(command: str) -> list[tuple[int, int]]:
             cursor = term + 1
         i = cursor
     return spans
+
+
+# A heredoc operator and its delimiter word: quoted (``'EOF'``, ``"EOF"``,
+# ``\EOF``) or bare.
+_HEREDOC_DELIM_RE = re.compile(
+    r"<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\([A-Za-z_][\w.-]*)|([A-Za-z_][\w.-]*))"
+)
+
+
+def _heredoc_ops_in_line(line: str) -> list[tuple[str, bool, bool, bool]]:
+    """``(delimiter, tab_strip, quoted, nested)`` for each heredoc operator on ``line``.
+
+    An operator counts outside quotes, and inside a ``$(...)`` / ``<(...)``
+    even within double quotes (``git commit -m "$(cat <<'EOF'``), where it is
+    ``nested``. ``<<<`` is a here-string, a ``<<`` inside ``((...))`` is a
+    shift, and a ``#`` comment ends the line.
+    """
+    ops: list[tuple[str, bool, bool, bool]] = []
+    stack: list[str] = []
+    i, n = 0, len(line)
+    while i < n:
+        c = line[i]
+        top = stack[-1] if stack else ""
+        step = 1
+        if top == "'":
+            if c == "'":
+                stack.pop()
+        elif c == "\\":
+            step = 2
+        elif top == "`":
+            if c == "`":
+                stack.pop()
+        elif top == "((":
+            if line.startswith("))", i):
+                stack.pop()
+                step = 2
+        elif line.startswith("$((", i) or (line.startswith("((", i) and top != '"'):
+            stack.append("((")
+            step = 3 if c == "$" else 2
+        elif line.startswith(("$(", "<(", ">("), i):
+            stack.append("$(")
+            step = 2
+        elif top == '"':
+            if c == '"':
+                stack.pop()
+            elif c == "`":
+                stack.append(c)
+        elif c in "'\"`":
+            stack.append(c)
+        elif c == "(" and top == "$(":
+            stack.append("$(")
+        elif c == ")" and top == "$(":
+            stack.pop()
+        elif c == "#" and (i == 0 or line[i - 1] in " \t;&|()"):
+            break
+        elif line.startswith("<<<", i):
+            step = 3
+        elif m := _HEREDOC_DELIM_RE.match(line, i):
+            quoted_word = m.group(2) or m.group(3) or m.group(4)
+            delim = quoted_word or m.group(5)
+            ops.append((delim, m.group(1) == "-", quoted_word is not None, bool(stack)))
+            step = m.end() - i
+        i += step
+    return ops
+
+
+# Heads that run their stdin, or a file a heredoc just wrote, as shell
+# commands. A heredoc body in a command that uses one is kept as commands.
+# ``script`` starts a shell on its stdin and ``expect`` runs Tcl that can
+# ``spawn`` / ``exec``.
+_HEREDOC_CODE_WORDS: frozenset[str] = DANGEROUS_SHELL_WRAPPERS | frozenset(
+    {"sudo", "su", "doas", "pkexec", "runuser", "parallel", "ssh", "nsenter", "script", "expect"}
+)
+
+
+def _runs_heredoc_as_shell(skeleton: str) -> bool:
+    """True when ``skeleton`` (a command without its heredoc bodies) may run a body as shell.
+
+    Any word naming a shell, ``sudo`` / ``su``, ``ssh`` or a container
+    ``exec`` (``bash <<EOF``, ``cat > x.sh <<EOF ... bash x.sh``, ``docker
+    exec -i c sh <<EOF``), and ``eval`` / ``source`` / an expansion as a
+    command head.
+    """
+    for segment in split_pipeline(skeleton):
+        tokens = _payload_tokens(segment)
+        if _container_exec_start(tokens) is not None:
+            return True
+        if any(_basename(tok) in _HEREDOC_CODE_WORDS for tok in tokens):
+            return True
+        for cand in _exec_wrapper_candidates(segment):
+            head = cand.split(maxsplit=1)[0] if cand.strip() else ""
+            if head in EVAL_BUILTINS or head.startswith(("$", "`")):
+                return True
+    return False
+
+
+def _heredoc_body_substitutions(body: str) -> tuple[bool, list[str]]:
+    r"""``(expands, substitutions)`` for an unquoted heredoc body.
+
+    In an unquoted body ``$X``, ``${X}``, ``$(...)`` and backticks expand
+    (quotes are plain text there, and ``\`` escapes the next character). The
+    ``$(...)`` / backtick spans run as commands, so they are returned to be
+    checked.
+    """
+    expands = False
+    spans: list[str] = []
+    i, n = 0, len(body)
+    while i < n:
+        c = body[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "`":
+            close = body.find("`", i + 1)
+            close = n if close < 0 else close
+            spans.append(body[i : close + 1])
+            expands, i = True, close + 1
+            continue
+        if c == "$" and body.startswith("$(", i):
+            close = _close_paren(body, i + 1)
+            spans.append(body[i : close + 1])
+            expands, i = True, close + 1
+            continue
+        if c == "$" and i + 1 < n and (body[i + 1].isalnum() or body[i + 1] in "_{@*#?$!-"):
+            expands = True
+        i += 1
+    return expands, spans
+
+
+def _heredoc_skeleton(command: str) -> tuple[str, frozenset[str]]:
+    """``command`` with heredoc bodies that are data taken out, and the delimiters that expand.
+
+    Bodies are split into lines along with the rest of the command, so a
+    prose or config line (``at noon``, ``[tool.ruff]``, a backtick fence)
+    would read as a command. A body is data unless the command can run it as
+    shell (see ``_runs_heredoc_as_shell``): then every body is kept as
+    commands. An interpreter reading the body as its program (``python3 -
+    <<'EOF'``) is judged on the program by its own rule, not line by line.
+
+    In an unquoted body, ``$(...)`` and backticks still run, so each is kept as
+    a ``: <substitution>`` line of its own, and the delimiter is returned
+    among those whose body expands. A heredoc opened inside ``$(...)`` has the
+    line after its terminator joined back to its operator line. An
+    unterminated heredoc leaves the rest of the command as it is.
+    """
+    lines = command.split("\n")
+    found: list[
+        tuple[int, int, str, bool, bool]
+    ] = []  # body start, terminator, delim, quoted, nested
+    i, n = 0, len(lines)
+    while i < n:
+        cursor = i + 1
+        for delim, tab_strip, quoted, nested in _heredoc_ops_in_line(lines[i]):
+            term = next(
+                (
+                    k
+                    for k in range(cursor, n)
+                    if (lines[k].lstrip("\t") if tab_strip else lines[k]) == delim
+                ),
+                None,
+            )
+            if term is None:
+                cursor = n
+                break
+            found.append((cursor, term, delim, quoted, nested))
+            cursor = term + 1
+        i = cursor
+    if not found:
+        return command, frozenset()
+    dropped = {k for start, term, *_ in found for k in range(start, term + 1)}
+    joins = {term + 1 for _start, term, _d, _q, nested in found if nested}
+    kept: list[str] = []
+    for k, line in enumerate(lines):
+        if k in dropped:
+            continue
+        if k in joins and kept:
+            kept[-1] = f"{kept[-1]} {line}"
+        else:
+            kept.append(line)
+    dynamic: set[str] = set()
+    extra: list[str] = []
+    for start, term, delim, quoted, _nested in found:
+        if quoted:
+            continue
+        expands, spans = _heredoc_body_substitutions("\n".join(lines[start:term]))
+        if expands:
+            dynamic.add(delim)
+        extra.extend(f": {span}" for span in spans)
+    skeleton = "\n".join(kept)
+    if _runs_heredoc_as_shell(skeleton):
+        return command, frozenset(dynamic)
+    return "\n".join([skeleton, *extra]), frozenset(dynamic)
 
 
 def _shell_code_mask(command: str) -> str:
@@ -6443,7 +6793,7 @@ def decide(
     return None
 
 
-def _floor_check(text: str, command: str) -> dict[str, str] | None:
+def _floor_check(text: str, command: str, *, floor_only: bool = False) -> dict[str, str] | None:
     """Deny envelope if ``text``, a payload hidden from the segment walk, hits the floor.
 
     Used in auto mode once a STEER rule that hides a payload (substitution,
@@ -6451,7 +6801,19 @@ def _floor_check(text: str, command: str) -> dict[str, str] | None:
     payload runs through the full decision with STEER rules still deferred, so
     only a FLOOR rule can deny. Nesting past ``_MAX_SUBSTITUTION_DEPTH`` fails
     closed. ``command`` is the outer command, used for the log record.
+
+    ``floor_only`` defers STEER rules in every mode, for a payload checked
+    outside auto mode too (an awk command); the STEER keys it skips are not
+    logged as auto-mode passes.
     """
+    if floor_only and not _REQUEST_CONTEXT["defer_steer"]:
+        saved = (list(_REQUEST_CONTEXT["deferred"]), _REQUEST_CONTEXT["lockdown"])
+        _REQUEST_CONTEXT["defer_steer"] = True
+        try:
+            return _floor_check(text, command)
+        finally:
+            _REQUEST_CONTEXT["defer_steer"] = False
+            _REQUEST_CONTEXT["deferred"], _REQUEST_CONTEXT["lockdown"] = saved
     depth: int = _REQUEST_CONTEXT["floor_depth"]
     if depth >= _MAX_SUBSTITUTION_DEPTH:
         body = (
@@ -6562,13 +6924,16 @@ def _decide_inner(
         return secret
 
     cleaned = strip_comments(command)
-    seg_pairs = split_pipeline_with_ops(cleaned) if cleaned else []
+    # Heredoc bodies that are data (a file being written, input to a filter)
+    # are not commands: take them out before the line split.
+    skeleton, dynamic_heredocs = _heredoc_skeleton(cleaned)
+    seg_pairs = split_pipeline_with_ops(skeleton) if skeleton else []
     if not seg_pairs:
         return None
     segments = [seg for _op, seg in seg_pairs]
     seg_ops = [op for op, _seg in seg_pairs]
 
-    deny_with_id = _get_always_deny(segments)
+    deny_with_id = _get_always_deny(segments, seg_ops, dynamic_heredocs)
     if deny_with_id is not None:
         deny, rule_id = deny_with_id
         bypass = _maybe_allow_via_allowlist(allowlist, rule_id, original_command, deny)
@@ -6579,8 +6944,8 @@ def _decide_inner(
 
     # === Auto mode: floor-check payloads a skipped STEER rule was hiding ===
     if _REQUEST_CONTEXT["deferred"]:
-        if "bash.function_definition" in _REQUEST_CONTEXT["deferred"] and _is_fork_bomb(cleaned):
-            body = _SYNTH_DENY_REASONS[_SYNTH_FUNC_DEF_DENY]
+        if "bash.function_definition" in _REQUEST_CONTEXT["deferred"] and _is_fork_bomb(skeleton):
+            body = f"`{skeleton[:_SEGMENT_DISPLAY_TRUNC]}` {_FORK_BOMB_BODY}"
             _log_local(command, "deny", "always-deny (bash.function_definition:fork_bomb)")
             return _deny(_format_deny_reason("bash.function_definition", body))
         for seg in segments:
@@ -6712,28 +7077,26 @@ def _runner_wrapper_cmd_start(head: str, tokens: list[str]) -> int | None:
     return None
 
 
-def _peel_pipe_consumer(norm: str) -> str | None:
-    """Peel ONE runner / env / wrapper layer off a normalized pipe consumer.
+def _peel_pipe_consumer(consumer: str) -> str | None:
+    """Peel ONE runner / env / wrapper layer off a pipe consumer.
 
     Returns the inner command, or ``None`` when the head is not a wrapper.
     Handles ``env``-prefix, the interpreter-runner managers (``uv run`` /
     ``uvx`` / ``pipx run``), pre-exec wrappers (``stdbuf`` ...), and delegates
     everything else (shell-wrapper / ``sudo`` / ``timeout`` / ``command`` ...)
-    to :func:`_strip_runner_prefix`.
+    to :func:`_strip_runner_prefix`, which reads a ``-c`` string with its
+    quoting intact.
     """
-    tokens = norm.split()
+    tokens = consumer.split()
     if not tokens:
         return None
     head = _basename(tokens[0])
     if head == "env":
-        # ``env [-i] [-u NAME] [VAR=val ...] <cmd>``.
-        i = 1
-        while i < len(tokens) and (
-            tokens[i].startswith("-") or _SEG_ENV_ASSIGN_RE.match(tokens[i])
-        ):
-            if tokens[i] in {"-u", "--unset"} and i + 1 < len(tokens):
-                i += 2
-                continue
+        # ``env [options] [VAR=val ...] <cmd>``.
+        i = _env_options_end(tokens)
+        if i is None:
+            return None
+        while i < len(tokens) and _SEG_ENV_ASSIGN_RE.match(tokens[i]):
             i += 1
         return " ".join(tokens[i:]) if 1 < i < len(tokens) else None
     start = _runner_wrapper_cmd_start(head, tokens)
@@ -6742,42 +7105,52 @@ def _peel_pipe_consumer(norm: str) -> str | None:
         # the same heuristic _interpreter_tokens uses, so a wrapped
         # consumer (``uv run python``) resolves to its real head.
         for j in range(start, len(tokens)):
-            if _basename(tokens[j]) in _PIPE_SHELL_CMDS:
+            name = _basename(tokens[j])
+            if name in DANGEROUS_SHELL_WRAPPERS or _is_interpreter_name(name):
                 return " ".join(tokens[j:])
         return None
     if head in _EXEC_WRAPPERS:
         return _strip_exec_wrapper(tokens)
-    return _strip_runner_prefix(norm)
+    return _strip_runner_prefix(consumer)
 
 
-def _pipe_consumer_head(consumer: str) -> str:
-    """Basename of the command a pipe actually feeds.
+def _sources_stdin(segment: str) -> bool:
+    """``source /dev/stdin`` / ``. -``: the shell runs what it reads on stdin."""
+    tokens = _payload_tokens(segment)
+    return len(tokens) > 1 and tokens[0] in {"source", "."} and tokens[1] in _STDIN_PROGRAMS
 
-    Quote-normalizes then peels runner / env / wrapper layers so a disguised
-    consumer is not waved through: ``"python"`` -> ``python``,
-    ``sudo bash`` -> ``bash``, ``env X=1 timeout 5 python`` -> ``python``,
-    ``uv run python`` -> ``python``. Returns ``""`` when unresolvable.
+
+def _pipe_consumer_runs_code(consumer: str) -> bool:
+    """True when a pipe consumer runs what it reads on stdin as code.
+
+    A shell or interpreter with no ``-c`` / ``-e`` program and no script reads
+    its program from stdin (``curl ... | sh``, ``cat s | python3 -``). Runner,
+    env and wrapper layers are peeled first, so ``sudo bash``, ``env X=1
+    timeout 5 python`` or ``uv run python`` don't hide the consumer, and a
+    ``-c`` string is checked the same way (``bash -c 'source /dev/stdin'``). A
+    consumer that runs a script or module (``python3 check.py -``,
+    ``python3 -m json.tool``) reads stdin as data.
     """
-    norm = _normalize_segment(consumer)
+    layer = consumer.strip()
     for _ in range(_PIPE_CONSUMER_UNWRAP_CAP):
-        peeled = _peel_pipe_consumer(norm)
-        if peeled is None or peeled == norm:
-            break
-        norm = peeled
-    tokens = norm.split(maxsplit=1)
-    return _basename(tokens[0]) if tokens else ""
+        if _runs_stdin_as_code(layer) or _sources_stdin(layer):
+            return True
+        peeled = _peel_pipe_consumer(layer)
+        if peeled is None or peeled.strip() == layer:
+            return False
+        layer = peeled.strip()
+    return True  # wrapped past the unwrap cap: fail closed
 
 
 def _is_pipe_to_shell(segments: list[str], seg_ops: list[str]) -> bool:
-    """Detect any ``<producer> | <shell>`` pipeline.
+    """Detect a ``<producer> | <consumer>`` pipeline whose consumer runs stdin as code.
 
     A consumer segment is only a pipe target when the operator preceding it is a
     true pipe (``seg_ops[i + 1] == "|"``); ``&&``/``||``/``;``/newline join
     independent commands rather than piping stdout, so ``make && bash deploy.sh``
-    is NOT a pipe-to-shell. Returns ``True`` whenever a true-pipe consumer is one
-    of DANGEROUS_SHELL_WRAPPERS — that pattern is RCE in an agent context
-    regardless of which encoder/decoder/fetcher is on the producing side
-    (curl, wget, base64, xxd, openssl, printf, echo, python -c, ...).
+    is NOT a pipe-to-shell. A shell or interpreter that reads its program from
+    the pipe is RCE in an agent context regardless of which encoder / decoder /
+    fetcher is on the producing side (curl, wget, base64, xxd, printf, ...).
     """
     if len(segments) < _PIPELINE_PRODUCER_CONSUMER_MIN:
         return False
@@ -6788,8 +7161,7 @@ def _is_pipe_to_shell(segments: list[str], seg_ops: list[str]) -> bool:
         consumer = segments[i + 1].strip()
         if not producer or not consumer:
             continue
-        cons_token = _pipe_consumer_head(consumer)
-        if cons_token in _PIPE_SHELL_CMDS:
+        if _pipe_consumer_runs_code(consumer):
             return True
     return False
 
@@ -6802,7 +7174,8 @@ _PIPE_TO_SHELL_REASON = (
     "stdin. Runner/env wrappers (uv run, uvx, env X=1, timeout) are unwrapped "
     "first, so they do not hide the consumer. There is no legitimate use of "
     "this shape in an agent context. Write the output to a file first, inspect "
-    "it, then run it explicitly if you really mean to."
+    "it, then run it explicitly if you really mean to. Piping data into a script "
+    "or module (`python3 tool.py`, `python3 -m json.tool`) is fine."
 )
 
 
@@ -7134,22 +7507,74 @@ def _construct_floor(
     return _floor_check("".join(worst), command)
 
 
-# A self-recursive function that pipes into or backgrounds itself: the
+# A function that calls back into itself (directly or through another function
+# defined in the same command) and pipes or backgrounds inside its body: the
 # ``:(){ :|:& };:`` fork bomb under any name. Kept on the floor in auto mode.
 _FUNC_HEAD_RE = re.compile(
-    r"(?:^|[\s;&|(])(?:function\s+)?([A-Za-z0-9_:.+-]+)\s*(?:\(\s*\)\s*)?[{(]"
+    r"(?:^|[\s;&|(])"
+    r"(?:function\s+([A-Za-z0-9_:.+-]+)\s*(?:\(\s*\)\s*)?|([A-Za-z0-9_:.+-]+)\s*\(\s*\)\s*)"
+    r"([{(])"
+)
+# A pipe (``|``, ``|&``; not ``||`` or the ``>|`` redirect) or a background ``&``
+# (not ``&&``, ``>&``, ``&>`` or ``<&``).
+_SPAWN_OP_RE = re.compile(r"(?<![|>])\|(?!\|)|(?<![&|<>])&(?![&>])")
+_FORK_BOMB_BODY = (
+    "defines a function that calls itself through a pipe or in the background: a "
+    "fork bomb, which fills the process table until the machine stops responding. "
+    "Don't run it"
 )
 
 
+def _function_bodies(command: str) -> dict[str, list[str]]:
+    """Function name -> body texts for each definition in ``command``.
+
+    Read from the quote-masked command, so a ``|`` or ``&`` inside a string is
+    not an operator. The body runs to the matching ``}`` or ``)``, or to the end
+    of the command when there is none.
+    """
+    masked = _shell_code_mask(command)
+    bodies: dict[str, list[str]] = {}
+    for m in _FUNC_HEAD_RE.finditer(masked):
+        name = m.group(1) or m.group(2)
+        opener = m.group(3)
+        closer = "}" if opener == "{" else ")"
+        depth, j = 0, m.start(3)
+        while j < len(masked):
+            depth += (masked[j] == opener) - (masked[j] == closer)
+            if depth == 0:
+                break
+            j += 1
+        bodies.setdefault(name, []).append(masked[m.end(3) : j])
+    return bodies
+
+
 def _is_fork_bomb(command: str) -> bool:
-    for m in _FUNC_HEAD_RE.finditer(command):
-        name = m.group(1)
-        if name == "function":
+    """True when a function defined in ``command`` is a fork bomb.
+
+    Only the function's own body counts: an ``&&`` or ``2>&1`` after the
+    definition (``f() { ...; } && f``) is not the body piping or backgrounding.
+    """
+    defs = _function_bodies(command)
+    calls: dict[str, set[str]] = {}
+    for name, texts in defs.items():
+        calls[name] = {
+            other
+            for other in defs
+            for text in texts
+            if re.search(rf"(?<![\w.:+-]){re.escape(other)}(?![\w.:+-])", text)
+        }
+    for name, texts in defs.items():
+        if not any(_SPAWN_OP_RE.search(text) for text in texts):
             continue
-        body = command[m.end() :]
-        call = re.compile(rf"(?<![\w.:+-]){re.escape(name)}(?![\w.:+-])")
-        if call.search(body) and re.search(r"\||&(?!&)", body):
-            return True
+        seen: set[str] = set()
+        queue = list(calls[name])
+        while queue:
+            callee = queue.pop()
+            if callee == name:
+                return True
+            if callee not in seen:
+                seen.add(callee)
+                queue.extend(calls[callee])
     return False
 
 
@@ -7331,6 +7756,64 @@ def _remote_payload(tokens: list[str]) -> str | None:
     return " ".join(rest) if head == "ssh" else shlex.join(rest)
 
 
+def _raw_words(text: str) -> list[str]:
+    """Split ``text`` into shell words, each kept as written (quotes and all).
+
+    Whitespace splits only outside quotes, backticks, ``$(...)`` and ``${...}``,
+    so ``f=$(basename "$1")`` stays one word.
+    """
+    words: list[str] = []
+    buf: list[str] = []
+    stack: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        top = stack[-1] if stack else ""
+        if top == "'":
+            if c == "'":
+                stack.pop()
+            buf.append(c)
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            buf.append(text[i : i + 2])
+            i += 2
+            continue
+        if top == "`":
+            if c == "`":
+                stack.pop()
+            buf.append(c)
+            i += 1
+            continue
+        if text.startswith(("$(", "${"), i):
+            stack.append(text[i : i + 2])
+            buf.append(text[i : i + 2])
+            i += 2
+            continue
+        if top == '"':
+            if c == '"':
+                stack.pop()
+            elif c == "`":
+                stack.append(c)
+        elif c in "'\"`":
+            stack.append(c)
+        elif c == "(" and top == "$(":
+            stack.append("$(")
+        elif (c == ")" and top == "$(") or (c == "}" and top == "${"):
+            stack.pop()
+        elif c.isspace() and not stack:
+            if buf:
+                words.append("".join(buf))
+                buf = []
+            i += 1
+            continue
+        buf.append(c)
+        i += 1
+    if buf:
+        words.append("".join(buf))
+    return words
+
+
 def _has_expanded_head(code: str) -> bool:
     """True when a command in ``code`` is named by an expansion or substitution.
 
@@ -7339,7 +7822,7 @@ def _has_expanded_head(code: str) -> bool:
     ``$`` in an argument (``echo $HOME``, ``cd "$1"``) does not count.
     """
     for segment in split_pipeline(code):
-        words = segment.split()
+        words = _raw_words(segment)
         while words and _SEG_ENV_ASSIGN_RE.match(words[0]):
             words = words[1:]
         if words and words[0].lstrip("\"'").startswith(("$", "`")):
@@ -7435,8 +7918,18 @@ def _runs_stdin_as_code(segment: str) -> bool:
     if not words:
         return False
     head = _basename(words[0].rstrip(");}"))
-    if head not in DANGEROUS_SHELL_WRAPPERS and head not in DANGEROUS_INTERPRETERS:
-        return False
+    if head in DANGEROUS_SHELL_WRAPPERS:
+        return _shell_reads_stdin(words)
+    if _is_interpreter_name(head):
+        return _interpreter_reads_stdin(_interpreter_family(head), words)
+    return False
+
+
+_STDIN_PROGRAMS: frozenset[str] = frozenset({"-", "/dev/stdin", "/dev/fd/0"})
+
+
+def _shell_reads_stdin(words: list[str]) -> bool:
+    """A shell with no ``-c`` and no script, or with ``-s``, reads commands from stdin."""
     j = 1
     while j < len(words):
         word = words[j]
@@ -7447,12 +7940,49 @@ def _runs_stdin_as_code(segment: str) -> bool:
             j += 2
             continue
         if len(word) > 1 and word[0] in "-+":
-            if word[0] == "-" and ("c" in word[1:] or word in INTERPRETER_EVAL_FLAGS):
+            short = word[0] == "-" and word[1] != "-"
+            if short and "c" in word[1:]:
                 return False
+            if short and "s" in word[1:]:
+                return True
             j += 1
             continue
         break
-    return j >= len(words) or words[j] in {"-", "/dev/stdin", "/dev/fd/0"}
+    return j >= len(words) or words[j] in _STDIN_PROGRAMS
+
+
+def _interpreter_reads_stdin(family: str, words: list[str]) -> bool:
+    """An interpreter with no inline program, script or module reads its program from stdin.
+
+    A REPL-style module (``python -m code``) and ``python -i`` / ``node -i``
+    read stdin too. ``deno`` / ``bun`` may take a subcommand first (``deno run
+    -``).
+    """
+    subcommand = family in _SUBCOMMAND_FAMILIES
+    j = 1
+    while j < len(words):
+        word = words[j]
+        j += 1
+        if word == "--":
+            break
+        if _interactive_flag(family, word):
+            return True
+        if word in INTERPRETER_EVAL_FLAGS:
+            return False
+        if len(word) > 1 and word.startswith("-"):
+            kind, attached = _classify_interpreter_flag(family, word)
+            if kind == "eval":
+                return False
+            if kind == "module":
+                return (attached or (words[j] if j < len(words) else "")) in _INLINE_CODE_MODULES
+            if kind == "value" and not attached:
+                j += 1
+            continue
+        if subcommand and word not in _STDIN_PROGRAMS and "/" not in word and "." not in word:
+            subcommand = False  # ``deno run`` / ``bun x``: the program operand comes next
+            continue
+        return word in _STDIN_PROGRAMS
+    return j >= len(words) or words[j] in _STDIN_PROGRAMS
 
 
 # --- awk running a command (``system()``, ``print | "cmd"``, ``"cmd" | getline``) ---
@@ -7553,66 +8083,180 @@ def _awk_unescape(text: str) -> str:
     return re.sub(r"\\(.)", lambda m: escapes.get(m.group(1), m.group(1)), text)
 
 
-def _awk_literal_at(prog: str, masked: str, start: int) -> str | None:
-    """The string literal that is the whole expression starting at ``start``."""
+# Stands in for a part of an awk command built at run time (a field, a
+# variable, a function result) until the command is floor-checked.
+_AWK_RUNTIME = "\x00"
+_AWK_IDENT_RE = re.compile(r"[A-Za-z_]\w*")
+_AWK_FORMAT_RE = re.compile(r"%[-+ #0]*(?:\*|\d+)?(?:\.(?:\*|\d+))?[a-zA-Z]")
+
+
+def _awk_stmt_end(masked: str, start: int) -> int:
+    """End of the awk expression starting at ``start``: ``;``, ``}``, a newline or an unopened ``)``."""
+    depth = 0
+    for j in range(start, len(masked)):
+        ch = masked[j]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                return j
+            depth -= 1
+        elif depth == 0 and ch in ";}\n":
+            return j
+    return len(masked)
+
+
+def _awk_expr_start(masked: str, end: int) -> int:
+    """Start of the awk expression ending at ``end`` (the operand left of ``| getline``)."""
+    depth = 0
+    j = end - 1
+    while j >= 0:
+        ch = masked[j]
+        if ch == ")":
+            depth += 1
+        elif ch == "(":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and ch in ";{}\n,=!&":
+            break
+        j -= 1
+    return j + 1
+
+
+def _awk_sprintf(prog: str, masked: str, open_idx: int, close: int) -> str:
+    """The text ``sprintf`` builds: its literal format, with every directive run-time."""
+    start = open_idx + 1
+    while start < close and masked[start] in " \t":
+        start += 1
+    if start >= close or prog[start] != '"':
+        return _AWK_RUNTIME
+    end = _awk_string_end(prog, start)
+    if end < 0 or end > close:
+        return _AWK_RUNTIME
+    fmt = _awk_unescape(prog[start + 1 : end])
+    return _AWK_FORMAT_RE.sub(_AWK_RUNTIME, fmt).replace("%%", "%")
+
+
+def _awk_var_values(prog: str, masked: str, name: str) -> list[str] | None:
+    """Every value the program assigns to variable ``name``, or ``None`` if one is unknown."""
+    values: list[str] = []
+    for m in re.finditer(rf"(?<![\w$]){re.escape(name)}\s*=(?!=)", masked):
+        found = _awk_expr(prog, masked, m.end(), _awk_stmt_end(masked, m.end()), resolve=False)
+        if found is None:
+            return None
+        values.extend(found)
+    return values or None
+
+
+def _awk_expr(prog: str, masked: str, start: int, end: int, *, resolve: bool) -> list[str] | None:
+    """Values the awk expression ``prog[start:end]`` can build.
+
+    A string literal is kept as text, ``sprintf`` keeps its literal format, and
+    a variable that opens the expression is replaced by each value the program
+    assigns it (``resolve`` is off inside those assignments, so it never
+    loops). Anything else (a field, a number, another function) is a run-time
+    part, marked ``_AWK_RUNTIME``. ``None`` when the expression opens with a
+    run-time part or uses an operator this reader doesn't follow.
+    """
+    values = [""]
     k = start
-    while k < len(prog) and prog[k] in " \t":
-        k += 1
-    if k >= len(prog) or prog[k] != '"':
-        return None
-    end = _awk_string_end(prog, k)
-    if end < 0:
-        return None
-    after = masked[end + 1 :].lstrip(" \t")
-    if after and after[0] not in ";})\n,|>":
-        return None  # concatenated with more text, built at run time
-    return _awk_unescape(prog[k + 1 : end])
+    first = True
+    while True:
+        while k < end and masked[k] in " \t\n":
+            k += 1
+        if k >= end:
+            break
+        ch = masked[k]
+        piece: list[str] | None
+        if ch == '"':
+            close = _awk_string_end(prog, k)
+            if close < 0 or close >= end:
+                return None
+            piece = [_awk_unescape(prog[k + 1 : close])]
+            k = close + 1
+        elif ch == "(":
+            close = min(_close_paren(masked, k), end)
+            piece = _awk_expr(prog, masked, k + 1, close, resolve=resolve) or [_AWK_RUNTIME]
+            k = close + 1
+        elif ch == "$":
+            k += 1
+            if k < end and masked[k] == "(":
+                k = min(_close_paren(masked, k), end) + 1
+            else:
+                while k < end and (masked[k].isalnum() or masked[k] in "_$"):
+                    k += 1
+            piece = [_AWK_RUNTIME]
+        elif ch.isdigit():
+            num_start = k
+            while k < end and (masked[k].isdigit() or masked[k] == "."):
+                k += 1
+            piece = [masked[num_start:k]]
+        elif m := _AWK_IDENT_RE.match(masked, k):
+            name = m.group()
+            k = m.end()
+            call = re.compile(r"\s*\(").match(masked, k)
+            if call:
+                open_idx = call.end() - 1
+                close = min(_close_paren(masked, open_idx), end)
+                text = _awk_sprintf(prog, masked, open_idx, close) if name == "sprintf" else ""
+                piece = [text or _AWK_RUNTIME]
+                k = close + 1
+            elif first and resolve:
+                piece = _awk_var_values(prog, masked, name)
+            else:
+                piece = [_AWK_RUNTIME]
+        else:
+            return None
+        if piece is None or (first and piece == [_AWK_RUNTIME]):
+            return None
+        values = [v + p for v in values for p in piece]
+        if len(values) > _AWK_MAX_COMMANDS:
+            return None
+        first = False
+    return None if first else values
 
 
-def _awk_literal_before(prog: str, masked: str, end: int) -> str | None:
-    """The string literal that is the whole expression ending just before ``end``."""
-    k = end - 1
-    while k >= 0 and prog[k] in " \t":
-        k -= 1
-    if k < 0 or prog[k] != '"':
+def _awk_command_values(prog: str, masked: str, start: int, end: int) -> list[str] | None:
+    """The commands an awk expression can name, or ``None`` when the command word is run-time."""
+    values = _awk_expr(prog, masked, start, end, resolve=True)
+    if values is None or any(not v.strip() or v.lstrip()[0] == _AWK_RUNTIME for v in values):
         return None
-    opening = masked.rfind('"', 0, k)
-    if opening < 0:
-        return None
-    before = masked[:opening].rstrip(" \t")
-    if before and before[-1] not in "({;\n!&|":
-        return None
-    return _awk_unescape(prog[opening + 1 : k])
+    return values
 
 
 def _awk_commands(prog: str) -> tuple[list[str], str | None]:
-    """``(literal commands, first command built at run time)`` an awk program runs.
+    """``(commands, first command built at run time)`` an awk program runs.
 
-    A command awk prints into (``print | "sh"``, ``print |& "sh"``) reads awk's
-    output on stdin, so it is returned as ``cat | <cmd>`` to keep a pipe into a
-    shell on the floor.
+    A command is known when its text opens with a literal (``system("date")``,
+    ``cmd = "wc -l " $1; cmd | getline n``); its run-time parts stay marked
+    with ``_AWK_RUNTIME``. One whose command word is only known at run time
+    (``system($0)``, a ``-v`` variable) is returned as built. A command awk
+    prints into (``print | "sh"``, ``print |& "sh"``) reads awk's output on
+    stdin, so it is returned as ``cat | <cmd>`` to keep a pipe into a shell on
+    the floor.
     """
     masked = _awk_mask(prog)
-    literals: list[str] = []
+    commands: list[str] = []
     for m in _AWK_SYSTEM_RE.finditer(masked):
         close = _close_paren(masked, m.end() - 1)
-        lit = _awk_literal_at(prog, masked, m.end())
-        if lit is None or masked[m.end() : close].count('"') > 2:
-            return literals, prog[m.start() : close + 1]
-        literals.append(lit)
+        values = _awk_command_values(prog, masked, m.end(), close)
+        if values is None:
+            return commands, prog[m.start() : close + 1]
+        commands.extend(values)
     for i, c in enumerate(masked):
         if c != "|" or masked[i - 1 : i] == "|" or masked[i + 1 : i + 2] == "|":
             continue
         op_end = i + 2 if masked[i + 1 : i + 2] == "&" else i + 1
         reads_output = not masked[op_end:].lstrip().startswith("getline")
         if reads_output:
-            lit = _awk_literal_at(prog, masked, op_end)
+            values = _awk_command_values(prog, masked, op_end, _awk_stmt_end(masked, op_end))
         else:
-            lit = _awk_literal_before(prog, masked, i)
-        if lit is None:
-            return literals, prog[max(0, i - 20) : i + 20].strip()
-        literals.append(f"cat | {lit}" if reads_output else lit)
-    return literals, None
+            values = _awk_command_values(prog, masked, _awk_expr_start(masked, i), i)
+        if values is None:
+            return commands, prog[max(0, i - 20) : i + 20].strip()
+        commands.extend(f"cat | {v}" if reads_output else v for v in values)
+    return commands, None
 
 
 def _awk_floor(
@@ -7620,19 +8264,33 @@ def _awk_floor(
 ) -> dict[str, str] | None:
     """Deny when an awk program in ``segment`` runs a command on the floor.
 
-    A literal command (``system("rm -rf ~")``, ``print | "sh"``) is checked as
-    a command of its own; one built at run time (``system($0)``) can't be
-    read, so it is denied as an executed construct. Checked in every mode.
+    A command that opens with a literal (``system("rm -rf ~")``, ``print |
+    "sh"``, ``"wc -l " $1 | getline``) is checked as a command of its own,
+    with each run-time part stood in for by ``/`` and then by an expansion.
+    One whose command word is only known at run time (``system($0)``) can't be
+    read, so it is denied as an executed construct. Checked in every mode, and
+    only against the floor: a STEER shape inside the awk command (a ``>``
+    redirect) does not deny it.
     """
     tokens = _payload_tokens(segment.strip())
     for i, tok in enumerate(tokens):
         if _basename(tok) not in _AWK_HEADS:
             continue
         for prog in _awk_programs(tokens, i + 1):
-            literals, built = _awk_commands(prog)
-            literals = list(dict.fromkeys(literals))
-            if built is None and len(literals) > _AWK_MAX_COMMANDS:
-                built = f"{len(literals)} separate commands"
+            commands, built = _awk_commands(prog)
+            commands = list(dict.fromkeys(commands))
+            if built is None and len(commands) > _AWK_MAX_COMMANDS:
+                built = f"{len(commands)} separate commands"
+            for awk_command in commands if built is None else []:
+                # The worst path first (``rm -rf `` + ``$1``), then an
+                # expansion: a run-time part guard can't read (``sh -c `` + ``$0``).
+                hit = _floor_check(awk_command.replace(_AWK_RUNTIME, "/"), command, floor_only=True)
+                if hit is not None:
+                    return hit
+                as_expansion = awk_command.replace(_AWK_RUNTIME, '"$AWK_VALUE"')
+                if _floor_check(as_expansion, command, floor_only=True) is not None:
+                    built = awk_command.replace(_AWK_RUNTIME, "<run-time value>")
+                    break
             if built is not None:
                 body = (
                     f"`{segment[:_SEGMENT_DISPLAY_TRUNC]}` has awk run a command built at "
@@ -7649,10 +8307,6 @@ def _awk_floor(
                     command, "deny", "dangerous-construct (bash.dangerous_construct:executed)"
                 )
                 return deny
-            for literal in literals:
-                hit = _floor_check(literal, command)
-                if hit is not None:
-                    return hit
     return None
 
 

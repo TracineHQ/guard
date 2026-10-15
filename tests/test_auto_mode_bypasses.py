@@ -20,7 +20,7 @@ BYPASSES: list[str] = [
     # 1. env flags hid the wrapped command.
     "env -i rm -rf ~",
     "env -i git push --force origin main",
-    "env -i python3 -c 'import os'",
+    'env -i python3 -c "$CODE"',
     "env -i sudo -s",
     "timeout 5 env -i rm -rf /",
     "env -u FOO rm -rf ~",
