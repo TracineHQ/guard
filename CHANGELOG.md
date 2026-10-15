@@ -19,6 +19,23 @@ adheres to [Semantic Versioning](https://semver.org/).
   `ssh` / `docker exec` command, a `find -exec` command) are still checked
   against the floor. Other permission modes, `lockdown` and allowlist
   overrides behave exactly as before.
+- The floor holds against the wrappers that used to hide a command from it.
+  `env` options are peeled (`env -i`, `-u NAME`, `-C DIR`, `--`), shell
+  options before `-c` are skipped (`bash -o pipefail -c`, `bash -c --`),
+  `ssh host --`, `docker container exec`, `docker compose exec` and `nsenter`
+  payloads are checked, a shell reading a here-string or process
+  substitution on stdin (`{ bash; } <<< '...'`) counts as running it, and an
+  unfiltered `find . -delete` / `find .. -exec rm` is FLOOR. A `-c` string
+  that is empty, a `{}` placeholder or built from `$` expansions is denied in
+  `auto`. Variable and glob command heads (`$R`, `$@`, `/bin/r?`) and
+  `bash.admin_default_deny` (secret reads, IAM grants, public access) are
+  FLOOR.
+- awk programs are checked in every mode: a literal command in `system()`,
+  `print | "cmd"` or `"cmd" | getline` goes through the floor, and one built
+  at run time (`system($0)`) is denied.
+- Redirects into `.git/config`, `.git/hooks/`, `~/.gitconfig` and
+  `$XDG_CONFIG_HOME/git/config` are FLOOR, and `>|` is read as a redirect
+  rather than a pipe.
 - The `bash.dangerous_construct` deny now names the construct that actually
   matched (command substitution, process substitution, here-string,
   redirect, arithmetic expansion). A redirect is steered to the Write or
@@ -29,6 +46,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 - Read-only guard CLI calls (`guard status`, `guard allowlist list`,
   `guard mode --help`, `guard allowlist --help`) no longer trip
   `protected_files`.
+- `git config` reads (`--get core.hooksPath`, `--list`, `get <key>`) are no
+  longer denied as config injection, and writes no longer slip past it when
+  an option value comes first (`--file .git/config`, `--type path`) or the
+  `set` subcommand is used.
 - `git -C <repo> fetch` is allowed when it only updates remote-tracking refs.
   Pruning, forcing, a destination refspec or `--upload-pack` still deny.
 - The `git worktree add` steer now gives a sequence guard actually allows

@@ -94,6 +94,9 @@ FLOOR_SHAPES: list[tuple[str, str]] = [
     ("bash.process_attach", "gdb -p 1"),
     ("bash.process_tree_kill", "kill -9 -1"),
     ("bash.sensitive_write", "cp evil ~/.ssh/authorized_keys"),
+    ("bash.admin_default_deny", "aws ec2 run-instances --image-id ami-1"),
+    ("bash.var_expanded_head", "$VIRTUAL_ENV/bin/python -m pytest"),
+    ("bash.glob_head", "./build-*/bin/tool --version"),
 ]
 
 STEER_SHAPES: list[tuple[str, str]] = [
@@ -101,15 +104,12 @@ STEER_SHAPES: list[tuple[str, str]] = [
     (always_deny_key("git branch -D"), "git branch -D old"),
     (always_deny_key("git remote set-url"), "git remote set-url origin git@github.com:o/r.git"),
     (always_deny_key("env -i"), "env -i PATH=/usr/bin make"),
-    ("bash.admin_default_deny", "aws ec2 run-instances --image-id ami-1"),
     ("bash.conditional_denied_flag", "find . -name '*.pyc' -delete"),
     ("bash.dangerous_construct", "echo hi > notes.txt"),
     ("bash.eval_builtin:source", "source .venv/bin/activate"),
     ("bash.exec_wrapper", "stdbuf -o0 bash -c 'ls'"),
     ("bash.function_definition", "f() { echo hi; }; f"),
     ("bash.trap_exploit", "trap 'echo done' EXIT"),
-    ("bash.var_expanded_head", "$VIRTUAL_ENV/bin/python -m pytest"),
-    ("bash.glob_head", "./build-*/bin/tool --version"),
     ("bash.shell_wrapper", "bash -c 'ls -la'"),
     ("bash.remote_shell_wrapper", "ssh build-host 'make test'"),
     ("bash.git_ref_mutation", "git branch feature-x"),

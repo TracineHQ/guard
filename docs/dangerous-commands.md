@@ -36,8 +36,14 @@ Guard keeps scanning after it skips a STEER match, so a FLOOR rule elsewhere
 in the command still denies. The payload a STEER shape hides is run through
 the floor on its own: a `$(...)` or `<(...)` body, a `bash -c` string, a
 function body, a `trap` handler, a `find -exec` command, and the command an
-`ssh` / `docker exec` / `kubectl exec` runs elsewhere. A substitution is also
-re-checked with `/` in its place, so `rm -rf $(echo /)` still denies.
+`ssh` / container `exec` / `nsenter` runs elsewhere. A substitution is also
+re-checked with `/` in its place, so `rm -rf $(echo /)` still denies. Wrapper
+options are peeled first (`env -i`, `env -u NAME`, `bash -o pipefail -c`,
+`ssh host --`), so a wrapper never hides the command it runs. A `-c` string
+guard cannot read (empty, an `xargs -I{}` placeholder, or built from `$`
+expansions) is denied. awk is checked in every mode: a literal command in
+`system()`, `print | "cmd"` or `"cmd" | getline` goes through the floor, and
+one built at run time is denied.
 
 Every other permission mode, and lockdown in any permission mode, denies on
 both tiers exactly as before. Allowlist overrides behave the same in every
@@ -80,13 +86,17 @@ before the colon. A key missing from the table is FLOOR. Pipe-to-shell
 | `bash.dangerous_env_sink` | exec / loader hijack env (`GIT_SSH_COMMAND`, `LD_PRELOAD`, ...) |
 | `bash.dangerous_interpreter` | inline interpreter code |
 | `bash.eval_builtin` | `eval` runs an arbitrary string as code |
-| `bash.dangerous_construct:executed` | substitution output run as code (`bash -c "$(curl ...)"`, `source <(...)`, `$(...)` as the command) |
-| `bash.dangerous_construct:sensitive_target` | `>` / `>>` into `~/.ssh`, a shell rc file, `/etc` or a launch agent (same set as `bash.sensitive_write`) |
+| `bash.dangerous_construct:executed` | output run as code (`bash -c "$(curl ...)"`, `source <(...)`, a shell fed by `<<<`), or awk running a command built at run time |
+| `bash.dangerous_construct:sensitive_target` | `>` / `>>` / `>|` into `~/.ssh`, a shell rc file, `/etc`, a launch agent, git config or a git hook |
+| `bash.shell_wrapper:opaque` | `-c` string that is empty, a `{}` placeholder or built from `$` expansions |
+| `bash.admin_default_deny` | cloud CLI verb off the read-only catalog: secret reads, IAM grants, public access, key minting |
+| `bash.var_expanded_head` | variable-named command (`$R`, `$SHELL`, `$1`, `$@`); what runs is unknowable |
+| `bash.glob_head` | glob in the command name (`/bin/r?`) hides which binary runs |
 | `bash.env_split_string` | `env -S` rebuilds argv guard cannot see |
 | `bash.wrapper_stacking` | nesting past the unwrap limit hides the inner command |
 | `bash.dangerous_rm` | recursive rm of `/`, `~`, `$HOME` or cwd |
 | `bash.function_definition:fork_bomb` | a function that pipes into or backgrounds itself exhausts the process table |
-| `bash.conditional_denied_flag:root` | `find -delete` / `-exec` rooted at `/`, `~`, `$HOME` or a system directory |
+| `bash.conditional_denied_flag:root` | `find -delete` / `-exec` rooted at `/`, a home dir or a system directory, or an unfiltered delete of `.` or `..` |
 | `bash.disk_destruction` | disk / partition / filesystem destruction |
 | `bash.db_cli_destructive` | irreversible database destruction |
 | `bash.dropdb_or_mysqladmin` | irreversible database destruction |
@@ -120,7 +130,6 @@ before the colon. A key missing from the table is FLOOR. Pipe-to-shell
 
 | Rule key | Why |
 |---|---|
-| `bash.admin_default_deny` | cloud CLI verb off the read-only catalog; destructive verbs are FLOOR rules |
 | `bash.admin_unknown_flag_strict` | lockdown-only unknown-flag escalation |
 | `bash.conditional_denied_flag` | `find -exec` / `-delete`, `yq -i` on a project path |
 | `bash.dangerous_construct` | command / process substitution, here-string, file redirect; bodies are still floor-checked |
@@ -128,10 +137,8 @@ before the colon. A key missing from the table is FLOOR. Pipe-to-shell
 | `bash.exec_wrapper` | the peeled inner command is matched by its own rule |
 | `bash.function_definition` | shell function; the body is still floor-checked |
 | `bash.trap_exploit` | trap handler; the handler body is still floor-checked |
-| `bash.var_expanded_head` | variable-named command |
-| `bash.glob_head` | glob in the command name, same class as a variable-named command |
 | `bash.shell_wrapper` | `bash -c` payload is re-split and floor-checked |
-| `bash.remote_shell_wrapper` | `ssh` / `docker exec` / `kubectl exec`; the remote payload is still floor-checked |
+| `bash.remote_shell_wrapper` | `ssh` / container `exec` / `nsenter`; the remote payload is still floor-checked |
 | `bash.git_ref_mutation` | local branch / tag / remote-config write |
 | `bash.git_worktree_add` | `worktree add -b` creates a local branch; a system-root target needs root anyway |
 | `bash.git_submodule_add` | adds a submodule; nothing runs until it is initialized |

@@ -474,6 +474,11 @@ def _split_on_operators(line: str) -> list[tuple[str, str]]:
             pending_op = "&&"
             i += 2
             continue
+        if c == "|" and buf and buf[-1] == ">":
+            # ``>|`` is the noclobber-override redirect, not a pipe.
+            buf.append(c)
+            i += 1
+            continue
         if c in {"|", ";"}:
             segments.append((pending_op, "".join(buf)))
             buf = []
@@ -1242,32 +1247,71 @@ def _has_dangerous_env_assignment(tokens: list[str]) -> bool:
     return False
 
 
-def _strip_env_prefix(normalized: str) -> str | None:
-    """If segment starts with ``env K=V K=V ...``, return the rest.
+# ``env`` options (GNU and BSD) whose value is the next word unless attached:
+# ``-u NAME`` / ``--unset=NAME``, ``-C DIR`` / ``--chdir=DIR``, ``-P PATH``,
+# ``-a ARG`` / ``--argv0=ARG``, ``-L`` / ``-U user[/class]``.
+_ENV_SHORT_VALUE_FLAGS: frozenset[str] = frozenset("uCPaLU")
+_ENV_LONG_VALUE_FLAGS: frozenset[str] = frozenset({"--unset", "--chdir", "--argv0"})
 
-    Returns ``None`` if the segment doesn't begin with bare ``env`` followed
-    by zero or more ``KEY=VAL`` assignments. ``env -i`` / ``env --`` and
-    other flag forms are NOT stripped — they fall through to the existing
-    ``_is_safe_env`` / ``env -i`` ALWAYS_DENY paths.
+
+def _env_options_end(tokens: list[str]) -> int | None:
+    """Index of the first word after ``env``'s options, or ``None`` for ``-S``.
+
+    Peels ``-i`` / ``-`` / ``--ignore-environment``, ``-0``, ``-v``, the
+    value-taking options above (attached or as the next word), clusters such as
+    ``-iu NAME``, and a closing ``--``. ``-S`` / ``--split-string`` re-splits
+    its argument into a new command line; that shape is left to the
+    ``bash.env_split_string`` matcher.
+    """
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "--":
+            return i + 1
+        if tok == "-":
+            i += 1
+            continue
+        if tok.startswith("--"):
+            name = tok.split("=", 1)[0]
+            if name == "--split-string":
+                return None
+            i += 2 if name in _ENV_LONG_VALUE_FLAGS and "=" not in tok else 1
+            continue
+        if not tok.startswith("-"):
+            return i
+        letters = tok[1:]
+        if "S" in letters:
+            return None
+        step = 1
+        for k, letter in enumerate(letters):
+            if letter in _ENV_SHORT_VALUE_FLAGS:
+                # The rest of the cluster is the value; a trailing flag takes the next word.
+                step = 2 if k == len(letters) - 1 else 1
+                break
+        i += step
+    return i
+
+
+def _strip_env_prefix(normalized: str) -> str | None:
+    """If segment starts with ``env [options] [K=V ...] cmd``, return ``cmd ...``.
+
+    Returns ``None`` if the segment doesn't begin with bare ``env``, if no
+    command follows, or for ``env -S`` (left to ``_is_env_split_string``).
+    Options are peeled too (``env -i``, ``env -u NAME``, ``env -C DIR``,
+    ``env --``), so the wrapped command is evaluated on its own: ``env -i
+    rm -rf ~`` hits the ``rm`` floor even where the ``env -i`` rule is skipped.
     """
     tokens = normalized.split()
     if not tokens or tokens[0] != "env":
         return None
-    i = 1
+    i = _env_options_end(tokens)
+    if i is None:
+        return None
     while i < len(tokens) and _SEG_ENV_ASSIGN_RE.match(tokens[i]):
         i += 1
-    if i == len(tokens):
+    if i >= len(tokens):
         # `env K=V` (or bare `env`) with no wrapped command — nothing to strip.
         return None
-    if i == 1:
-        # Bare ``env <cmd>`` with no K=V assignments. Strip anyway so the
-        # inner command (e.g. ``env python3 -c '...'``) is re-evaluated by
-        # downstream matchers. The ``env -<flag>`` forms (``env -i``, ``env -S``)
-        # don't reach here — they hit the ``env -i`` ALWAYS_DENY literal or
-        # the new ``_is_env_split_string`` matcher first.
-        if tokens[i].startswith("-"):
-            return None
-        return " ".join(tokens[i:])
     return " ".join(tokens[i:])
 
 
@@ -1501,23 +1545,54 @@ def _shlex_tokens(segment: str) -> list[str]:
         return segment.split()
 
 
+# Shell options whose value is the next word (``-o pipefail``, ``+O extglob``).
+_SHELL_VALUE_OPTS: frozenset[str] = frozenset({"-o", "+o", "-O", "+O", "--rcfile", "--init-file"})
+
+
+def _shell_c_payload(tokens: list[str], start: int) -> tuple[bool, str | None]:
+    """``(has -c, command string)`` for a shell whose options begin at ``tokens[start]``.
+
+    Walks the option block the way the shell does: ``-o`` / ``-O`` / ``+o`` /
+    ``+O`` / ``--rcfile`` take the next word, ``--`` ends the options, and the
+    first word after them is the ``-c`` command string (``bash -c -- 'cmd'``,
+    ``bash -o pipefail -c 'cmd'``). Without ``-c`` that word is a script path.
+    The string is ``None`` when ``-c`` has nothing after it.
+    """
+    has_c = False
+    i = start
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok in _SHELL_VALUE_OPTS:
+            i += 2
+            continue
+        if tok.startswith("--"):
+            i += 1
+            continue
+        if len(tok) > 1 and tok[0] in "-+":
+            if tok[0] == "-" and "c" in tok[1:]:
+                has_c = True
+            i += 2 if len(tok) > 2 and tok[-1] in "oO" else 1
+            continue
+        break
+    if not has_c:
+        return False, None
+    return True, tokens[i] if i < len(tokens) else None
+
+
 def _strip_shell_wrapper(tokens: list[str]) -> str | None:
     """Strip ``bash -c``/``sh -c``/``zsh -c``/``/bin/sh -lc`` etc.
 
     Returns the literal payload (single shlex token) or ``None`` if the head
-    is not a known shell wrapper or no ``-c``-style flag is present.
+    is not a known shell wrapper or no ``-c``-style flag is present (an
+    inline script arg, busybox-style ``sh script.sh``, is not RCE).
     """
     if _basename(tokens[0]) not in DANGEROUS_SHELL_WRAPPERS:
         return None
-    for i in range(1, len(tokens)):
-        if _SHELL_C_FLAGS_RE.match(tokens[i]):
-            if i + 1 < len(tokens):
-                return tokens[i + 1]
-            return None
-        if not tokens[i].startswith("-"):
-            # Inline script arg (busybox-style ``sh script.sh``) — not RCE.
-            return None
-    return None
+    has_c, payload = _shell_c_payload(tokens, 1)
+    return payload if has_c else None
 
 
 _SUDO_VALUE_FLAG_RE = re.compile(
@@ -2836,16 +2911,62 @@ def _is_git_config_injection(normalized: str) -> bool:
     # ``git config <key> <value>`` — direct config write.
     sub_idx = next((j for j, t in enumerate(tokens[1:], start=1) if not t.startswith("-")), None)
     if sub_idx is not None and tokens[sub_idx] == "config":
-        # Skip past ``config`` flag block to first non-flag token.
-        j = sub_idx + 1
-        while j < len(tokens) and tokens[j].startswith("-"):
-            j += 1
-        if j < len(tokens) and _git_config_key_is_sink(tokens[j]):
-            return True
+        return _git_config_writes_sink(tokens[sub_idx + 1 :])
     return False
 
 
-_VAR_HEAD_RE = re.compile(r"^\$[A-Za-z_{]")
+# ``git config`` options whose value is the next word.
+_GIT_CONFIG_VALUE_OPTS: frozenset[str] = frozenset(
+    {"-f", "--file", "--blob", "--type", "--default", "--comment", "--value", "--url"}
+)
+_GIT_CONFIG_READ_ACTIONS: frozenset[str] = frozenset(
+    {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l"}
+)
+_GIT_CONFIG_WRITE_ACTIONS: frozenset[str] = frozenset(
+    {"--add", "--replace-all", "--unset", "--unset-all", "--rename-section"}
+    | {"--remove-section", "-e", "--edit"}
+)
+
+
+def _git_config_writes_sink(args: list[str]) -> bool:
+    """True when ``git config <args>`` writes an exec-sink key.
+
+    Option values (``--file .git/config``, ``--type path``) are skipped so they
+    are never read as the key. A read is not a write: a ``--get*`` / ``--list``
+    action with no write action, a lone key (``git config core.hooksPath``) or
+    the ``get`` / ``list`` subcommands. ``set`` / ``unset`` name the key second.
+    ``--show-origin`` / ``--show-scope`` only decorate a read, so ``git config
+    --show-scope k v`` is still a write.
+    """
+    flags: set[str] = set()
+    positionals: list[str] = []
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok in _GIT_CONFIG_VALUE_OPTS:
+            i += 2
+            continue
+        if tok.startswith("-"):
+            flags.add(tok.split("=", 1)[0])
+        else:
+            positionals.append(tok)
+        i += 1
+    if not positionals:
+        return False
+    subcommand = positionals[0]
+    if subcommand in {"get", "list"}:
+        return False
+    if subcommand in {"set", "unset"}:
+        return len(positionals) > 1 and _git_config_key_is_sink(positionals[1])
+    writes = bool(flags & _GIT_CONFIG_WRITE_ACTIONS)
+    if flags & _GIT_CONFIG_READ_ACTIONS and not writes:
+        return False
+    if not writes and len(positionals) == 1:
+        return False
+    return _git_config_key_is_sink(subcommand)
+
+
+_VAR_HEAD_RE = re.compile(r"^\$[A-Za-z_{0-9@*]")
 
 
 def _has_var_expanded_head(normalized: str) -> bool:
@@ -2882,6 +3003,8 @@ def _is_shell_wrapper_invocation(segment: str) -> bool:
     tokens = _shlex_tokens(segment)
     for i, tok in enumerate(tokens):
         if _basename(tok) in DANGEROUS_SHELL_WRAPPERS:
+            if _shell_c_payload(tokens, i + 1)[0]:
+                return True
             # Look ahead for a -c-style flag, heredoc redirect, or stdin-device
             # path among the next few tokens.
             for j in range(i + 1, min(i + 4, len(tokens))):
@@ -4979,16 +5102,17 @@ def _is_remote_shell_wrapper(normalized: str) -> bool:
         # ``ssh -t host 'cmd'``, ``ssh user@host cmd``. Need at least 3 tokens
         # AND a non-flag last token. ``ssh host`` (interactive) is 2 tokens.
         return any(not t.startswith("-") for t in tokens[2:])
-    if head in {"docker", "podman", "lxc", "kubectl"} and tokens[1] == "exec":
+    exec_start = _container_exec_start(tokens)
+    if exec_start is not None:
         # Allow ``docker exec --help`` / ``--version`` ONLY when the help
         # flag stands alone after ``exec`` (no container or trailing argv).
         # ``docker exec --help mc rm -rf /`` is NOT a help invocation: docker
         # treats `mc` as the container and `rm -rf /` as the command, then
-        # `--help` is just an unknown flag for `rm`. Insisting on
-        # tokens[2] in help-flags AND len == 3 closes that bypass.
-        if len(tokens) == 3 and tokens[2] in _REMOTE_SHELL_HELP_FLAGS:
-            return False
-        return True
+        # `--help` is just an unknown flag for `rm`. Insisting on the help
+        # flag being the only word after ``exec`` closes that bypass.
+        return not (
+            len(tokens) == exec_start + 1 and tokens[exec_start] in _REMOTE_SHELL_HELP_FLAGS
+        )
     # ``nsenter -t <pid> -m -p ...`` enters a target namespace and runs the
     # trailing argv inside it — same shell-RCE shape as docker exec.
     if head == "nsenter":
@@ -6457,10 +6581,33 @@ def _decide_inner(
             _log_local(command, "deny", "always-deny (bash.function_definition:fork_bomb)")
             return _deny(_format_deny_reason("bash.function_definition", body))
         for seg in segments:
+            opaque = _opaque_shell_string(seg)
+            if opaque is not None:
+                body = (
+                    f"`{seg[:_SEGMENT_DISPLAY_TRUNC]}` hands the shell a `-c` string "
+                    f"(`{opaque[:_SEGMENT_DISPLAY_TRUNC]}`) that is empty, a `{{}}` placeholder "
+                    "or built from `$` expansions, so the code that runs is only known at "
+                    "run time. Write the commands into the `-c` string literally, or into a "
+                    "script file and run that"
+                )
+                deny = _deny(_format_deny_reason("bash.shell_wrapper", body))
+                bypass = _maybe_allow_via_allowlist(
+                    allowlist, "bash.shell_wrapper", original_command, deny
+                )
+                if bypass is not None:
+                    return bypass
+                _log_local(command, "deny", "shell-wrapper (bash.shell_wrapper:opaque)")
+                return deny
             for body in _hidden_bodies(seg):
                 hidden = _floor_check(body, command)
                 if hidden is not None:
                     return hidden
+
+    # === awk running a command, in every mode ===
+    for seg in segments:
+        awk_hit = _awk_floor(seg, command, allowlist=allowlist, original_command=original_command)
+        if awk_hit is not None:
+            return awk_hit
 
     # === Pre-evaluation: dangerous-construct deny in BOTH modes ===
     # ``$(...)``, backticks, process substitution, here-strings and ``>`` /
@@ -6841,11 +6988,26 @@ def _blank_spans(masked: str, spans: list[tuple[str, int, int, int]]) -> str:
 
 _REDIRECT_OP_RE = re.compile(r"&?>>?\|?")
 
+# Files git reads exec settings or hook scripts from: a repo's ``.git/config``
+# (and a submodule's or worktree's), anything under ``.git/hooks/``, and the
+# user's global config (``~/.gitconfig``, ``$XDG_CONFIG_HOME/git/config``).
+_GIT_EXEC_SINK_PATH_RE = re.compile(
+    r"(?:^|/)\.git/(?:[^/]+/)*(?:config$|hooks/)"
+    r"|^~/\.gitconfig$|(?:^|/)\.config/git/config$"
+    r"|^\$\{?XDG_CONFIG_HOME\}?/git/config$"
+)
+
+
+def _redirect_target_is_sensitive(target: str) -> bool:
+    """A redirect target on the floor: a sensitive path or a git exec sink file."""
+    op = _normalize_home_path(target)
+    return _operand_is_sensitive(target) or bool(_GIT_EXEC_SINK_PATH_RE.search(op))
+
 
 def _sensitive_redirect_target(
     segment: str, masked: str, spans: list[tuple[str, int, int, int]]
 ) -> str | None:
-    """The first ``>`` / ``>>`` target in ``segment`` that is a sensitive path.
+    """The first ``>`` / ``>>`` / ``>|`` target in ``segment`` that is a sensitive path.
 
     Operators are found in the masked text (so a ``>`` inside a quoted string
     is not one); the target is read from the original text at the same offset,
@@ -6857,7 +7019,7 @@ def _sensitive_redirect_target(
         if not rest or rest.startswith("&"):
             continue
         target = _shlex_tokens(rest)[:1]
-        if target and _operand_is_sensitive(target[0]):
+        if target and _redirect_target_is_sensitive(target[0]):
             return target[0]
     return None
 
@@ -6888,7 +7050,10 @@ def _executes_construct(segment: str, masked: str, spans: list[tuple[str, int, i
     reading a process substitution or here-string), and ``bash -c "$(...)"``.
     """
     has_sub = any(kind == "substitution" for kind, *_ in spans)
-    feeds_code = any(kind == "process_in" for kind, *_ in spans) or "<<<" in masked
+    # A here-string is code only for a runner with no script to run.
+    feeds_code = any(kind == "process_in" for kind, *_ in spans) or (
+        "<<<" in masked and _runs_stdin_as_code(segment)
+    )
     if masked.lstrip().startswith(("$(", "`")):
         return True
     for cand in _exec_wrapper_candidates(segment):
@@ -6928,8 +7093,8 @@ def _construct_body(
     if sensitive_target is not None:
         return (
             f"`{shown}` redirects into `{sensitive_target}`, a sensitive path (ssh keys, "
-            "shell rc files, /etc, launch agents). Tell the user what you want to change "
-            "there; don't route around it"
+            "shell rc files, /etc, launch agents, git config or hooks). Tell the user what "
+            "you want to change there; don't route around it"
         )
     steers = ". ".join(_CONSTRUCT_STEERS[k] for k in kinds)
     return f"`{shown}` uses {found}. {steers}"
@@ -6988,17 +7153,81 @@ _FIND_EXEC_FLAGS: frozenset[str] = frozenset({"-exec", "-execdir", "-ok", "-okdi
 _FIND_ROOT_STARTS: frozenset[str] = DANGEROUS_RM_OPERANDS - {".", "./", "*"}
 
 
-def _find_starts_at_root(tokens: list[str]) -> bool:
-    """True when a ``find`` start path is ``/``, ``~``, ``$HOME`` or a system root."""
+# A user's home directory spelled as an absolute path.
+_ABS_HOME_DIR_RE = re.compile(r"^/(?:Users|home)/[^/]+/?$|^/(?:var/)?root/?$")
+# The working tree or a parent of it: ``.``, ``..``, ``../..``.
+_FIND_TREE_START_RE = re.compile(r"^\.\.?(?:/\.\.)*/?$")
+# Predicates that narrow what a ``find`` matches. A delete without one takes
+# the whole tree.
+_FIND_FILTER_PREDICATES: frozenset[str] = frozenset(
+    {"-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex"}
+    | {"-iregex", "-type", "-xtype", "-mtime", "-mmin", "-atime", "-amin", "-ctime"}
+    | {"-cmin", "-size", "-empty", "-user", "-group", "-uid", "-gid", "-perm"}
+    | {"-lname", "-ilname", "-inum", "-links", "-samefile", "-nouser", "-nogroup"}
+    | {"-used", "-readable", "-writable", "-executable", "-context", "-fstype"}
+)
+_FIND_DELETE_HEADS: frozenset[str] = frozenset({"rm", "unlink", "shred", "rmdir", "srm"})
+
+
+def _find_start_paths(tokens: list[str]) -> tuple[list[str], int] | None:
+    """``(start paths, index of the expression)`` for a ``find`` in ``tokens``."""
     start = next((i + 1 for i, t in enumerate(tokens) if _basename(t) == "find"), None)
     if start is None:
+        return None
+    end = start
+    while end < len(tokens) and not tokens[end].startswith(("-", "(", "!")):
+        end += 1
+    return tokens[start:end], end
+
+
+def _is_home_dir(path: str) -> bool:
+    if _ABS_HOME_DIR_RE.match(path):
+        return True
+    home = str(Path("~").expanduser()).rstrip("/")
+    return bool(home) and path.rstrip("/") == home
+
+
+def _find_starts_at_root(tokens: list[str]) -> bool:
+    """True when a ``find`` start path is ``/``, a home dir or a system root."""
+    found = _find_start_paths(tokens)
+    if found is None:
         return False
-    for tok in tokens[start:]:
-        if tok.startswith(("-", "(", "!")):
-            break
-        if tok in _FIND_ROOT_STARTS or tok.rstrip("/") in _FIND_ROOT_STARTS:
+    for tok in found[0]:
+        norm = _normalize_home_path(tok)
+        if norm in _FIND_ROOT_STARTS or norm.rstrip("/") in _FIND_ROOT_STARTS:
+            return True
+        if _is_home_dir(norm):
             return True
     return False
+
+
+def _find_unfiltered_tree_delete(tokens: list[str]) -> bool:
+    """True for a ``find`` that deletes all of ``.`` / ``..`` with no filter.
+
+    ``find . -delete`` and ``find .. -exec rm -rf {} +`` take the whole tree;
+    ``find . -name '*.pyc' -delete`` narrows it first and is not matched.
+    """
+    found = _find_start_paths(tokens)
+    if found is None:
+        return False
+    paths, expr = found
+    if not all(_FIND_TREE_START_RE.match(p) for p in paths or ["."]):
+        return False
+    rest = tokens[expr:]
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok in _FIND_EXEC_FLAGS:
+            while i < len(rest) and rest[i] not in {";", "\\;", "+"}:
+                i += 1
+        elif tok in _FIND_FILTER_PREDICATES or tok.startswith("-newer"):
+            return False
+        i += 1
+    if "-delete" in rest:
+        return True
+    return any(
+        _basename(payload.split()[0]) in _FIND_DELETE_HEADS for payload in _find_exec_payloads(rest)
+    )
 
 
 def _payload_tokens(segment: str) -> list[str]:
@@ -7029,46 +7258,108 @@ def _find_exec_payloads(tokens: list[str]) -> list[str]:
 
 # Options that take a value, so the host / container is not mistaken for one.
 _SSH_VALUE_FLAGS: frozenset[str] = frozenset(
-    {"-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L", "-l", "-m"}
-    | {"-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w"}
+    {"-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L", "-l", "-m"}
+    | {"-O", "-o", "-P", "-p", "-Q", "-R", "-S", "-W", "-w"}
 )
 _EXEC_VALUE_FLAGS: frozenset[str] = frozenset(
     {"-e", "--env", "--env-file", "-u", "--user", "-w", "--workdir", "--detach-keys"}
-    | {"-c", "--container", "-n", "--namespace"}
+    | {"-c", "--container", "-n", "--namespace", "--index"}
 )
+# nsenter options whose value is the next word (the namespace flags take an
+# optional ``=file`` attached, never a separate word).
+_NSENTER_VALUE_FLAGS: frozenset[str] = frozenset(
+    {"-t", "--target", "-S", "--setuid", "-G", "--setgid"}
+)
+_CONTAINER_CLIS: frozenset[str] = frozenset({"docker", "podman", "lxc", "kubectl"})
+_COMPOSE_CLIS: frozenset[str] = frozenset({"docker-compose", "podman-compose"})
 
 
-def _remote_payload(tokens: list[str]) -> str | None:
-    """The command ``ssh host ...`` / ``docker|podman|kubectl exec ...`` would run."""
+def _container_exec_start(tokens: list[str]) -> int | None:
+    """Index of the word after ``exec`` in a container exec, else ``None``.
+
+    Covers ``docker exec``, ``docker container exec``, ``docker compose exec``,
+    ``kubectl exec`` and the podman / lxc / compose equivalents.
+    """
     if not tokens:
         return None
     head = _basename(tokens[0])
-    if head == "ssh":
-        value_flags, start = _SSH_VALUE_FLAGS, 1
-    elif head in {"docker", "podman", "lxc", "kubectl"} and tokens[1:2] == ["exec"]:
-        if "--" in tokens:
-            return shlex.join(tokens[tokens.index("--") + 1 :]) or None
-        value_flags, start = _EXEC_VALUE_FLAGS, 2
-    else:
-        return None
+    if (head in _CONTAINER_CLIS or head in _COMPOSE_CLIS) and tokens[1:2] == ["exec"]:
+        return 2
+    if head in {"docker", "podman"} and tokens[1:2] in (["container"], ["compose"]):
+        return 3 if tokens[2:3] == ["exec"] else None
+    return None
+
+
+def _skip_options(tokens: list[str], start: int, value_flags: frozenset[str]) -> int:
+    """Index of the first operand at or after ``start``; ``--`` ends the options."""
     i = start
     while i < len(tokens) and tokens[i].startswith("-"):
+        if tokens[i] == "--":
+            return i + 1
         i += 2 if tokens[i] in value_flags else 1
+    return i
+
+
+def _remote_payload(tokens: list[str]) -> str | None:
+    """The command ``ssh host ...``, a container ``exec`` or ``nsenter`` would run."""
+    if not tokens:
+        return None
+    head = _basename(tokens[0])
+    if head == "nsenter":
+        rest = tokens[_skip_options(tokens, 1, _NSENTER_VALUE_FLAGS) :]
+        return shlex.join(rest) or None
+    exec_start = _container_exec_start(tokens)
+    if head == "ssh":
+        value_flags, start = _SSH_VALUE_FLAGS, 1
+    elif exec_start is not None:
+        if "--" in tokens:
+            return shlex.join(tokens[tokens.index("--") + 1 :]) or None
+        value_flags, start = _EXEC_VALUE_FLAGS, exec_start
+    else:
+        return None
+    i = _skip_options(tokens, start, value_flags)
     rest = tokens[i + 1 :]  # tokens[i] is the host / container
+    if rest[:1] == ["--"]:
+        rest = rest[1:]
     if not rest:
         return None
     # ssh hands the words to the remote shell as one string; exec runs argv.
     return " ".join(rest) if head == "ssh" else shlex.join(rest)
 
 
+# A ``$`` expansion (variable, positional, substitution) inside a ``-c`` string.
+_DOLLAR_EXPANSION_RE = re.compile(r"\$[A-Za-z_{(0-9@*#?!$-]")
+
+
+def _opaque_shell_string(segment: str) -> str | None:
+    """A shell ``-c`` string in ``segment`` whose code guard cannot read, else ``None``.
+
+    Missing or empty, an ``xargs -I{}`` / ``find -exec`` ``{}`` placeholder, or
+    built from ``$`` expansions (``bash -c "$X"``, ``sh -c '"$@"' _ ...``): the
+    code that runs is only known at run time, so there is nothing to floor-check.
+    """
+    tokens = _payload_tokens(segment.strip())
+    for i, tok in enumerate(tokens):
+        if _basename(tok) not in DANGEROUS_SHELL_WRAPPERS:
+            continue
+        has_c, payload = _shell_c_payload(tokens, i + 1)
+        if not has_c:
+            continue
+        if payload is None or not payload.strip():
+            return ""
+        if "{}" in payload or _DOLLAR_EXPANSION_RE.search(payload):
+            return payload
+    return None
+
+
 def _hidden_bodies(segment: str) -> list[str]:
     """Payloads in ``segment`` the per-segment matchers cannot see.
 
     The body of an inline function definition, a ``trap`` handler, a shell
-    ``-c`` string, and the command an ``ssh`` / ``docker exec`` /
-    ``kubectl exec`` runs elsewhere. Only read in auto mode after a STEER rule
-    over one of these shapes was skipped; each body is then floor-checked as
-    a command.
+    ``-c`` string, and the command an ``ssh`` / container ``exec`` /
+    ``nsenter`` runs elsewhere. Only read in auto mode after a STEER rule over
+    one of these shapes was skipped; each body is then floor-checked as a
+    command.
     """
     stripped = segment.strip()
     bodies: list[str] = []
@@ -7076,21 +7367,276 @@ def _hidden_bodies(segment: str) -> list[str]:
     if m:
         bodies.append(stripped[m.end() :].strip().removesuffix("}").removesuffix(")"))
     tokens = _payload_tokens(stripped)
-    if len(tokens) > 1 and tokens[0] == "trap" and tokens[1] not in {"-", "-l", "-p"}:
-        bodies.append(tokens[1])
+    if tokens[:1] == ["trap"]:
+        args = tokens[2:] if tokens[1:2] == ["--"] else tokens[1:]
+        if args and args[0] not in {"-", "-l", "-p"}:
+            bodies.append(args[0])
     for i, tok in enumerate(tokens):
         if _basename(tok) not in DANGEROUS_SHELL_WRAPPERS:
             continue
-        for j in range(i + 1, min(i + 4, len(tokens) - 1)):
-            if _SHELL_C_FLAGS_RE.match(tokens[j]):
-                bodies.append(tokens[j + 1])
-                break
-            if not tokens[j].startswith("-"):
-                break
+        has_c, payload = _shell_c_payload(tokens, i + 1)
+        if has_c and payload:
+            bodies.append(payload)
     remote = _remote_payload(tokens)
     if remote is not None:
         bodies.append(remote)
     return [b for b in dict.fromkeys(b.strip() for b in bodies) if b and b != stripped]
+
+
+# --- Code read from stdin (a shell fed by a here-string / process substitution) ---
+
+# A redirect word: the operator alone (its target is the next word) or with the
+# target attached (``<&3``, ``3<<<x``, ``>out``).
+_REDIRECT_WORD_RE = re.compile(r"^(?:\d*|&)(?:<<<|<<-?|<>|<&|>&|>>|>\||<|>)(.*)$")
+
+
+def _runs_stdin_as_code(segment: str) -> bool:
+    """True when ``segment`` is a shell or interpreter with no ``-c`` and no script.
+
+    Such a process reads its program from stdin, so a here-string or process
+    substitution anywhere in the command (``{ bash; } <<< '...'``,
+    ``exec 3<<< '...'; sh <&3``) is code it runs.
+    """
+    # Blank substitution spans first so a process substitution's body (``<(echo
+    # 'rm -rf ~')``) is not read as a script argument.
+    text = list(segment)
+    for _kind, start, _body, close in _construct_spans(_shell_code_mask(segment)):
+        end = min(close + 1, len(text))
+        text[start:end] = [" "] * (end - start)
+    words: list[str] = []
+    tokens = _payload_tokens("".join(text).strip().lstrip("({!").strip())
+    i = 0
+    while i < len(tokens):
+        m = _REDIRECT_WORD_RE.match(tokens[i])
+        if m:
+            i += 1 if m.group(1) else 2
+            continue
+        words.append(tokens[i])
+        i += 1
+    if words[:1] == ["exec"]:
+        words = words[1:]
+    if not words:
+        return False
+    head = _basename(words[0].rstrip(");}"))
+    if head not in DANGEROUS_SHELL_WRAPPERS and head not in DANGEROUS_INTERPRETERS:
+        return False
+    j = 1
+    while j < len(words):
+        word = words[j]
+        if word == "--":
+            j += 1
+            break
+        if word in _SHELL_VALUE_OPTS:
+            j += 2
+            continue
+        if len(word) > 1 and word[0] in "-+":
+            if word[0] == "-" and ("c" in word[1:] or word in INTERPRETER_EVAL_FLAGS):
+                return False
+            j += 1
+            continue
+        break
+    return j >= len(words) or words[j] in {"-", "/dev/stdin", "/dev/fd/0"}
+
+
+# --- awk running a command (``system()``, ``print | "cmd"``, ``"cmd" | getline``) ---
+
+_AWK_HEADS: frozenset[str] = frozenset({"awk", "gawk", "mawk", "nawk"})
+_AWK_VALUE_OPTS: frozenset[str] = frozenset(
+    {"-F", "-v", "-f", "--file", "--assign", "--field-separator"}
+    | {"-i", "--include", "-l", "--load"}
+)
+_AWK_SYSTEM_RE = re.compile(r"\bsystem\s*\(")
+# Each command is a full floor check; past this many the program is denied
+# instead of checked, so one awk string can't drive unbounded work.
+_AWK_MAX_COMMANDS = 16
+# After these a ``/`` opens a regex literal, not a division.
+_AWK_REGEX_PRECEDERS = frozenset("(,{;!~&|\n}")
+
+
+def _awk_programs(tokens: list[str], start: int) -> list[str]:
+    """Program texts of an awk whose options begin at ``tokens[start]``.
+
+    ``-e`` / ``--source`` texts, else the first operand. A program read from
+    a file (``-f prog.awk``) is not visible and is not returned.
+    """
+    programs: list[str] = []
+    from_file = False
+    i = start
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok in {"-e", "--source"}:
+            programs.extend(tokens[i + 1 : i + 2])
+            i += 2
+            continue
+        if tok.startswith("--source="):
+            programs.append(tok.split("=", 1)[1])
+        from_file = from_file or tok in {"-f", "--file"} or tok.startswith("--file=")
+        if tok in _AWK_VALUE_OPTS:
+            i += 2
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            i += 1
+            continue
+        break
+    if not programs and not from_file and i < len(tokens):
+        programs.append(tokens[i])
+    return programs
+
+
+def _awk_string_end(prog: str, quote: int) -> int:
+    """Index of the ``"`` closing the awk string opened at ``quote``, or ``-1``."""
+    j = quote + 1
+    while j < len(prog):
+        if prog[j] == "\\":
+            j += 2
+            continue
+        if prog[j] == '"':
+            return j
+        j += 1
+    return -1
+
+
+def _awk_mask(prog: str) -> str:
+    """``prog`` with string, regex and comment contents blanked (length-preserving)."""
+    out = list(prog)
+    i, n = 0, len(prog)
+    last = "\n"
+    while i < n:
+        c = prog[i]
+        if c == '"':
+            end = _awk_string_end(prog, i)
+            end = n - 1 if end < 0 else end
+            out[i + 1 : end] = [" "] * (end - i - 1)
+            i, last = end + 1, '"'
+            continue
+        if c == "/" and last in _AWK_REGEX_PRECEDERS:
+            j = i + 1
+            while j < n and prog[j] != "/":
+                j += 2 if prog[j] == "\\" else 1
+            out[i + 1 : j] = [" "] * (max(j, i + 1) - i - 1)
+            i, last = j + 1, "/"
+            continue
+        if c == "#":
+            j = prog.find("\n", i)
+            j = n if j < 0 else j
+            out[i:j] = [" "] * (j - i)
+            i = j
+            continue
+        if not c.isspace():
+            last = c
+        i += 1
+    return "".join(out)
+
+
+def _awk_unescape(text: str) -> str:
+    escapes = {"n": "\n", "t": "\t"}
+    return re.sub(r"\\(.)", lambda m: escapes.get(m.group(1), m.group(1)), text)
+
+
+def _awk_literal_at(prog: str, masked: str, start: int) -> str | None:
+    """The string literal that is the whole expression starting at ``start``."""
+    k = start
+    while k < len(prog) and prog[k] in " \t":
+        k += 1
+    if k >= len(prog) or prog[k] != '"':
+        return None
+    end = _awk_string_end(prog, k)
+    if end < 0:
+        return None
+    after = masked[end + 1 :].lstrip(" \t")
+    if after and after[0] not in ";})\n,|>":
+        return None  # concatenated with more text, built at run time
+    return _awk_unescape(prog[k + 1 : end])
+
+
+def _awk_literal_before(prog: str, masked: str, end: int) -> str | None:
+    """The string literal that is the whole expression ending just before ``end``."""
+    k = end - 1
+    while k >= 0 and prog[k] in " \t":
+        k -= 1
+    if k < 0 or prog[k] != '"':
+        return None
+    opening = masked.rfind('"', 0, k)
+    if opening < 0:
+        return None
+    before = masked[:opening].rstrip(" \t")
+    if before and before[-1] not in "({;\n!&|":
+        return None
+    return _awk_unescape(prog[opening + 1 : k])
+
+
+def _awk_commands(prog: str) -> tuple[list[str], str | None]:
+    """``(literal commands, first command built at run time)`` an awk program runs.
+
+    A command awk prints into (``print | "sh"``, ``print |& "sh"``) reads awk's
+    output on stdin, so it is returned as ``cat | <cmd>`` to keep a pipe into a
+    shell on the floor.
+    """
+    masked = _awk_mask(prog)
+    literals: list[str] = []
+    for m in _AWK_SYSTEM_RE.finditer(masked):
+        close = _close_paren(masked, m.end() - 1)
+        lit = _awk_literal_at(prog, masked, m.end())
+        if lit is None or masked[m.end() : close].count('"') > 2:
+            return literals, prog[m.start() : close + 1]
+        literals.append(lit)
+    for i, c in enumerate(masked):
+        if c != "|" or masked[i - 1 : i] == "|" or masked[i + 1 : i + 2] == "|":
+            continue
+        op_end = i + 2 if masked[i + 1 : i + 2] == "&" else i + 1
+        reads_output = not masked[op_end:].lstrip().startswith("getline")
+        if reads_output:
+            lit = _awk_literal_at(prog, masked, op_end)
+        else:
+            lit = _awk_literal_before(prog, masked, i)
+        if lit is None:
+            return literals, prog[max(0, i - 20) : i + 20].strip()
+        literals.append(f"cat | {lit}" if reads_output else lit)
+    return literals, None
+
+
+def _awk_floor(
+    segment: str, command: str, *, allowlist: Allowlist, original_command: str
+) -> dict[str, str] | None:
+    """Deny when an awk program in ``segment`` runs a command on the floor.
+
+    A literal command (``system("rm -rf ~")``, ``print | "sh"``) is checked as
+    a command of its own; one built at run time (``system($0)``) can't be
+    read, so it is denied as an executed construct. Checked in every mode.
+    """
+    tokens = _payload_tokens(segment.strip())
+    for i, tok in enumerate(tokens):
+        if _basename(tok) not in _AWK_HEADS:
+            continue
+        for prog in _awk_programs(tokens, i + 1):
+            literals, built = _awk_commands(prog)
+            literals = list(dict.fromkeys(literals))
+            if built is None and len(literals) > _AWK_MAX_COMMANDS:
+                built = f"{len(literals)} separate commands"
+            if built is not None:
+                body = (
+                    f"`{segment[:_SEGMENT_DISPLAY_TRUNC]}` has awk run a command built at "
+                    f"run time (`{built}`), which guard can't read. Write the commands to a "
+                    "script file and run that, or pipe awk's output to the next command"
+                )
+                deny = _deny(_format_deny_reason("bash.dangerous_construct", body))
+                bypass = _maybe_allow_via_allowlist(
+                    allowlist, "bash.dangerous_construct", original_command, deny
+                )
+                if bypass is not None:
+                    return bypass
+                _log_local(
+                    command, "deny", "dangerous-construct (bash.dangerous_construct:executed)"
+                )
+                return deny
+            for literal in literals:
+                hit = _floor_check(literal, command)
+                if hit is not None:
+                    return hit
+    return None
 
 
 def _pre_evaluate_dangerous(
@@ -7118,6 +7664,9 @@ def _pre_evaluate_dangerous(
     if _is_pipe_to_shell(segments, seg_ops):
         _log_local(command, "deny", "pipe-to-shell")
         return _deny(_PIPE_TO_SHELL_REASON)
+    # A shell reading its program from stdin runs whatever a here-string or
+    # process substitution elsewhere in the command feeds it.
+    stdin_runner = any(_runs_stdin_as_code(seg) for seg in segments)
     for segment in segments:
         # NEW-Q: mask quoted string literals first so a ``>`` / ``|`` / ``$(``
         # that merely appears inside quotes (``grep "a > b"``) is not mistaken
@@ -7134,7 +7683,8 @@ def _pre_evaluate_dangerous(
             if _substitution_only_safe(segment, 0):
                 continue
             spans = _construct_spans(masked)
-            executed = _executes_construct(segment, masked, spans)
+            feeds_stdin = "<<<" in masked or any(kind == "process_in" for kind, *_ in spans)
+            executed = _executes_construct(segment, masked, spans) or (stdin_runner and feeds_stdin)
             target = None if executed else _sensitive_redirect_target(segment, masked, spans)
             tier_key = "bash.dangerous_construct"
             if executed:
@@ -7171,7 +7721,9 @@ def _pre_evaluate_dangerous(
             cand_base = cand_tokens[0] if cand_tokens else ""
             if cand_base not in CONDITIONAL_SAFE or _is_conditional_safe(cand, cand_base):
                 continue
-            root = cand_base == "find" and _find_starts_at_root(cand_tokens)
+            root = cand_base == "find" and (
+                _find_starts_at_root(cand_tokens) or _find_unfiltered_tree_delete(cand_tokens)
+            )
             tier_key = (
                 "bash.conditional_denied_flag:root" if root else "bash.conditional_denied_flag"
             )

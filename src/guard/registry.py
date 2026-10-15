@@ -1541,11 +1541,15 @@ RULE_TIERS: dict[str, TierEntry] = {
     "bash.eval_builtin": TierEntry(_F, "eval runs an arbitrary string as code"),
     "bash.dangerous_construct:executed": TierEntry(
         _F,
-        'substitution output run as code (bash -c "$(curl ...)", source <(...), $(...) as the command)',
+        'output run as code (bash -c "$(curl ...)", source <(...), a shell fed by <<<), '
+        "or awk running a command built at run time",
     ),
     "bash.dangerous_construct:sensitive_target": TierEntry(
         _F,
-        "> / >> into ~/.ssh, a shell rc file, /etc or a launch agent (same set as bash.sensitive_write)",
+        "> / >> / >| into ~/.ssh, a shell rc file, /etc, a launch agent, git config or a git hook",
+    ),
+    "bash.shell_wrapper:opaque": TierEntry(
+        _F, "-c string that is empty, a {} placeholder or built from $ expansions"
     ),
     "bash.env_split_string": TierEntry(_F, "env -S rebuilds argv guard cannot see"),
     "bash.wrapper_stacking": TierEntry(_F, "nesting past the unwrap limit hides the inner command"),
@@ -1554,7 +1558,9 @@ RULE_TIERS: dict[str, TierEntry] = {
         _F, "a function that pipes into or backgrounds itself exhausts the process table"
     ),
     "bash.conditional_denied_flag:root": TierEntry(
-        _F, "find -delete / -exec rooted at /, ~, $HOME or a system directory"
+        _F,
+        "find -delete / -exec rooted at /, a home dir or a system directory, "
+        "or an unfiltered delete of . or ..",
     ),
     "bash.disk_destruction": TierEntry(_F, "disk / partition / filesystem destruction"),
     "bash.db_cli_destructive": TierEntry(_F, "irreversible database destruction"),
@@ -1587,10 +1593,15 @@ RULE_TIERS: dict[str, TierEntry] = {
     "bash.sensitive_write": TierEntry(
         _F, "writes to ~/.ssh, shell rc files, /etc or launch agents"
     ),
-    # --- bash_command_validator: STEER ---
     "bash.admin_default_deny": TierEntry(
-        _S, "cloud CLI verb off the read-only catalog; destructive verbs are FLOOR rules"
+        _F,
+        "cloud CLI verb off the read-only catalog: secret reads, IAM grants, public access, key minting",
     ),
+    "bash.var_expanded_head": TierEntry(
+        _F, "variable-named command ($R, $SHELL, $1, $@); what runs is unknowable"
+    ),
+    "bash.glob_head": TierEntry(_F, "glob in the command name (/bin/r?) hides which binary runs"),
+    # --- bash_command_validator: STEER ---
     "bash.admin_unknown_flag_strict": TierEntry(_S, "lockdown-only unknown-flag escalation"),
     "bash.conditional_denied_flag": TierEntry(_S, "find -exec / -delete, yq -i on a project path"),
     "bash.dangerous_construct": TierEntry(
@@ -1601,13 +1612,9 @@ RULE_TIERS: dict[str, TierEntry] = {
     "bash.exec_wrapper": TierEntry(_S, "the peeled inner command is matched by its own rule"),
     "bash.function_definition": TierEntry(_S, "shell function; the body is still floor-checked"),
     "bash.trap_exploit": TierEntry(_S, "trap handler; the handler body is still floor-checked"),
-    "bash.var_expanded_head": TierEntry(_S, "variable-named command"),
-    "bash.glob_head": TierEntry(
-        _S, "glob in the command name, same class as a variable-named command"
-    ),
     "bash.shell_wrapper": TierEntry(_S, "bash -c payload is re-split and floor-checked"),
     "bash.remote_shell_wrapper": TierEntry(
-        _S, "ssh / docker exec / kubectl exec; the remote payload is still floor-checked"
+        _S, "ssh / container exec / nsenter; the remote payload is still floor-checked"
     ),
     "bash.git_ref_mutation": TierEntry(_S, "local branch / tag / remote-config write"),
     "bash.git_worktree_add": TierEntry(

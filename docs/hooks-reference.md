@@ -51,15 +51,22 @@ guard mode:
   the FLOOR rules deny (see above); after skipping a STEER match the
   validator keeps scanning, and it runs any payload the STEER shape was
   hiding (a `$(...)` / `<(...)` body, a `bash -c` string, a function body, a
-  `trap` handler, a `find -exec` command, an `ssh` / `docker exec` command)
-  through the floor on its own.
+  `trap` handler, a `find -exec` command, an `ssh` / container `exec` /
+  `nsenter` command) through the floor on its own. A `-c` string it cannot
+  read (empty, a `{}` placeholder, or built from `$` expansions) is denied.
 
 In both modes the validator:
 
 - Strips leading `#` comment lines.
 - Splits on `|`, `&&`, `||`, `;`, and newlines -- quote- and
   substitution-aware, so operators inside `$(...)`, backticks, and quoted
-  literals do not split.
+  literals do not split. `>|` is a redirect, not a pipe.
+- Peels wrappers before matching, options included: `env -i` / `-u NAME` /
+  `-C DIR` / `--`, `bash -o pipefail -c`, `ssh host --`, so the wrapped
+  command meets its own rule.
+- Checks the commands an awk program runs (`system("...")`,
+  `print | "..."`, `"..." | getline`) as commands of their own, and denies
+  one built at run time (`system($0)`).
 - Enforces a dangerous floor regardless of mode: destructive commands
   (`rm -rf`, `dd`, `mkfs`, fork bombs), pipe-to-shell (`curl ... | sh`),
   inline interpreter code (`python -c`, `node -e` / `-p`, `perl -pe`,
@@ -86,8 +93,15 @@ A `bash.dangerous_construct` deny names the construct that actually matched
 (command substitution, process substitution, a here-string, an output
 redirect) and the route to take instead. A plain `>` / `>>` redirect is
 steered to the Write or Edit tool, or to a pipe. Output run as code
-(`bash <(curl ...)`, `bash -c "$(curl ...)"`) and a redirect into a sensitive
-path (`~/.ssh`, a shell rc file, `/etc`) are FLOOR shapes of the same rule.
+(`bash <(curl ...)`, `bash -c "$(curl ...)"`, a shell reading a here-string
+or process substitution on stdin such as `{ bash; } <<< '...'`) and a
+redirect into a sensitive path (`~/.ssh`, a shell rc file, `/etc`,
+`.git/config`, `.git/hooks/`, `~/.gitconfig`) are FLOOR shapes of the same
+rule.
+
+`git config` reads (`--get`, `--get-all`, `--list`, `get`, a lone key) are
+not config injection; a write to an exec-sink key denies in every spelling
+(`--file <path> <key> <value>`, `--type path`, `set <key>`).
 
 ### Example block
 
