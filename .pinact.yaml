@@ -1,0 +1,7 @@
+version: 3
+rules:
+  # TracineHQ/plugins has no tags, so the cut-release reusable workflow pin
+  # can't carry a version comment. It stays SHA-pinned (zizmor enforces that).
+  - ignore: true
+    conditions:
+      - expr: ActionRepoFullName == "TracineHQ/plugins"
