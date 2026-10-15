@@ -62,8 +62,11 @@ filter (`cat > notes.md <<'EOF'`) is taken out before the command is split into
 lines, so a prose or config line (`at noon`, `[tool.ruff]`, a backtick fence)
 is not read as a command. A body stays commands when the command can run it
 as shell (`bash <<EOF`, `ssh host <<EOF`, `script` or `expect` on the
-heredoc, a `cat > x.sh <<EOF` followed by `bash x.sh`). In an unquoted body,
-`$(...)` and backticks still run and are checked.
+heredoc, `xargs` turning its words into a command line, a `cat > x.sh <<EOF`
+followed by `bash x.sh`). A body that is an interpreter's program on stdin
+(`python3 - <<'EOF'`) is that interpreter's code, judged by its own rule, even
+when a shell runs elsewhere in the command. In an unquoted body, `$(...)` and
+backticks still run and are checked.
 
 Every other permission mode, and lockdown in any permission mode, denies on
 both tiers exactly as before. Allowlist overrides behave the same in every

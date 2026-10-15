@@ -63,9 +63,10 @@ adheres to [Semantic Versioning](https://semver.org/).
     `f 2>&1` and `f | head` pass, and its deny says "fork bomb".
   - Heredoc bodies are data. A body written to a file or fed to a filter no
     longer trips line-based rules (a code fence, a lone `]`, prose starting
-    "at"). A heredoc read by a shell, `ssh` or `docker exec` is still
-    commands, and `$(...)` / backticks in an unquoted body are still checked
-    against the floor.
+    "at"). A heredoc read by a shell, `ssh`, `docker exec` or `xargs` is
+    still commands, and `$(...)` / backticks in an unquoted body are still
+    checked against the floor. An interpreter's program on stdin
+    (`python3 - <<'EOF'`) is judged as that program, not line by line.
   - A `-c` string's command heads are found with its quotes and `$(...)`
     intact (`sh -c 'f=$(basename "$1"); ...'`).
   - An awk command that starts with a literal (`cmd = "wc -l " $1`) is

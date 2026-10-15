@@ -6036,15 +6036,15 @@ _HEREDOC_DELIM_RE = re.compile(
 )
 
 
-def _heredoc_ops_in_line(line: str) -> list[tuple[str, bool, bool, bool]]:
-    """``(delimiter, tab_strip, quoted, nested)`` for each heredoc operator on ``line``.
+def _heredoc_ops_in_line(line: str) -> list[tuple[str, bool, bool, bool, int]]:
+    """``(delimiter, tab_strip, quoted, nested, index)`` for each heredoc operator on ``line``.
 
     An operator counts outside quotes, and inside a ``$(...)`` / ``<(...)``
     even within double quotes (``git commit -m "$(cat <<'EOF'``), where it is
     ``nested``. ``<<<`` is a here-string, a ``<<`` inside ``((...))`` is a
     shift, and a ``#`` comment ends the line.
     """
-    ops: list[tuple[str, bool, bool, bool]] = []
+    ops: list[tuple[str, bool, bool, bool, int]] = []
     stack: list[str] = []
     i, n = 0, len(line)
     while i < n:
@@ -6087,7 +6087,7 @@ def _heredoc_ops_in_line(line: str) -> list[tuple[str, bool, bool, bool]]:
         elif m := _HEREDOC_DELIM_RE.match(line, i):
             quoted_word = m.group(2) or m.group(3) or m.group(4)
             delim = quoted_word or m.group(5)
-            ops.append((delim, m.group(1) == "-", quoted_word is not None, bool(stack)))
+            ops.append((delim, m.group(1) == "-", quoted_word is not None, bool(stack), i))
             step = m.end() - i
         i += step
     return ops
@@ -6121,6 +6121,38 @@ def _runs_heredoc_as_shell(skeleton: str) -> bool:
             if head in EVAL_BUILTINS or head.startswith(("$", "`")):
                 return True
     return False
+
+
+def _heredoc_role(line: str, index: int) -> str:
+    """How the command on ``line`` uses the heredoc whose operator is at ``line[index]``.
+
+    ``"shell"`` when its own command or pipeline may run the body as commands
+    (see ``_runs_heredoc_as_shell``, plus ``xargs``, which turns body words
+    into a command line), ``"program"`` when the body is an interpreter's
+    program on stdin (``python3 - <<'EOF'``), else ``"data"``. A heredoc on
+    another descriptor (``3<<EOF``) or on a group or loop (``{ ...; } <<EOF``,
+    ``done <<EOF``) is never a program.
+    """
+    before = split_pipeline_with_ops(line[:index])
+    after = split_pipeline_with_ops(line[index:])
+    owner = " ".join(
+        p for p in (before[-1][1] if before else "", after[0][1] if after else "") if p
+    )
+    pipeline = [owner]
+    for op, seg in after[1:]:
+        if op != "|":
+            break
+        pipeline.append(seg)
+    for seg in pipeline:
+        if _runs_heredoc_as_shell(seg) or any(
+            _basename(t) == "xargs" for t in _payload_tokens(seg)
+        ):
+            return "shell"
+    prefix = line[:index]
+    glued = prefix.split()[-1] if prefix.strip() and not prefix[-1].isspace() else ""
+    if glued.isdigit() or prefix.rstrip().endswith(("}", ")")):
+        return "data"
+    return "program" if _pipe_consumer_runs_code(owner) else "data"
 
 
 def _heredoc_body_substitutions(body: str) -> tuple[bool, list[str]]:
@@ -6162,9 +6194,10 @@ def _heredoc_skeleton(command: str) -> tuple[str, frozenset[str]]:
     Bodies are split into lines along with the rest of the command, so a
     prose or config line (``at noon``, ``[tool.ruff]``, a backtick fence)
     would read as a command. A body is data unless the command can run it as
-    shell (see ``_runs_heredoc_as_shell``): then every body is kept as
-    commands. An interpreter reading the body as its program (``python3 -
-    <<'EOF'``) is judged on the program by its own rule, not line by line.
+    shell (see ``_heredoc_role`` and ``_runs_heredoc_as_shell``): then every
+    body is kept as commands, except one that is an interpreter's program on
+    stdin (``python3 - <<'EOF'``), which is judged by its own rule, not line
+    by line.
 
     In an unquoted body, ``$(...)`` and backticks still run, so each is kept as
     a ``: <substitution>`` line of its own, and the delimiter is returned
@@ -6173,13 +6206,12 @@ def _heredoc_skeleton(command: str) -> tuple[str, frozenset[str]]:
     unterminated heredoc leaves the rest of the command as it is.
     """
     lines = command.split("\n")
-    found: list[
-        tuple[int, int, str, bool, bool]
-    ] = []  # body start, terminator, delim, quoted, nested
+    # body start, terminator, delimiter, quoted, nested, role
+    found: list[tuple[int, int, str, bool, bool, str]] = []
     i, n = 0, len(lines)
     while i < n:
         cursor = i + 1
-        for delim, tab_strip, quoted, nested in _heredoc_ops_in_line(lines[i]):
+        for delim, tab_strip, quoted, nested, index in _heredoc_ops_in_line(lines[i]):
             term = next(
                 (
                     k
@@ -6191,13 +6223,42 @@ def _heredoc_skeleton(command: str) -> tuple[str, frozenset[str]]:
             if term is None:
                 cursor = n
                 break
-            found.append((cursor, term, delim, quoted, nested))
+            role = "data" if nested else _heredoc_role(lines[i], index)
+            found.append((cursor, term, delim, quoted, nested, role))
             cursor = term + 1
         i = cursor
     if not found:
         return command, frozenset()
-    dropped = {k for start, term, *_ in found for k in range(start, term + 1)}
-    joins = {term + 1 for _start, term, _d, _q, nested in found if nested}
+    dynamic = frozenset(
+        delim
+        for start, term, delim, quoted, *_ in found
+        if not quoted and _heredoc_body_substitutions("\n".join(lines[start:term]))[0]
+    )
+    skeleton = "\n".join(_drop_heredoc_bodies(lines, found))
+    if any(h[5] == "shell" for h in found) or _runs_heredoc_as_shell(skeleton):
+        found = [h for h in found if h[5] == "program"]
+        if not found:
+            return command, dynamic
+        skeleton = "\n".join(_drop_heredoc_bodies(lines, found))
+    extra = [
+        f": {span}"
+        for start, term, _delim, quoted, *_ in found
+        if not quoted
+        for span in _heredoc_body_substitutions("\n".join(lines[start:term]))[1]
+    ]
+    return "\n".join([skeleton, *extra]), dynamic
+
+
+def _drop_heredoc_bodies(
+    lines: list[str], bodies: list[tuple[int, int, str, bool, bool, str]]
+) -> list[str]:
+    """``lines`` without the given heredoc bodies and terminators.
+
+    The line after a nested heredoc's terminator (``)"`` closing ``$(cat
+    <<'EOF'``) is joined back onto the line before it.
+    """
+    dropped = {k for start, term, *_ in bodies for k in range(start, term + 1)}
+    joins = {term + 1 for _start, term, _d, _q, nested, _r in bodies if nested}
     kept: list[str] = []
     for k, line in enumerate(lines):
         if k in dropped:
@@ -6206,19 +6267,7 @@ def _heredoc_skeleton(command: str) -> tuple[str, frozenset[str]]:
             kept[-1] = f"{kept[-1]} {line}"
         else:
             kept.append(line)
-    dynamic: set[str] = set()
-    extra: list[str] = []
-    for start, term, delim, quoted, _nested in found:
-        if quoted:
-            continue
-        expands, spans = _heredoc_body_substitutions("\n".join(lines[start:term]))
-        if expands:
-            dynamic.add(delim)
-        extra.extend(f": {span}" for span in spans)
-    skeleton = "\n".join(kept)
-    if _runs_heredoc_as_shell(skeleton):
-        return command, frozenset(dynamic)
-    return "\n".join([skeleton, *extra]), frozenset(dynamic)
+    return kept
 
 
 def _shell_code_mask(command: str) -> str:

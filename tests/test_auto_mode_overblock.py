@@ -33,6 +33,9 @@ PASSES_IN_AUTO: list[str] = [
     "cat <<'EOF' | wc -l\n$X\n[a]\nEOF",
     "cat > x.txt <<EOF\nbuilt on $(date)\nEOF",
     "git commit -m \"$(cat <<'EOF'\nFix the parser\n\nat noon\nEOF\n)\"",
+    # An interpreter's program stays its own even when a shell runs elsewhere.
+    "python3 - <<'PY'\nfor x in [\n    1,\n]:\n    print(x)\nPY\nbash -n run.sh",
+    'cd app && python3 - "$(date)" <<\'PY\' 2>&1; echo "exit=$?"\nimport sys\nprint(sys.argv[1:])\nPY\nsh -n x.sh',
     # 3. A -c string whose words hold quotes and substitutions.
     'xargs -I{} sh -c \'f=$(basename "$1"); echo "$f"\' _ {}',
     # 4. An awk command built from a literal head.
@@ -76,6 +79,11 @@ STILL_DENIES: list[str] = [
     "cat > /tmp/x.sh <<'EOF'\nrm -rf ~\nEOF\nbash /tmp/x.sh",
     "docker exec -i c sh <<'EOF'\nrm -rf /\nEOF",
     "script -q /dev/null <<'EOF'\nrm -rf ~\nEOF",
+    "cat <<'EOF' | xargs env\nrm -rf ~\nEOF",
+    "xargs -n3 command <<'EOF'\nrm -rf ~\nEOF",
+    "{ bash; python3 -; } <<'EOF'\nrm -rf ~\nEOF",
+    "while read -r l; do $l; done <<'EOF'\nrm -rf ~\nEOF",
+    "python3 - <<'EOF' | sh\nprint('rm -rf ~')\nEOF",
     "source /dev/stdin <<'EOF'\nrm -rf ~\nEOF",
     "bash -c \"$(cat <<'EOF'\nrm -rf ~\nEOF\n)\"",
     # A ``<<`` that is not a heredoc leaves the next lines as commands.
