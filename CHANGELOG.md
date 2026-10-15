@@ -49,12 +49,19 @@ adheres to [Semantic Versioning](https://semver.org/).
   `osascript -e`, `ruby -e`, `perl -e`) is STEER in `auto` under
   `bash.dangerous_interpreter:literal`: it is as visible as a script file,
   which already passes. A program from a pipe, a variable, a substitution or
-  an unquoted heredoc that expands stays FLOOR. Default mode and `lockdown`
-  still deny it.
+  an unquoted heredoc that expands stays FLOOR, and so does one that evals
+  stdin (`cat s | python3 -c 'exec(sys.stdin.read())'`, `ruby -e 'eval
+  STDIN.read'`, `perl -ne 'eval'`). Each `osascript` `do shell script` string
+  (and `do script`, `write text`, JXA `doShellScript`) is floor-checked like a
+  `bash -c` string; one built at run time, `run script`, a raw Apple event and
+  JXA `$.system` deny. Default mode and `lockdown` still deny all of these.
 - Pipe-to-shell denies only when the consumer reads its program from stdin
-  (`curl ... | sh`, `cat s | python3`, `cat s | python3 -`). Piping data
+  (`curl ... | sh`, `cat s | python3`, `cat s | python3 -`). Piping local data
   into a script or module (`python3 tool.py`, `python3 -m json.tool`) passes
-  in every mode.
+  in every mode. Network output (`curl`, `wget`, `nc`, `ssh`, `gh api`, ...)
+  piped into any shell or interpreter, or fed to one through a substitution, is
+  denied whatever its arguments (`wget -qO- x | python3 tool.py`);
+  `| python3 -m json.tool` and `| jq` pass.
 
 ### Fixed
 

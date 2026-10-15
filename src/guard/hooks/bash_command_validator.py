@@ -5559,6 +5559,48 @@ _INTERPRETER_ALWAYS_DENY_KEYS = frozenset(
 )
 _LITERAL_PROGRAM_KEY = "bash.dangerous_interpreter:literal"
 
+# A literal program that evaluates what it reads on stdin runs code guard never
+# sees (``cat s | python3 -c 'exec(input())'``), so it stays FLOOR. Each family
+# has a code sink and a stdin source; a program with both is denied. perl and
+# ruby ``-n`` / ``-p`` loops read stdin into ``$_`` without naming it.
+_STDIN_EVAL_SINKS: dict[str, re.Pattern[str]] = {
+    "python": re.compile(
+        r"(?<![\w.])compile\s*\(|(?<!\w)(?:exec|eval)\s*\(|\.\s*(?:system|popen)\s*\(|\bos\s*\.\s*(?:exec|spawn)\w*\s*\("
+        r"|\b(?:__builtins__|builtins|pickle|marshal|runpy)\b|\bcode\s*\.\s*[Ii]nteract|\bshell\s*=\s*True"
+    ),
+    "node": re.compile(
+        r"(?<![\w$])(?:eval|Function|import)\s*\(|\bnew\s+Function\b|\bvm\s*\.|['\"]vm['\"]"
+        r"|\brunIn\w*Context\b|\bchild_process\b|\b_compile\b"
+    ),
+    "ruby": re.compile(
+        r"(?:\b|_)eval\b|\b(?:system|exec|spawn|popen|send|public_send)\b|(?<![\w.])open\b|Marshal|`|%x"
+    ),
+    "perl": re.compile(r"\beval\b|\b(?:system|exec|open)\b|`|\bqx\b"),
+}
+_STDIN_EVAL_SOURCES: dict[str, re.Pattern[str]] = {
+    "python": re.compile(
+        r"(?i:stdin)|\binput\s*\(|\bopen\s*\(\s*0\b|/dev/fd/0|\bfileinput\b|\bread\s*\(\s*0\b"
+    ),
+    "node": re.compile(r"(?i:stdin)|\bread(?:File)?Sync\s*\(\s*0\b|/dev/fd/0"),
+    "ruby": re.compile(r"(?i:stdin)|\bgets\b|\bARGF\b|\$<|/dev/fd/0"),
+    "perl": re.compile(r"(?i:stdin)|<\s*>|<<\s*>>|/dev/fd/0"),
+}
+
+
+def _program_evals_stdin(family: str, program: str, *, line_loop: bool) -> bool:
+    """True when a literal ``-c`` / ``-e`` program evaluates what it reads on stdin."""
+    sink = _STDIN_EVAL_SINKS.get(family)
+    if sink is None or not sink.search(program):
+        return False
+    return line_loop or bool(_STDIN_EVAL_SOURCES[family].search(program))
+
+
+def _line_loop_flag(family: str, flag: str) -> bool:
+    """True for a perl / ruby ``-n`` / ``-p`` flag (or a cluster such as ``-lne``): stdin read into ``$_``."""
+    if family not in {"perl", "ruby"} or flag.startswith("--"):
+        return False
+    return bool(set(flag[1:].split("e", 1)[0]) & {"n", "p"})
+
 
 def _word_expands(word: str) -> bool:
     r"""True when a raw shell word holds ``$X``, ``${X}``, ``$(...)`` or a backtick.
@@ -5623,8 +5665,10 @@ def _literal_inline_program(segment: str, *, piped: bool, dynamic_heredocs: froz
     expand (``python3 - <<'EOF'``), or a file on a ``<`` redirect (``node
     --input-type=module < build.mjs``). A program read from a pipe or a
     here-string, built from a variable or a substitution, or fed by an
-    unquoted heredoc that expands is not literal. A shell ``-c`` string is
-    judged by its own segments, which ``_get_always_deny`` checks next.
+    unquoted heredoc that expands is not literal, and neither is a program
+    that evaluates what it reads on stdin (``python3 -c 'exec(input())'``). A
+    shell ``-c`` string is judged by its own segments, which
+    ``_get_always_deny`` checks next.
     """
     words = _raw_words(segment)
     values = ["".join(_shlex_tokens(w)) for w in words]
@@ -5636,7 +5680,8 @@ def _literal_inline_program(segment: str, *, piped: bool, dynamic_heredocs: froz
     family = _interpreter_family(_basename(values[start]))
     if family not in _LITERAL_PROGRAM_FAMILIES:
         return False
-    has_program = False
+    programs: list[str] = []
+    line_loop = False
     argv = False  # past the program: the rest is its own argv
     stdin_source = ""
     j = start + 1
@@ -5663,6 +5708,7 @@ def _literal_inline_program(segment: str, *, piped: bool, dynamic_heredocs: froz
         if _interactive_flag(family, value):
             return False  # reads more code from stdin after the program
         if len(value) > 1 and value.startswith("-") and value != "--":
+            line_loop = line_loop or _line_loop_flag(family, value)
             kind, attached = _classify_interpreter_flag(family, value)
             if kind == "eval":
                 program = word
@@ -5672,22 +5718,25 @@ def _literal_inline_program(segment: str, *, piped: bool, dynamic_heredocs: froz
                     program, j = words[j], j + 1
                 if _word_expands(program):
                     return False
+                programs.append(program)
                 # python's -c ends its options; perl / osascript take more -e.
-                has_program, argv = True, family == "python"
+                argv = family == "python"
                 continue
             if kind == "module":
                 return False
             if kind == "value" and not attached:
                 j += 1
             continue
-        if has_program or value in _STDIN_PROGRAMS:
+        if programs or value in _STDIN_PROGRAMS:
             argv = True
             continue
         if value != "--":
             return False  # a script, /dev/fd/N or an operand this walk can't place
-    if has_program:
-        return True
-    return not piped and stdin_source == "literal"
+    if programs:
+        return not _program_evals_stdin(family, "\n".join(programs), line_loop=line_loop)
+    # An AppleScript read from a heredoc or a file can't have its shell commands
+    # checked (see ``_osascript_floor``), so only ``osascript -e`` is literal.
+    return not piped and stdin_source == "literal" and family != "osascript"
 
 
 def _get_always_deny(
@@ -7021,11 +7070,16 @@ def _decide_inner(
                 if hidden is not None:
                     return hidden
 
-    # === awk running a command, in every mode ===
+    # === awk and osascript running a command, in every mode ===
     for seg in segments:
         awk_hit = _awk_floor(seg, command, allowlist=allowlist, original_command=original_command)
         if awk_hit is not None:
             return awk_hit
+        osa_hit = _osascript_floor(
+            seg, command, allowlist=allowlist, original_command=original_command
+        )
+        if osa_hit is not None:
+            return osa_hit
 
     # === Pre-evaluation: dangerous-construct deny in BOTH modes ===
     # ``$(...)``, backticks, process substitution, here-strings and ``>`` /
@@ -7213,6 +7267,140 @@ def _is_pipe_to_shell(segments: list[str], seg_ops: list[str]) -> bool:
         if _pipe_consumer_runs_code(consumer):
             return True
     return False
+
+
+# Commands whose output comes off the network. Fed through a pipe into any
+# shell or interpreter, those bytes reach code guard never sees (a script that
+# evals stdin, a module that unpickles it), so the shape is FLOOR whatever the
+# consumer's arguments.
+_NETWORK_FETCH_HEADS = frozenset(
+    {
+        "curl",
+        "wget",
+        "nc",
+        "ncat",
+        "netcat",
+        "socat",
+        "http",
+        "https",
+        "httpie",
+        "xh",
+        "aria2c",
+        "fetch",
+        "ssh",
+    }
+)
+# Modules that only parse what they read on stdin.
+_DATA_ONLY_MODULES = frozenset({"json.tool"})
+# A group, loop or conditional piped as a whole (``{ curl x; echo; } | python3``).
+_GROUP_PIPE_RE = re.compile(r"(?:[})]|\bdone|\bfi|\besac)\s*\|(?!\|)")
+
+
+# Stands in for a ``$(...)`` / ``<(...)`` whose body fetches from the network.
+_NETWORK_MARK = "__network_output__"
+
+
+def _mark_network_substitutions(segment: str, depth: int = 0) -> str:
+    """``segment`` with each ``$(...)`` / ``<(...)`` replaced by one plain word.
+
+    The word is ``_NETWORK_MARK`` when the body fetches from the network (or
+    nests too deep to read), so ``echo "$(curl x)" | python3 s.py`` splits on
+    its pipe and its producer still counts as a fetch.
+    """
+    spans = _construct_spans(_shell_code_mask(segment))
+    if not spans:
+        return segment
+    parts: list[str] = []
+    last = 0
+    for kind, start, body_start, body_end in spans:
+        body = segment[body_start:body_end]
+        fetches = depth >= _MAX_SUBSTITUTION_DEPTH or any(
+            _fetches_from_network(piece, depth + 1) for piece in split_pipeline(body)
+        )
+        parts += [
+            segment[last:start],
+            f" {_NETWORK_MARK if fetches and kind != 'process_out' else '_'} ",
+        ]
+        last = body_end + 1
+    parts.append(segment[last:])
+    return "".join(parts)
+
+
+def _fetches_from_network(segment: str, depth: int = 0) -> bool:
+    """True when ``segment`` (wrappers peeled) prints what it fetches from the network.
+
+    A producer that prints a substitution or reads a process substitution that
+    fetches (``echo "$(curl x)"``, ``cat <(curl x)``) counts too.
+    """
+    layer = _mark_network_substitutions(segment, depth).strip()
+    if _NETWORK_MARK in layer:
+        return True
+    for _ in range(_PIPE_CONSUMER_UNWRAP_CAP):
+        tokens = _payload_tokens(layer)
+        if not tokens:
+            return False
+        head = _basename(tokens[0])
+        if head in _NETWORK_FETCH_HEADS or (head == "gh" and tokens[1:2] == ["api"]):
+            return True
+        if head == "aws" and "s3" in tokens and "cp" in tokens and "-" in tokens:
+            return True
+        if head == "gsutil" and "cat" in tokens:
+            return True
+        peeled = _peel_pipe_consumer(layer)
+        if peeled is None or peeled.strip() == layer:
+            return False
+        layer = peeled.strip()
+    return True  # wrapped past the unwrap cap: fail closed
+
+
+def _code_consumer(segment: str) -> bool:
+    """True when ``segment`` (wrappers peeled) is a shell or interpreter, bar a data-only module."""
+    layer = segment.strip()
+    for _ in range(_PIPE_CONSUMER_UNWRAP_CAP):
+        tokens = _payload_tokens(layer.lstrip("({!"))
+        if not tokens:
+            return False
+        head = _basename(tokens[0])
+        if head in DANGEROUS_SHELL_WRAPPERS:
+            return True
+        if _is_interpreter_name(head):
+            module = next(
+                (tokens[k + 1] for k in range(len(tokens) - 1) if tokens[k] == "-m"), None
+            )
+            return module not in _DATA_ONLY_MODULES
+        peeled = _peel_pipe_consumer(layer)
+        if peeled is None or peeled.strip() == layer:
+            return False
+        layer = peeled.strip()
+    return True
+
+
+def _fetch_to_interpreter(command: str, segments: list[str], seg_ops: list[str]) -> str | None:
+    """The consumer segment when network output is fed to a shell or interpreter.
+
+    The producer is any segment earlier in the same ``|`` chain (``curl x |
+    tee f | python3 s.py``), or a substitution in the consumer itself
+    (``python3 s.py < <(curl x)``, ``python3 s.py "$(curl x)"``). When a
+    group or loop is piped as a whole, every earlier segment counts.
+    """
+    whole_group = bool(_GROUP_PIPE_RE.search(_shell_code_mask(command)))
+    # Re-split with substitutions stood in for: the splitter keeps a pipe that
+    # follows a quoted ``"$(...)"`` inside one segment.
+    pairs: list[tuple[str, str]] = []
+    for op, seg in zip(seg_ops, segments, strict=True):
+        split = split_pipeline_with_ops(_mark_network_substitutions(seg)) or [("", seg)]
+        pairs += [(op, split[0][1]), *split[1:]]
+    for i, (_op, consumer) in enumerate(pairs):
+        if not _code_consumer(consumer):
+            continue
+        fed = _NETWORK_MARK in consumer
+        k = i
+        while not fed and k > 0 and (whole_group or pairs[k][0] == "|"):
+            k -= 1
+            fed = _fetches_from_network(pairs[k][1])
+        if fed:
+            return consumer.replace(_NETWORK_MARK, "$(...)")
+    return None
 
 
 _PIPE_TO_SHELL_REASON = (
@@ -8359,6 +8547,143 @@ def _awk_floor(
     return None
 
 
+# --- osascript running a shell command (``do shell script``, ``doShellScript``) ---
+
+# AppleScript ``do shell script`` / Terminal's ``do script`` / iTerm's ``write
+# text`` and JXA ``doShellScript(...)`` / ``doScript(...)`` hand their string
+# to a shell.
+_OSA_SHELL_RE = re.compile(
+    r"\bdo\s+(?:shell\s+)?script\b|\bwrite\s+text\b|\bdo(?:Shell)?Script\s*\(", re.IGNORECASE
+)
+_OSA_ADMIN_RE = re.compile(r"administrator\s*privileges|administratorPrivileges", re.IGNORECASE)
+# Ways to run code guard can't read: AppleScript compiled from a string at run
+# time (``run script``), raw Apple events (``«event sysoexec»`` is ``do shell
+# script``), Cocoa process launches, and JXA's ``eval`` / ObjC ``$.system``.
+_OSA_OPAQUE_RE = re.compile(
+    r"\b(?:run|load)\s+script\b|«\s*event|\bsysoexec\b|\bNS(?:Task|AppleScript|UserUnixTask)\b",
+    re.IGNORECASE,
+)
+_JXA_OPAQUE_RE = re.compile(
+    r"(?<![\w$])(?:eval|Function)\s*\(|\$\s*\.\s*(?:system|popen|exec\w*)\b"
+)
+
+
+def _osascript_programs(segment: str) -> tuple[list[str], bool]:
+    """``(programs, javascript)``: the ``-e`` texts of an ``osascript`` in ``segment``."""
+    values = ["".join(_shlex_tokens(w)) for w in _raw_words(segment)]
+    start = next((i for i, v in enumerate(values) if _basename(v) == "osascript"), None)
+    if start is None:
+        return [], False
+    programs: list[str] = []
+    javascript = False
+    j = start + 1
+    while j < len(values):
+        flag = values[j]
+        if not flag.startswith("-") or flag == "-":
+            break  # a script file or stdin: the rest is its argv
+        if flag in {"-e", "-l", "-s"} and j + 1 < len(values):
+            if flag == "-e":
+                programs.append(values[j + 1])
+            elif flag == "-l":
+                javascript = values[j + 1].lower() == "javascript"
+            j += 2
+            continue
+        j += 1
+    return programs, javascript
+
+
+def _osa_string_end(program: str, start: int, quotes: str) -> int:
+    """Index just past the string literal opening at ``start``, or ``-1`` if there is none."""
+    if start >= len(program) or program[start] not in quotes:
+        return -1
+    quote, j = program[start], start + 1
+    while j < len(program):
+        if program[j] == "\\":
+            j += 2
+            continue
+        if program[j] == quote:
+            return j + 1
+        if quote == "`" and program.startswith("${", j):
+            return -1  # a template literal with a substitution: not literal
+        j += 1
+    return -1
+
+
+def _osa_unescape(literal: str) -> str:
+    """The text of a quoted AppleScript / JavaScript string literal."""
+    return re.sub(
+        r"\\(.)",
+        lambda m: {"n": "\n", "t": "\t", "r": "\r"}.get(m.group(1), m.group(1)),
+        literal[1:-1],
+    )
+
+
+def _osascript_shell_commands(segment: str) -> tuple[list[str], str | None]:
+    """``(commands, opaque)``: the shell commands an ``osascript -e`` program runs.
+
+    Each ``do shell script "..."`` (or JXA ``doShellScript("...")``) whose
+    argument is one string literal yields that string; in a program that asks
+    for administrator privileges it runs as ``sudo sh -c``. ``opaque`` is the
+    first call whose argument is a variable, a concatenation or a template,
+    which guard can't read. Every match counts, even one inside a comment or
+    a string, since AppleScript's lexer (``|quoted identifiers|``, nested
+    ``(* *)`` comments) is too loose to rule a call out safely.
+    """
+    programs, javascript = _osascript_programs(segment)
+    quotes = "\"'`" if javascript else '"'
+    commands: list[str] = []
+    for program in programs:
+        opaque = _OSA_OPAQUE_RE.search(program) or (javascript and _JXA_OPAQUE_RE.search(program))
+        if opaque:
+            return commands, " ".join(program[opaque.start() : opaque.start() + 60].split())
+        admin = bool(_OSA_ADMIN_RE.search(program))
+        i = 0
+        while (m := _OSA_SHELL_RE.search(program, i)) is not None:
+            arg = m.end()
+            while arg < len(program) and program[arg] in " \t":
+                arg += 1
+            end = _osa_string_end(program, arg, quotes)
+            rest = program[end:].lstrip(" \t") if end >= 0 else ""
+            joined = rest[:1] in {"&", "+"} or (javascript and rest[:1] not in {")", ","})
+            if end < 0 or joined:
+                return commands, " ".join(program[m.start() : m.start() + 60].split())
+            body = _osa_unescape(program[arg:end])
+            commands.append(f"sudo sh -c {shlex.quote(body)}" if admin else body)
+            i = end
+    return commands, None
+
+
+def _osascript_floor(
+    segment: str, command: str, *, allowlist: Allowlist, original_command: str
+) -> dict[str, str] | None:
+    """Deny when ``osascript -e`` runs a shell command on the floor, or one guard can't read.
+
+    The literal command is checked like a ``bash -c`` string, in every mode
+    and only against the floor. An argument built at run time is denied as an
+    executed construct.
+    """
+    commands, opaque = _osascript_shell_commands(segment)
+    for shell_command in dict.fromkeys(commands):
+        hit = _floor_check(shell_command, command, floor_only=True)
+        if hit is not None:
+            return hit
+    if opaque is None:
+        return None
+    body = (
+        f"`{segment[:_SEGMENT_DISPLAY_TRUNC]}` has osascript run a shell command built at run "
+        f"time (`{opaque}`), which guard can't read. Pass `do shell script` one string "
+        "literal, or run the command from Bash directly"
+    )
+    deny = _deny(_format_deny_reason("bash.dangerous_construct", body))
+    bypass = _maybe_allow_via_allowlist(
+        allowlist, "bash.dangerous_construct", original_command, deny
+    )
+    if bypass is not None:
+        return bypass
+    _log_local(command, "deny", "dangerous-construct (bash.dangerous_construct:executed)")
+    return deny
+
+
 def _pre_evaluate_dangerous(
     command: str,
     segments: list[str],
@@ -8468,6 +8793,19 @@ def _pre_evaluate_dangerous(
                 return bypass
             _log_local(command, "deny", f"{cand_base}-denied-flag ({tier_key})")
             return deny
+    # Network output into a shell or interpreter, after the construct checks so
+    # a process substitution run as code keeps its own message.
+    fed = _fetch_to_interpreter(command, segments, seg_ops)
+    if fed is not None:
+        _log_local(command, "deny", "pipe-to-shell (network output)")
+        return _deny(
+            f"Blocked: `{fed[:_SEGMENT_DISPLAY_TRUNC]}` is a shell or interpreter fed network "
+            "output (curl, wget, nc, ssh, `gh api`, ...) through a pipe or a substitution. "
+            "Whatever it does with those bytes (eval them, unpickle them, run them) happens "
+            "out of guard's sight, so the shape is denied whatever the consumer's arguments. "
+            "Download to a file and inspect it first, or parse the output with `jq` or "
+            "`python3 -m json.tool`."
+        )
     return None
 
 

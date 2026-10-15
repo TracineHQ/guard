@@ -55,7 +55,19 @@ An inline program written out literally (`python3 -c '...'`, `python3 -
 passes, and literal code is no less visible to the auto classifier than a file.
 The program stays FLOOR when it comes from a pipe (`curl ... | python3`), a
 variable or a substitution (`python3 -c "$CODE"`), a here-string, or an
-unquoted heredoc whose body expands.
+unquoted heredoc whose body expands. It also stays FLOOR when it evaluates what
+it reads on stdin, which is pipe-to-shell with an extra step: a code sink
+(`exec` / `eval` / `compile` / `os.system`, `eval` / `new Function` / `vm`,
+ruby / perl `eval` / `system`) together with a stdin source (`input()`,
+`sys.stdin`, `open(0)`, `readFileSync(0)`, `STDIN`, `<STDIN>`, or a perl / ruby
+`-n` / `-p` loop). `osascript -e` is checked further: each `do shell script`
+(Terminal's `do script`, iTerm's `write text`, JXA `doShellScript` /
+`doScript`) string literal is floor-checked like a `bash -c` string, as `sudo
+sh -c` when the program asks for administrator privileges. An argument built at
+run time (a variable, a concatenation), `run script` / `load script`, a raw
+Apple event (`«event sysoexec»`), an `NSTask` launch and JXA `eval` / `$.system`
+are denied, since guard can't read what they run. An AppleScript read from a
+heredoc or a file stays FLOOR for the same reason.
 
 Heredoc bodies are data in every mode: a body written to a file or fed to a
 filter (`cat > notes.md <<'EOF'`) is taken out before the command is split into
@@ -78,7 +90,14 @@ before the colon. A key missing from the table is FLOOR. Pipe-to-shell
 (`curl ... | sh`) carries no rule id and is always FLOOR: a shell or
 interpreter that reads its program from the pipe. A pipe into a script or
 module (`printf '{}' | python3 tool.py`, `cat x.json | python3 -m json.tool`)
-reads stdin as data and is not pipe-to-shell.
+reads stdin as data and is not pipe-to-shell, unless the data comes off the
+network: network output (`curl`, `wget`, `nc` / `ncat`, `socat`, `http`, `xh`,
+`aria2c`, `fetch`, `ssh`, `gh api`, `aws s3 cp ... -`, `gsutil cat`) piped into
+any shell or interpreter, whatever its arguments (`wget -qO- x | python3
+tool.py`), is FLOOR too, as is network output reaching one through a
+substitution (`python3 tool.py < <(curl x)`, `echo "$(curl x)" | python3
+tool.py`). A data-only module (`curl ... | python3 -m json.tool`) and a
+non-interpreter (`curl ... | jq .`) pass.
 
 ### FLOOR
 
@@ -112,7 +131,7 @@ reads stdin as data and is not pipe-to-shell.
 | `bash.dangerous_env_sink` | exec / loader hijack env (`GIT_SSH_COMMAND`, `LD_PRELOAD`, ...) |
 | `bash.dangerous_interpreter` | inline interpreter code |
 | `bash.eval_builtin` | `eval` runs an arbitrary string as code |
-| `bash.dangerous_construct:executed` | output run as code (`bash -c "$(curl ...)"`, `source <(...)`, a shell fed by `<<<`), or awk running a command built at run time |
+| `bash.dangerous_construct:executed` | output run as code (`bash -c "$(curl ...)"`, `source <(...)`, a shell fed by `<<<`), or awk / osascript running a command built at run time |
 | `bash.dangerous_construct:sensitive_target` | `>` / `>>` / `>|` into `~/.ssh`, a shell rc file, `/etc`, a launch agent, git config or a git hook |
 | `bash.shell_wrapper:opaque` | `-c` string that is empty, a `{}` placeholder or runs a command named by an expansion |
 | `bash.admin_default_deny` | cloud CLI verb off the read-only catalog: secret reads, IAM grants, public access, key minting |
@@ -160,7 +179,7 @@ reads stdin as data and is not pipe-to-shell.
 | `bash.admin_unknown_flag_strict` | lockdown-only unknown-flag escalation |
 | `bash.conditional_denied_flag` | `find -exec` / `-delete`, `yq -i` on a project path |
 | `bash.dangerous_construct` | command / process substitution, here-string, file redirect; bodies are still floor-checked |
-| `bash.dangerous_interpreter:literal` | inline program written out literally (`python3 -c '...'`, `python3 - <<'EOF'`, `node -e`, `osascript` / `ruby` / `perl -e`): as visible as a script file, which already passes. A program from a pipe, a variable or a substitution stays FLOOR |
+| `bash.dangerous_interpreter:literal` | inline program written out literally (`python3 -c '...'`, `python3 - <<'EOF'`, `node -e`, `osascript` / `ruby` / `perl -e`): as visible as a script file, which already passes. A program from a pipe, a variable or a substitution, or one that evals stdin, stays FLOOR; an `osascript` `do shell script` string is floor-checked like `bash -c` |
 | `bash.eval_builtin:source` | `source` / `.` of a file, e.g. loading a `.env` |
 | `bash.exec_wrapper` | the peeled inner command is matched by its own rule |
 | `bash.function_definition` | shell function; the body is still floor-checked |
@@ -295,7 +314,8 @@ These deny on shape, not on a literal registry prefix. A reviewer auditing
 | Dangerous env-var sinks | `_has_dangerous_env_sink` | `GIT_SSH_COMMAND=... git fetch`, `LD_PRELOAD=... cmd`, `DYLD_INSERT_LIBRARIES=... cmd`, `PYTHONPATH=... python` (see `DANGEROUS_ENV_SINKS` in registry.py) |
 | `git -c` config injection | `_is_git_config_injection` | `git -c alias.x='!cmd'`, `git -c core.pager='!rm'`, `git -c core.hooksPath=...`, `git -c core.attributesFile=...` (see `GIT_CONFIG_EXEC_SINKS` / `GIT_CONFIG_EXEC_SINK_GLOBS` in registry.py) |
 | Wrapper-stacking depth > 3 | `_exceeds_unwrap_cap` | `sudo env -i bash -c 'cmd'` (depth 4) |
-| Pipe-to-shell | `_is_pipe_to_shell` | `curl http://x \| bash`, `wget -O- ... \| sh`, `cat s \| python3 -`; a consumer that runs a script (`\| python3 tool.py`) is not one |
+| Pipe-to-shell | `_is_pipe_to_shell`, `_fetch_to_interpreter` | `curl http://x \| bash`, `wget -O- ... \| sh`, `cat s \| python3 -`, and network output into any shell or interpreter (`wget -qO- x \| python3 tool.py`); a local consumer that runs a script (`\| python3 tool.py`) or a data-only module (`curl ... \| python3 -m json.tool`) is not one |
+| osascript shell command | `_osascript_floor` | `osascript -e 'do shell script "rm -rf ~"'` is floor-checked like `bash -c`; `do shell script "ls " & x` (built at run time) denies |
 | Credential leak | `CREDENTIAL_LEAK_PATTERNS` | `gh auth token`, `aws iam create-access-key`, `aws sts get-session-token`, `op read` |
 | Secret value in command text | `get_secret_value_deny` (`bash.secret_value`) | Known key prefixes (`sk-ant-…`, `AKIA…`, `ghp_…`, `glpat-…`, `xox…`, `AIza…`, JWTs, PEM blocks) or a high-entropy assigned value (`TOKEN=<random>`) -- denies in both modes so a literal secret never reaches the shell |
 | Heredoc body feeding a shell/eval sink | `_heredoc_skeleton`, `_shell_code_mask` | `bash <<EOF\nrm -rf /\nEOF`, `cat <<EOF \| sh` -- data heredoc bodies are taken out before the line split, but a body the command can run as shell stays visible and is re-evaluated |

@@ -1542,7 +1542,7 @@ RULE_TIERS: dict[str, TierEntry] = {
     "bash.dangerous_construct:executed": TierEntry(
         _F,
         'output run as code (bash -c "$(curl ...)", source <(...), a shell fed by <<<), '
-        "or awk running a command built at run time",
+        "or awk / osascript running a command built at run time",
     ),
     "bash.dangerous_construct:sensitive_target": TierEntry(
         _F,
@@ -1613,7 +1613,8 @@ RULE_TIERS: dict[str, TierEntry] = {
         _S,
         "inline program written out literally (python3 -c '...', python3 - <<'EOF', node -e, "
         "osascript / ruby / perl -e): as visible as a script file, which already passes. "
-        "A program from a pipe, a variable or a substitution stays FLOOR",
+        "A program from a pipe, a variable or a substitution, or one that evals stdin, stays "
+        "FLOOR; an osascript do shell script string is floor-checked like bash -c",
     ),
     "bash.eval_builtin:source": TierEntry(_S, "source / . of a file, e.g. loading a .env"),
     "bash.exec_wrapper": TierEntry(_S, "the peeled inner command is matched by its own rule"),
