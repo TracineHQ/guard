@@ -47,9 +47,10 @@ cat /tmp/claude-12345/tasks/some-id.output
 Reading them whole burns the entire context window for a single tool call,
 often without giving the model the structure it actually needs.
 
-**What guard does.** `agent_output_guard` denies direct `Read` /
-`cat|head|tail` calls against agent-output paths (`tasks/*.output`) and
-points the agent at the appropriate query CLI.
+**What guard does.** `agent_output_guard` denies any tool call that names a
+subagent transcript under `tasks/` (or a wildcard that could expand to one)
+and points the agent at the subagent's returned result. Background Bash
+command output in the same directory is plain text and stays readable.
 
 Guard does NOT deny reading its own decision log
 (`~/.claude/guard-decisions.jsonl`); the log is protected only against

@@ -22,7 +22,7 @@ Guardrails not walls: guard catches the obvious foot-guns at the Claude Code hoo
 | git_c_validator | `git -C path` traversal, `git -c key=value` config injection, `git commit -C` silent message reuse |
 | credential_check | hardcoded credentials in tool inputs |
 | commit_message_validator | AI-attribution trailers (`Co-Authored-By: Claude…`) and missing/file-backed commit messages |
-| agent_output_guard | reads of subagent transcript files (`/tmp/claude-<pid>/.../tasks/*.output`) |
+| agent_output_guard | reads of subagent transcript files (`/tmp/claude-<uid>/.../tasks/*.output`); background command output stays readable |
 | protected_files | edits to guard's own code, allowlist, and subagent scope, plus your own patterns (lockdown adds agent-instruction, git-hook and MCP config files) |
 | subagent_scope | file edits outside the declared `.claude/subagent-scope.json` allowlist |
 | permission_request_logger | observation-only: logs every Claude Code permission prompt as a `permission_request` JSONL row (no enforcement) |

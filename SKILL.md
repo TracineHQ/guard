@@ -44,8 +44,10 @@ authoritative references. Quick map:
   `.aws/config` (extensible via `GUARD_PROTECTED_EXTRA` and
   `.claude/guard-protected.txt`). Reads never trip it.
 - `agent_output_guard` — denies tool calls whose input references a Claude
-  Code subagent output transcript (`/tmp/claude-<pid>/.../tasks/<id>.output`).
-  Stops the main agent from inlining noisy JSONL transcripts into context.
+  Code subagent transcript (`/tmp/claude-<uid>/.../tasks/<id>.output` that
+  links into `subagents/` or holds transcript JSONL), or a wildcard under
+  `tasks/`. Background Bash command output in the same directory stays
+  readable.
 - `subagent_scope` — file edits outside the declared `.claude/subagent-scope.json` allowlist.
 
 ## Deny, never ask
