@@ -80,16 +80,15 @@ def _patch_git(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
     monkeypatch.setattr(subprocess, "run", fake)
 
 
-def _clone_with_entries(tmp_path: Path, entries: list[str], *, precompose: bool = True) -> Path:
-    """Clone a repo whose index holds ``entries`` (all ``{"mode": "off"}``).
+def _add_index_entries(repo: Path, entries: list[str], *, precompose: bool = True) -> None:
+    """Write ``entries`` (all ``{"mode": "off"}``) straight into the index.
 
-    Index entries are written straight with ``update-index`` so they can
-    differ only in case or Unicode form, which a case- and
-    normalization-insensitive filesystem (APFS) folds into one directory.
+    ``update-index`` takes any name, so entries can differ only in case or
+    Unicode form, or carry characters a filesystem ignores, without the
+    working tree ever holding them.
     """
-    src = init_git_repo(tmp_path / "src")
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    argv = ["git", "-C", str(src), "hash-object", "-w", "--stdin"]
+    argv = ["git", "-C", str(repo), "hash-object", "-w", "--stdin"]
     blob = (
         subprocess.run(
             argv,
@@ -103,7 +102,18 @@ def _clone_with_entries(tmp_path: Path, entries: list[str], *, precompose: bool 
     )
     cfg = ("-c", f"core.precomposeunicode={str(precompose).lower()}")
     for entry in entries:
-        git(src, *cfg, "update-index", "--add", "--cacheinfo", f"100644,{blob},{entry}")
+        git(repo, *cfg, "update-index", "--add", "--cacheinfo", f"100644,{blob},{entry}")
+
+
+def _clone_with_entries(tmp_path: Path, entries: list[str], *, precompose: bool = True) -> Path:
+    """Clone a repo whose index holds ``entries`` (all ``{"mode": "off"}``).
+
+    The entries can differ only in case or Unicode form, which a case- and
+    normalization-insensitive filesystem (APFS) folds into one directory.
+    """
+    src = init_git_repo(tmp_path / "src")
+    _add_index_entries(src, entries, precompose=precompose)
+    cfg = ("-c", f"core.precomposeunicode={str(precompose).lower()}")
     git(
         src,
         *cfg,
@@ -500,6 +510,43 @@ def test_unicode_split_subdir_clone_is_untrusted(
     clone = _clone_with_entries(tmp_path, entries, precompose=precompose)
 
     assert load_allowlist(cwd=clone / subdir).mode == "enforce"
+
+
+# Case-insensitive HFS+ ignores U+200C-200F, U+202A-202E, U+206A-206F and
+# U+FEFF in names, so a clone there writes these tracked entries to the very
+# file guard reads. The identity check catches them only if git lists them.
+_HFS_IGNORABLE_ENTRIES = [
+    f".clau{chr(0x200C)}de/guard/allowlist.json",
+    f".claude/gu{chr(0xFEFF)}ard/allowlist.json",
+    f"{chr(0x206A)}.claude/guard/allowlist.json",
+    f".claude{chr(0x202A)}/guard{chr(0x200F)}/allowlist.json",
+]
+
+
+@pytest.mark.parametrize(
+    "entry", _HFS_IGNORABLE_ENTRIES, ids=["in-claude", "in-guard", "before-dot", "after-names"]
+)
+def test_hfs_ignorable_spellings_are_listed_for_the_identity_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """No HFS+ volume needed: what matters is that git lists the entry to stat."""
+    from guard.allowlist import ProjectTrust, _run_git_ls_files
+
+    repo = init_git_repo(tmp_path / "repo")
+    _add_index_entries(repo, [entry])
+
+    def listed() -> set[bytes]:
+        proc = _run_git_ls_files(repo)
+        assert not isinstance(proc, ProjectTrust)
+        assert proc.returncode == 0
+        return {e for e in proc.stdout.split(b"\0") if e}
+
+    assert entry.encode() in listed()
+    # Control: a pathspec that spells the directory names out misses it.
+    monkeypatch.setattr(
+        "guard.allowlist._TRACKED_CANDIDATES_PATHSPEC", ":(top,icase,glob)**/.claude/guard/*"
+    )
+    assert entry.encode() not in listed()
 
 
 # === Only a file at the repository root can be trusted ===

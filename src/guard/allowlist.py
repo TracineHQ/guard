@@ -88,11 +88,13 @@ _TRUST_CACHE_NAME = "project-trust-cache.json"
 _TRUST_CACHE_VERSION = 2
 _TRUST_CACHE_MAX_ENTRIES = 32
 _UNVERIFIABLE_TTL_S = 60.0
-# Every tracked path that could be the project file under any case or
-# Unicode spelling. Each is stat'ed and compared to the file guard read.
-_TRACKED_CANDIDATES_PATHSPEC = (
-    f":(top,icase,glob)**/{PROJECT_ALLOWLIST_RELPATH.parent.as_posix()}/*"
-)
+# Every tracked path that could be the project file under another spelling.
+# Each is stat'ed and compared to the file guard read. Only depth-3 paths
+# matter (the file must sit at the work-tree root); ``icase`` covers case,
+# and the ``*`` around each letter admits the characters case-insensitive
+# HFS+ ignores in names (U+200C-200F, U+202A-202E, U+206A-206F, U+FEFF).
+# ``glob`` keeps each ``*`` inside one path component.
+_TRACKED_CANDIDATES_PATHSPEC = ":(top,icase,glob)*.*c*l*a*u*d*e*/*g*u*a*r*d*/*"
 _HEX_OID_RE = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
 
 # Bash matcher rule_ids — fine-grained, one per matcher function. Keep in

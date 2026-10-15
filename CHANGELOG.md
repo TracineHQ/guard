@@ -14,10 +14,11 @@ adheres to [Semantic Versioning](https://semver.org/).
   project file is now trusted only when it is a regular file whose
   `.claude` directory sits at the root of a git work tree and git does not
   track it (untracked or gitignored, the usual home for your own local
-  entries). Tracking is checked by file identity, so an index that spells
-  the path in another case or Unicode form can't hide a tracked file on a
-  case-insensitive filesystem. A trusted file works as before. An untrusted
-  one (tracked, below the repository root such as inside a gitignored
+  entries). Tracking is checked by file identity, so an index entry spelled
+  to land on the same file can't hide it, whether it uses another case or
+  Unicode form that APFS folds together or code points that
+  case-insensitive HFS+ ignores in names. A trusted file works as before.
+  An untrusted one (tracked, below the repository root such as inside a gitignored
   `node_modules/`, outside a work tree, behind a symlink, or unverifiable
   because git is missing, fails or times out) can only tighten: its mode
   applies only when stricter than the global/default mode, its

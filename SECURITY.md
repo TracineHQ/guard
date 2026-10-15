@@ -66,9 +66,9 @@ The validators are written with that in mind:
   only when stricter. Only an untracked or gitignored regular file at a git
   work-tree root can loosen (see [Project trust](SKILL.md#project-trust)),
   and "untracked" means no tracked path is the same file (device and
-  inode), since a case- or normalization-insensitive filesystem lets an
-  index entry spelled differently land on it. The check is the one
-  subprocess on the hook path: a fixed-argv `git ls-files` (no shell,
+  inode), since APFS case and Unicode folding, or code points HFS+ ignores
+  in names, let an index entry spelled differently land on it. The check
+  is the one subprocess on the hook path: a fixed-argv `git ls-files` (no shell,
   `core.fsmonitor` off, inherited `GIT_*` overrides dropped, C locale, 2 s
   timeout) that fails closed and runs only when a project file would
   loosen something.
@@ -316,6 +316,11 @@ known and explicitly deferred:
   you unpacked: a downloaded archive that contains its own `.git` is a work
   tree of its own, so an untracked allowlist at its root is trusted when
   you work there.
+- **NTFS name stripping isn't covered.** Windows drops trailing dots and
+  spaces from file names, so `.claude./guard/allowlist.json` can land on
+  the project file there. Guard is unsupported and untested on Windows: its
+  git query lists such spellings, but nothing verifies the identity check
+  on NTFS.
 - **Laundering after an allowed copy.** Once the user allowlists or runs
   `cp creds /tmp/x`, subsequent reads of `/tmp/x` are unguarded. The
   destination is not a credential path. This is inherent to path matching,
