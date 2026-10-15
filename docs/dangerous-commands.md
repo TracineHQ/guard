@@ -58,29 +58,44 @@ These prefixes are in `ALWAYS_DENY` and block under `enforce` and
 | `git reflog expire` / `git reflog delete` | Drops recovery points |
 | `git gc --prune=now` | Permanently removes unreachable objects |
 
-### Interpreter re-exec (`interpreter-deny`)
+### Inline interpreter code (`interpreter-deny`, `bash.dangerous_interpreter`)
 
-| Prefix | Reason |
+| Shape | Reason |
 |---|---|
-| `python -c` / `python3 -c` / `python3.X -c` | Re-execs arbitrary code |
-| `node -e` / `node --eval` | Re-execs arbitrary code |
-| `nodejs -e` | Re-execs arbitrary code |
-| `pypy -c` / `pypy3 -c` | Re-execs arbitrary code |
-| `bun -e` / `bun --eval` | Re-execs arbitrary code |
-| `deno eval` | Re-execs arbitrary code |
+| `python -c` / `python3 -c` / `python3.X -c` / `python3 -Ic` | Runs code from the command line |
+| `node -e` / `node --eval` / `node -p` / `node --print` / `node -pe` | Runs code from the command line |
+| `nodejs -e` | Runs code from the command line |
+| `pypy -c` / `pypy3 -c` | Runs code from the command line |
+| `bun -e` / `bun --eval` / `bun -p` | Runs code from the command line |
+| `deno eval` / `deno repl --eval` | Runs code from the command line |
+| `osascript -e` | `do shell script` is an `sh -c` equivalent |
+| `perl -e` / `-E` / `-ne` / `-pe`, `ruby -e` / `-ne`, `php -r` / `-R` / `-B` / `-E`, `lua -e` | Runs code from the command line |
+| `python -` / `python3 /dev/stdin` / `python3 <<EOF` / `python3 < x.py` | Reads the program from stdin |
+| `python -m timeit` / `pdb` / `IPython` / `idlelib` / `code` / `asyncio` | The module runs its arguments or stdin as code |
 
 Coverage extends to absolute paths (`/usr/bin/python3 -c`), version
 suffixes (`python3.11 -c`), and runner wrappers. Wrapper coverage
 forward-scans past wrapper flags to the wrapped interpreter, so
 `uvx python -c`, `uvx --from pkg python -c`, `pipx run python -c`,
-`uv run python -c`, and `uv tool run python -c` all deny.
+`uv run python -c`, `uv run python - <<EOF`, and `uv tool run python -c` all
+deny. The deny reason steers the agent to write the code to a script file and
+run that file.
 
-`python -m <module>` is also denied (it imports and runs an arbitrary
-module -- e.g. `python -m http.server` is RCE-adjacent), as is a bare script
-target (`python /tmp/x.py`). A short allowlist of read-only / dev modules is
-exempt: `json.tool`, `venv`, `pytest`, `site`, `compileall`, `tokenize`,
-`calendar`, `this`. Modules that can execute caller-supplied code (e.g.
-`timeit -s`, `unittest <module>`) are deliberately **not** exempt.
+Running a script path (`uv run python tools/dev.py`, `python3 scripts/x.py
+--flag`, `node build.js`) or a module (`python -m pytest`, `python -m pip
+install -e .`) is **not** denied by this rule. Flags after the script path or
+`-m <module>` belong to that program, so `python3 x.py -c cfg` is not an eval
+flag. These runs are never treated as known-safe either: under `enforce` they
+pass through to Claude Code's own permission flow (the `uv run python` safe
+prefix doesn't auto-allow them), and `guard mode lockdown` default-denies
+them. A short list of read-only / dev modules (`json.tool`, `venv`, `pytest`,
+`site`, `compileall`, `tokenize`, `calendar`, `this`) can still be covered by
+a registered safe prefix such as `uv run python`.
+
+The scan only trusts the script position while every flag before it is one it
+can parse. After an unrecognized flag (which might take the next token as its
+value), it checks every remaining token for an eval flag or a stdin redirect,
+so `node --title ./x.js -e '...'` still denies.
 
 ### Environment-clearing wrappers (`env-deny`)
 

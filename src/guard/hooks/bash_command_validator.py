@@ -868,6 +868,12 @@ def is_safe_command(segment: str, *, is_piped: bool = False, strict: bool = Fals
         return False
     if _match_synthetic_deny(segment) is not None:
         return False
+    # A script or ``-m`` module run is not denied, but it runs code guard
+    # can't see, so it is never known-safe: a broad prefix like
+    # ``uv run python`` must not auto-allow it. Enforce passes it through to
+    # Claude Code's permission flow; lockdown default-denies it.
+    if any(_is_interpreter_program_run(cand) for cand in _exec_wrapper_candidates(segment)):
+        return False
     if is_piped:
         return _matches_prefix(segment, SAFE_PIPE_COMMANDS)
     # In interactive mode, defer git segments to git_c_validator. In strict
@@ -1642,24 +1648,184 @@ _INTERPRETER_BASENAME_RE = re.compile(
 _PIPELINE_PRODUCER_CONSUMER_MIN = 2  # producer | consumer pairs
 
 
-def _interpreter_uses_eval_flag(tokens: list[str]) -> bool:
-    """Return True if any subsequent token is an eval flag (``-c``, ``-e`` ...).
+# Interpreter families, keyed by basename with any version suffix stripped
+# (``python3.11`` -> ``python``). Flag syntax differs per family, so the
+# inline-code scan looks flags up by family.
+_INTERPRETER_FAMILY_ALIASES: dict[str, str] = {"pypy": "python", "nodejs": "node"}
 
-    Catches both bare and fused forms: exact matches like ``-c`` / ``-e``,
-    plus fused-with-body forms like ``-c"import os; ..."`` where the shell
-    would still pass the body to the interpreter as the eval string. Without
-    the fused-form check, ``python3 -c"rm -rf /"`` would slip past every
-    matcher because the head token literal is ``-c"import...``, not ``-c``.
+# Short-flag letters that carry program text, per family: ``python -c``,
+# ``node -e`` / ``-p`` (print), ``perl -e`` / ``-E``, ``ruby -e``, ``php -r``
+# (and ``-R`` / ``-B`` / ``-E``, which run code per input line). A cluster
+# such as ``-Ic`` / ``-pe`` / ``-lne`` counts when one of these letters comes
+# before a letter that takes the rest of the token as its value.
+_EVAL_LETTERS: dict[str, frozenset[str]] = {
+    "python": frozenset("c"),
+    "node": frozenset("ep"),
+    "bun": frozenset("ep"),
+    "perl": frozenset("eE"),
+    "ruby": frozenset("e"),
+    "php": frozenset("rRBE"),
+}
+# Letters that take the rest of the token (or the next token) as a value, so
+# letters after them are not flags: ``-Wignore``, ``-rjson``, ``-Mstrict``.
+_VALUE_LETTERS: dict[str, frozenset[str]] = {
+    "python": frozenset("WX"),
+    "node": frozenset("rC"),
+    "bun": frozenset("rC"),
+    "perl": frozenset("dDFiImMx"),
+    "ruby": frozenset("CEFiIrx"),
+    "php": frozenset("cdfFStz"),
+}
+# Letters that take no value. A positional after only these flags is the
+# program operand. ``-i`` is left out on purpose: it makes python / node read
+# more code from stdin after the script finishes.
+_NO_VALUE_LETTERS: dict[str, frozenset[str]] = {
+    "python": frozenset("bBdEhIOPqRsSuvVx"),
+    "node": frozenset("hv"),
+    "bun": frozenset("hv"),
+}
+# Long flags that carry program text (``node --print 'code'``, ``--eval=code``).
+_EVAL_LONG_FLAGS = frozenset({"--eval", "--print"})
+_EVAL_LONG_FLAG_FAMILIES = frozenset({"node", "bun", "deno"})
+_NO_VALUE_LONG_FLAGS: dict[str, frozenset[str]] = {
+    "python": frozenset({"--help", "--version"}),
+    "node": frozenset(
+        {
+            "--help",
+            "--version",
+            "--no-warnings",
+            "--no-deprecation",
+            "--trace-warnings",
+            "--enable-source-maps",
+            "--experimental-strip-types",
+            "--watch",
+            "--test",
+            "--inspect",
+            "--inspect-brk",
+        }
+    ),
+}
+_VALUE_LONG_FLAGS: dict[str, frozenset[str]] = {
+    "python": frozenset({"--check-hash-based-pycs"}),
+    "node": frozenset(
+        {"--require", "--import", "--loader", "--conditions", "--env-file", "--input-type"}
+    ),
+}
+# Families whose first positional is usually a subcommand (``deno run``,
+# ``bun add``), so only a path-like positional is taken as the script.
+_SUBCOMMAND_FAMILIES = frozenset({"deno", "bun"})
+
+# ``-m`` modules whose argv is program text or that read code from stdin:
+# timeit runs its arguments as statements, pdb / IPython / idlelib take
+# ``-c`` code, and code / asyncio are REPLs. Running one is the same
+# primitive as ``python -c``.
+_INLINE_CODE_MODULES = frozenset({"timeit", "pdb", "IPython", "idlelib", "code", "asyncio"})
+
+# A redirect token: optional fd number, then the operator. A bare operator
+# (``<``, ``2>``) takes the next token as its target.
+_INTERPRETER_REDIRECT_RE = re.compile(r"^\d*(<<<|<<-?|<>|<&|<|>>|>&|>\||>|&>>|&>)")
+# Program operands that are stdin or another inherited fd, not a file.
+_FD_PROGRAM_RE = re.compile(r"^(?:-|/dev/stdin|/dev/fd/\d+|/proc/(?:self|\d+)/fd/\d+)$")
+
+
+def _interpreter_family(head: str) -> str:
+    """Return the flag-syntax family for an interpreter basename."""
+    name = head.rstrip("0123456789.")
+    return _INTERPRETER_FAMILY_ALIASES.get(name, name)
+
+
+def _classify_interpreter_flag(family: str, tok: str) -> tuple[str, str]:
+    """Classify one interpreter flag token as ``(kind, attached_value)``.
+
+    ``kind`` is ``eval`` (carries program text), ``module`` (python ``-m``),
+    ``value`` (takes a value: attached, or the next token when
+    ``attached_value`` is empty), ``flag`` (takes no value), or ``unknown``
+    (might take the next token as its value).
+
+    The fused forms ``-cBODY`` / ``-eBODY`` count as eval for every family,
+    so ``python3 -c"rm -rf /"`` can't hide behind its head token.
     """
-    for tok in tokens[1:]:
+    if tok in INTERPRETER_EVAL_FLAGS:
+        return "eval", ""
+    if tok.startswith("--"):
+        name, eq, _ = tok.partition("=")
+        if family in _EVAL_LONG_FLAG_FAMILIES and name in _EVAL_LONG_FLAGS:
+            return "eval", ""
+        if eq or tok == "--" or tok in _NO_VALUE_LONG_FLAGS.get(family, ()):
+            return "flag", ""
+        if tok in _VALUE_LONG_FLAGS.get(family, ()):
+            return "value", ""
+        return "unknown", ""
+    letters = tok[1:]
+    if letters[:1] in {"c", "e"}:
+        return "eval", ""
+    eval_letters = _EVAL_LETTERS.get(family, frozenset())
+    value_letters = _VALUE_LETTERS.get(family, frozenset())
+    no_value_letters = _NO_VALUE_LETTERS.get(family, frozenset())
+    known = True
+    for k, ch in enumerate(letters):
+        if ch in eval_letters:
+            return "eval", ""
+        if family == "python" and ch == "m":
+            return "module", letters[k + 1 :]
+        if ch in value_letters:
+            return "value", letters[k + 1 :]
+        if ch not in no_value_letters:
+            known = False
+    return ("flag" if known else "unknown"), ""
+
+
+def _interpreter_runs_inline_code(tokens: list[str]) -> bool:
+    """Return True if the interpreter's program text is inline, not a file.
+
+    Inline means an eval flag (``python -c``, ``node -e`` / ``-p``,
+    ``deno eval``, ``perl -ne``, ``php -r`` ...), code from stdin
+    (``python -``, ``/dev/stdin``, a heredoc or ``<`` redirect before any
+    script), or a module from ``_INLINE_CODE_MODULES``. A script path or
+    ``-m <module>`` is not inline: the scan stops there, because every later
+    token is that program's own argv (``python3 x.py -c cfg.ini``).
+
+    The scan only trusts the program operand while every flag before it is
+    one it can parse. After an unknown flag (which may take the next token as
+    its value), it can't tell the program from a flag value, so it checks
+    every remaining token instead.
+    """
+    family = _interpreter_family(_basename(tokens[0]))
+    parsed = True
+    i, n = 1, len(tokens)
+    while i < n:
+        tok = tokens[i]
+        i += 1
         if tok in INTERPRETER_EVAL_FLAGS:
             return True
-        # Fused form: ``-cBODY``, ``-eBODY``. Only short flags fuse this way;
-        # ``--evalBODY`` would never be a valid argv form. ``--eval=BODY`` is
-        # not standard for these interpreters either, so we don't match it.
-        for short_flag in ("-c", "-e"):
-            if tok.startswith(short_flag) and len(tok) > len(short_flag):
+        redirect = _INTERPRETER_REDIRECT_RE.match(tok)
+        if redirect:
+            if redirect.group(1).startswith("<"):
                 return True
+            if redirect.end() == len(tok):
+                i += 1
+            continue
+        if _FD_PROGRAM_RE.match(tok):
+            return True
+        if tok.startswith("-"):
+            kind, attached = _classify_interpreter_flag(family, tok)
+            if kind == "eval":
+                return True
+            if kind == "module":
+                module = attached or (tokens[i] if i < n else "")
+                if not attached:
+                    i += 1
+                if module in _INLINE_CODE_MODULES:
+                    return True
+                if parsed:
+                    return False
+            elif kind == "value" and not attached:
+                i += 1
+            elif kind == "unknown":
+                parsed = False
+            continue
+        if parsed and (family not in _SUBCOMMAND_FAMILIES or "/" in tok or "." in tok):
+            return False
     return False
 
 
@@ -1683,17 +1849,13 @@ _BUN_PACKAGE_SUBCOMMANDS = {
 }
 
 
-# Stdlib modules whose ``-m`` form is stdin/stdout-only (no network bind, no
-# encode/decode-for-exfil, no archive, no installer). Allowing these stops the
-# common false-deny on ``python -m json.tool`` etc. while keeping every other
-# ``-m <module>`` denied. Exact top-level match only: ``json.tool.foo`` is NOT
-# a member (submodules are not wildcarded).
 # stdlib ``-m`` modules that are inert (format/inspect/compile) or trusted dev
-# runners with a compensating SAFE_PREFIX. EXCLUDED on purpose: ``timeit``
-# (``-s`` runs arbitrary code) and ``unittest`` (``-m unittest <mod>`` imports
-# and runs an arbitrary module) — both are code-executors with no SAFE_PREFIX
-# backstop, so exempting them from the interpreter RCE deny would let
-# ``python -m timeit -s '<code>'`` pass through in interactive mode.
+# runners. Every other ``-m <module>`` run counts as running project code, so
+# a broad safe prefix (``uv run python``) never auto-allows it and lockdown
+# default-denies it; these are the exceptions such a prefix may still cover.
+# Exact top-level match only: ``json.tool.foo`` is NOT a member (submodules
+# are not wildcarded). ``timeit`` and ``unittest`` are left out on purpose:
+# both run caller-supplied code (``timeit`` is also in _INLINE_CODE_MODULES).
 _SAFE_INTERPRETER_MODULES = frozenset(
     {
         "json.tool",
@@ -1711,17 +1873,17 @@ _SAFE_INTERPRETER_MODULES = frozenset(
 def _interpreter_runs_module_or_script(tokens: list[str]) -> bool:
     """Return True if the interpreter is invoked with ``-m <mod>`` or a script.
 
-    ``python -m http.server`` runs an arbitrary importable module — RCE under
-    the agent UID. Same for ``python /tmp/attacker.py``. These shapes never
-    have a legitimate place in agent-driven Bash invocations: any python /
-    node / ruby / etc. invocation should go through the validated package
-    flow, not bare-script execution. We deny conservatively: any positional
-    argument that is not a recognized flag triggers the deny.
+    Running a script or module is normal project work, so guard does not deny
+    it (only inline code is denied, see ``_interpreter_runs_inline_code``).
+    It does run code guard can't see, though, so ``is_safe_command`` never
+    treats it as known-safe: enforce passes it through to Claude Code's own
+    permission flow, and lockdown default-denies it. Any positional argument
+    that is not a recognized flag counts as a script.
 
     Tolerates fused short flags like ``-mhttp.server`` (no space).
     Bun's package-manager subcommands (``bun add lodash``, ``bun run dev``)
-    are intentionally NOT denied — bun doubles as a JS interpreter and a
-    package manager; the package surface routes through ``_is_npm_url_install``.
+    are not script runs -- bun doubles as a JS interpreter and a package
+    manager; the package surface routes through ``_is_npm_url_install``.
     """
     if len(tokens) < 2:
         return False
@@ -1742,19 +1904,18 @@ def _interpreter_runs_module_or_script(tokens: list[str]) -> bool:
     #
     # Tighten the exemption for ``run`` / ``test`` (and ``x``): these accept
     # EITHER a package.json script name OR a script-file path. The path form
-    # is RCE-equivalent to ``bun /tmp/x.js`` and must NOT be exempted.
-    # Allow only when the operand looks like a script name (no ``/``, no
+    # runs a script just like ``bun /tmp/x.js`` and must NOT be exempted.
+    # Exempt only when the operand looks like a script name (no ``/``, no
     # script-file extension).
     if head == "bun" and len(tokens) >= 2 and tokens[1] in _BUN_PACKAGE_SUBCOMMANDS:
         if tokens[1] in {"run", "test", "x"} and len(tokens) >= 3:
             operand = tokens[2]
             script_exts = (".js", ".ts", ".mjs", ".cjs", ".jsx", ".tsx")
             if "/" in operand or operand.endswith(script_exts):
-                # Looks like a script path — fall through to RCE deny.
                 return True
         return False
     # Deno subcommand surface (``deno install``, ``deno task``, ``deno cache``)
-    # is handled by other matchers; skip module-or-script trigger here.
+    # is handled by other matchers; not a module-or-script run.
     if (
         head == "deno"
         and len(tokens) >= 2
@@ -1782,25 +1943,23 @@ def _interpreter_runs_module_or_script(tokens: list[str]) -> bool:
         if tok in safe_flags:
             i += 1
             continue
-        # Fused module flag: ``-mjson.tool`` (no space after -m).
+        # Fused module flag: ``-mjson.tool`` (no space after -m). Only the
+        # curated safe set is exempt; any other module counts as a module run.
         if tok.startswith("-m") and len(tok) > 2 and tok[2] != "-":
-            # Allow only when the module is on the curated stdin/stdout set;
-            # any other module (``-mhttp.server``, ``-mbase64``) → RCE deny.
             return tok[2:] not in _SAFE_INTERPRETER_MODULES
         # Bare module flag: ``-m <module>`` (spaced). The module name is the
-        # next token; a safe module short-circuits to allow and its trailing
-        # operands (``python -m venv .venv``) are intentionally not re-scanned.
+        # next token; a safe module short-circuits and its trailing operands
+        # (``python -m venv .venv``) are intentionally not re-scanned.
         if tok == "-m":
             if i + 1 < n:
                 return tokens[i + 1] not in _SAFE_INTERPRETER_MODULES
-            return True  # bare ``-m`` with no module → malformed → deny
+            return True  # bare ``-m`` with no module: malformed, never safe
         if tok.startswith("-"):
-            # Unknown flag — could be benign (--unbuffered, -u) or eval flag.
-            # Eval-flag check happens in _interpreter_uses_eval_flag; here we
-            # just skip to the next token.
+            # Other flags (``-u``, ``--unbuffered``) don't decide this; eval
+            # flags are handled by _interpreter_runs_inline_code.
             i += 1
             continue
-        # Non-flag positional with no preceding ``-m`` → bare script path → RCE.
+        # Non-flag positional with no preceding ``-m``: a script path.
         return True
     return False
 
@@ -1812,63 +1971,65 @@ _AUX_INTERPRETER_BASENAME_RE = re.compile(
 )
 
 
-def _scan_wrapped_interpreter(tokens: list[str], start: int) -> bool:
-    """Scan ``tokens[start:]`` for the first interpreter and recurse on its tail.
+def _is_interpreter_name(name: str) -> bool:
+    return bool(_INTERPRETER_BASENAME_RE.match(name) or _AUX_INTERPRETER_BASENAME_RE.match(name))
+
+
+def _interpreter_tokens(normalized: str) -> list[str] | None:
+    """Return the segment's tokens from the interpreter on, or ``None``.
 
     Wrapper runners (``uvx``, ``pipx run``, ``uv run``, ``uv tool run``) accept
     interleaved flags before the wrapped command (``--from PKG``, ``--with X``,
     ``--python 3.12``). Rather than parse each wrapper's flag surface, skip to
-    the first python/node/ruby-style token and let the recursion's
-    eval/module/script check decide. Returns ``False`` if no interpreter token
-    is present (``uvx ruff``, ``uv run pytest``).
-    """
-    for j in range(start, len(tokens)):
-        inner = _basename(tokens[j])
-        if _INTERPRETER_BASENAME_RE.match(inner) or _AUX_INTERPRETER_BASENAME_RE.match(inner):
-            return _is_dangerous_interpreter(" ".join(tokens[j:]))
-    return False
-
-
-def _is_dangerous_interpreter(normalized: str) -> bool:
-    """Return True if the segment re-execs code via an interpreter (eval flag, ``-m`` module, or bare script path).
-
-    Detects:
-    - bare interpreter binaries with version suffix or absolute path:
-      ``python3.11 -c``, ``/usr/bin/python3 -c``, ``nodejs -e``, ``bun -e``,
-      ``deno eval``, ``pypy3 -c``
-    - runner wrappers: ``uvx python -c``, ``pipx run python -c``,
-      ``uv run python -c`` / ``uv run python -m http.server``
-    - auxiliary script interpreters (ruby/perl/php/lua/tclsh/rscript) invoked
-      with a non-flag positional (script path or eval body) — same RCE shape
+    the first python/node/ruby-style token. Without this, ``uv run python -c``
+    matched only the ``uv run python`` safe prefix and bypassed the check.
+    Returns ``None`` when no interpreter is present (``uvx ruff``,
+    ``uv run pytest``).
     """
     tokens = normalized.split()
     if not tokens:
-        return False
-
-    # Wrapper runners — examine the wrapped command tail. All three wrappers are
-    # registered in INTERPRETER_RUNNER_WRAPPERS for visibility, but each has
-    # a slightly different surface (uvx <tool>, pipx run <tool>, uv run <tool>).
+        return None
     head = _basename(tokens[0])
+    start: int | None = None
     if head in INTERPRETER_RUNNER_WRAPPERS:
-        # Each wrapper has its own subcommand surface, but all interleave flags
-        # before the wrapped interpreter (`--from PKG`, `--with X`, ...), so
-        # forward-scan to the first interpreter token rather than parse flags.
-        # Without this, `uv run python -c '...'` matched only the `uv run python`
-        # safe prefix and bypassed the check.
         if head == "uvx" and len(tokens) >= _UVX_MIN_TOKENS:
-            return _scan_wrapped_interpreter(tokens, 1)
-        if head == "pipx" and len(tokens) >= _PIPX_RUN_MIN_TOKENS and tokens[1] == "run":
-            return _scan_wrapped_interpreter(tokens, 2)
-        if head == "uv" and tokens[1:3] == ["tool", "run"]:
-            return _scan_wrapped_interpreter(tokens, 3)
-        if head == "uv" and len(tokens) >= _UV_RUN_MIN_TOKENS and tokens[1] == "run":
-            return _scan_wrapped_interpreter(tokens, 2)
+            start = 1
+        elif head == "pipx" and len(tokens) >= _PIPX_RUN_MIN_TOKENS and tokens[1] == "run":
+            start = 2
+        elif head == "uv" and tokens[1:3] == ["tool", "run"]:
+            start = 3
+        elif head == "uv" and len(tokens) >= _UV_RUN_MIN_TOKENS and tokens[1] == "run":
+            start = 2
+    if start is not None:
+        for j in range(start, len(tokens)):
+            if _is_interpreter_name(_basename(tokens[j])):
+                return tokens[j:]
+        return None
+    return tokens if _is_interpreter_name(head) else None
 
-    if _INTERPRETER_BASENAME_RE.match(head):
-        return _interpreter_uses_eval_flag(tokens) or _interpreter_runs_module_or_script(tokens)
-    if _AUX_INTERPRETER_BASENAME_RE.match(head):
-        return _interpreter_uses_eval_flag(tokens) or _interpreter_runs_module_or_script(tokens)
-    return False
+
+def _is_dangerous_interpreter(normalized: str) -> bool:
+    """Return True if the segment runs inline interpreter code.
+
+    Covers python/node/bun/deno/pypy/osascript and ruby/perl/php/lua/tclsh/
+    rscript, with version suffixes (``python3.11``), absolute paths
+    (``/usr/bin/python3``) and runner wrappers (``uvx``, ``pipx run``,
+    ``uv run``, ``uv tool run``). Inline means an eval flag, code from stdin,
+    or a code-taking module; see ``_interpreter_runs_inline_code``. Running a
+    script path or ``-m <module>`` is not denied here.
+    """
+    tokens = _interpreter_tokens(normalized)
+    return tokens is not None and _interpreter_runs_inline_code(tokens)
+
+
+def _is_interpreter_program_run(normalized: str) -> bool:
+    """Return True if the segment runs a script path or ``-m <module>``.
+
+    Not a deny: ``is_safe_command`` uses it so these runs are never treated as
+    known-safe (see ``_interpreter_runs_module_or_script``).
+    """
+    tokens = _interpreter_tokens(normalized)
+    return tokens is not None and _interpreter_runs_module_or_script(tokens)
 
 
 # === Dangerous rm shapes ===
@@ -2192,10 +2353,13 @@ _SYNTH_SECRET_EGRESS_DENY = "<secret egress over network>"
 
 _SYNTH_DENY_REASONS: dict[str, str] = {
     _SYNTH_INTERPRETER_DENY: (
-        "Interpreter re-exec detected: a python/node/bun/deno/pypy (or ruby/perl/"
-        "php/lua/tclsh/rscript) invocation with an eval flag (-c/-e/--eval/eval), "
-        "an explicit module (-m <module>), or a bare script path. All run "
-        "arbitrary code and are denied regardless of binary suffix or absolute path."
+        "Inline interpreter code: a python/node/bun/deno/pypy/osascript (or "
+        "ruby/perl/php/lua/tclsh/rscript) invocation whose program is on the "
+        "command line (-c, -e, -p, -r, --eval, eval, or a module like timeit or "
+        "pdb that runs its arguments) or on stdin (-, /dev/stdin, a heredoc, or "
+        "a < redirect). Ad-hoc code like this can carry any command past guard's "
+        "other checks. Write the code to a script file and run that file "
+        "instead; script paths and -m <module> runs are not blocked by this rule."
     ),
     _SYNTH_RM_DENY: (
         "Recursive rm against a top-level / cwd / home operand. This shape "
@@ -6258,7 +6422,7 @@ def _peel_pipe_consumer(norm: str) -> str | None:
     start = _runner_wrapper_cmd_start(head, tokens)
     if start is not None:
         # Forward-scan past wrapper flags to the first shell/interpreter token —
-        # the same heuristic _is_dangerous_interpreter uses, so a wrapped
+        # the same heuristic _interpreter_tokens uses, so a wrapped
         # consumer (``uv run python``) resolves to its real head.
         for j in range(start, len(tokens)):
             if _basename(tokens[j]) in _PIPE_SHELL_CMDS:

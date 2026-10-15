@@ -81,3 +81,8 @@
 {"command": "REPO=ssh://git@github.com/org/repo.git", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP R-G: ssh URL has user@ but no :password, no match"}
 {"command": "RUN_ID=550e8400-e29b-41d4-a716-446655440000", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP R-G: UUID run-id under a plain name stays allow (name-gated entropy arm unchanged)"}
 {"command": "OUT=/tmp/build/artifacts-20260101-final", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP R-G: build path is not a secret value"}
+{"command": "uv run python tools/dev.py frog-run g1-claims", "expected": "allow", "mode": "default", "source": "convo:session", "note": "script run passes through to Claude Code; only inline interpreter code is denied"}
+{"command": "python3 scripts/x.py --flag", "expected": "allow", "mode": "default", "source": "curated", "note": "script run with its own flags passes through"}
+{"command": "uv run python -m pytest", "expected": "allow", "mode": "default", "source": "curated", "note": "module run passes through"}
+{"command": "python -m pip install -e .", "expected": "allow", "mode": "default", "source": "curated", "note": "-e after -m <module> is pip's argv, not a python eval flag"}
+{"command": "python3 x.py -c cfg", "expected": "allow", "mode": "default", "source": "curated", "note": "-c after the script path is the script's argv"}
