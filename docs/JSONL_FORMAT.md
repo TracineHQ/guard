@@ -192,7 +192,7 @@ no decision to Claude Code and is logged as a decision record with:
 The reason string is part of the contract; consumers can match it with the
 prefix `deferred to auto mode (steer rule ` and read `<key>` up to the final
 `)`. `<key>` is a tier key from `RULE_TIERS` in `src/guard/registry.py`:
-a rule id (`bash.shell_wrapper`), a hook id (`guard.agent_output_guard`),
+a rule id (`bash.shell_wrapper`), a hook id,
 `bash.always_deny:<prefix>` for a registry literal, or `<rule>:<shape>` for a
 sub-shape (`guard.git_c_validator:config_write`). The allowlist id is the
 part before the first colon.

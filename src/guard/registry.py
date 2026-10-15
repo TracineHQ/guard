@@ -1657,7 +1657,10 @@ RULE_TIERS: dict[str, TierEntry] = {
         "AI attribution policy the auto classifier cannot know; a pushed trailer needs a history rewrite",
     ),
     "guard.subagent_scope": TierEntry(_F, "declared subagent scope the auto classifier cannot see"),
-    "guard.agent_output_guard": TierEntry(_S, "context hygiene, not a safety boundary"),
+    "guard.agent_output_guard": TierEntry(
+        _F,
+        "only subagent transcripts deny (background output passes); a transcript floods context",
+    ),
 }
 
 # Per-prefix tiers for the ALWAYS_DENY registry literals (rule

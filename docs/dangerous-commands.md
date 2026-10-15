@@ -126,6 +126,7 @@ before the colon. A key missing from the table is FLOOR. Pipe-to-shell
 | `guard.credential_check` | credential material in a tool input |
 | `guard.commit_message_validator` | AI-attribution policy the auto classifier cannot know; a pushed trailer needs a history rewrite |
 | `guard.subagent_scope` | declared subagent scope the auto classifier cannot see |
+| `guard.agent_output_guard` | only subagent transcripts deny (background output passes); a transcript floods context |
 
 ### STEER
 
@@ -153,7 +154,6 @@ before the colon. A key missing from the table is FLOOR. Pipe-to-shell
 | `guard.git_c_validator:stash` | `stash pop` / `drop` / `clear` |
 | `guard.git_c_validator:ref_mutation` | local branch / tag / remote-config write |
 | `guard.git_c_validator:not_read_only` | subcommand off the `git -C` read-only list |
-| `guard.agent_output_guard` | context hygiene, not a safety boundary |
 
 `ALWAYS_DENY` literals (`bash.always_deny`) are FLOOR, each with its
 registry reason as the rationale, except these STEER prefixes: `git add -A`,

@@ -486,11 +486,10 @@ def test_git_c_steer_shape_denies_outside_auto(
     assert decision_from_stdout(stdout) == "deny"
 
 
-@pytest.mark.parametrize(("permission_mode", "expected"), [("auto", None), ("default", "deny")])
-def test_agent_output_guard_is_steer(
-    tmp_path: Path, permission_mode: str, expected: str | None
-) -> None:
-    # Built at runtime so this source holds no literal agent-output path.
+@pytest.mark.parametrize("permission_mode", ["auto", "default"])
+def test_agent_output_guard_is_floor(tmp_path: Path, permission_mode: str) -> None:
+    # Built at runtime so this source holds no literal agent-output path. The
+    # path does not exist, so the hook fails closed and denies.
     transcript = "/".join(["", "tmp", "claude-501", "proj", "sess", "tasks", "abc" + ".output"])
     _rc, stdout, _ = run_hook(
         "agent_output_guard",
@@ -498,10 +497,9 @@ def test_agent_output_guard_is_steer(
         permission_mode=permission_mode,
         env_extra=_hook_env(tmp_path),
     )
-    assert decision_from_stdout(stdout) == expected
+    assert decision_from_stdout(stdout) == "deny"
     [record] = _hook_records(tmp_path)
-    if expected is None:
-        assert record["reason"] == auto_pass_reason("guard.agent_output_guard")
+    assert record["decision"] == "deny"
 
 
 def test_protected_files_stays_on_the_floor_in_auto(tmp_path: Path) -> None:

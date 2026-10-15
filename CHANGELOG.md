@@ -19,6 +19,8 @@ adheres to [Semantic Versioning](https://semver.org/).
   `ssh` / `docker exec` command, a `find -exec` command) are still checked
   against the floor. Other permission modes, `lockdown` and allowlist
   overrides behave exactly as before.
+- `agent_output_guard` is FLOOR: a subagent transcript read denies in `auto`
+  too, while background command output passes in every mode.
 - The floor holds against the wrappers that used to hide a command from it.
   `env` options are peeled (`env -i`, `-u NAME`, `-C DIR`, `--`) and the
   assignments after them still meet `bash.dangerous_env_sink`
