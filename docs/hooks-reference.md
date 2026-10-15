@@ -181,17 +181,35 @@ Commit message contains AI attribution. Found: Co-Authored-By: Claude <noreply@a
 
 ### What it checks
 
-Denies direct `Read` and `Bash(cat|head|tail)` calls against subagent
-output transcripts (paths matching `/(private/)?tmp/claude-<pid>/.../tasks/<id>.output`).
-Those files are large JSONL transcripts; pulling them straight into context
-wastes the entire window. The deny message points the agent at the
-appropriate query CLI instead.
+Claude Code writes two kinds of file under
+`/(private/)tmp/claude-<uid>/<project>/<session>/tasks/<id>.output`:
+background Bash command output (plain text, meant to be read) and subagent
+transcripts (multi-MiB JSONL, today a symlink into
+`~/.claude/projects/<project>/<session>/subagents/agent-<id>.jsonl`).
+Reading a transcript pulls the whole run into context, so the hook resolves
+every `tasks/*.output` path in a tool call on disk and classifies it:
+
+| Path | Decision |
+|---|---|
+| Regular file whose first line is plain text (or JSON that is not a transcript record) | pass: background command output, any size, any verb (`cat`, `tail`, `grep`, Read) |
+| Symlink to a `.jsonl` file or into a `subagents/` dir | deny: subagent transcript |
+| File whose first line is a JSON object with transcript keys (`parentUuid`, `isSidechain`, `sessionId`, `agentId`) | deny: subagent transcript (covers builds that wrote the JSONL in place) |
+| Wildcard under `tasks/` (`tasks/*.output`, `tasks/*`, `claude-*/...`) | deny: can expand to a transcript |
+| Missing, not a regular file, unreadable, or a mention the tokenizer cannot split out (a quoted path with a space) | deny: fail closed |
+
+Detection keys off how Claude Code stores transcripts (the link into
+`subagents/`, the transcript record keys), not file size or id shape: a size
+threshold misfires both ways (a just-launched transcript is small, a
+backgrounded `gh api --paginate` dump is large) and id formats are internal
+to Claude Code. The hook is not allowlist-overridable.
 
 ### Example block
 
 ```
-Direct reads on agent output files are not allowed — they are large JSONL
-transcripts that waste context. Use the appropriate query CLI for this data.
+This path is a subagent transcript (multi-MiB JSONL); reading it floods
+context. Wait for the subagent's completion notification and use the result
+it returns. Background command output in the same tasks/ directory is fine
+to read by its exact path.
 ```
 
 ---
