@@ -53,7 +53,8 @@ guard mode:
   hiding (a `$(...)` / `<(...)` body, a `bash -c` string, a function body, a
   `trap` handler, a `find -exec` command, an `ssh` / container `exec` /
   `nsenter` command) through the floor on its own. A `-c` string it cannot
-  read (empty, a `{}` placeholder, or built from `$` expansions) is denied.
+  read (empty, a `{}` placeholder, or a command named by an expansion such
+  as `bash -c "$X"`) is denied.
 
 In both modes the validator:
 

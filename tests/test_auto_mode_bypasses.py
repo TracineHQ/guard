@@ -108,6 +108,9 @@ STILL_PASSES_IN_AUTO: list[str] = [
     "env -u DEBUG make test",
     "bash -o pipefail -c 'make test'",
     "bash -c -- 'ls -la'",
+    "bash -c 'echo $HOME'",
+    "sh -c 'cd \"$1\" && make' _ dir",
+    "bash -c 'for f in *.py; do wc -l \"$f\"; done'",
     "trap -- 'echo done' EXIT",
     "find . -name '*.pyc' -delete",
     "find .. -type d -name __pycache__ -exec rm -rf {} +",
@@ -179,9 +182,10 @@ def _reason(command: str, permission_mode: str = "auto") -> str:
 
 
 def test_opaque_shell_string_names_the_shape() -> None:
-    reason = _reason("bash -c 'echo \"$1\"' _ hi")
+    reason = _reason("bash -c 'cd /tmp && \"$1\" --version' _ git")
+    assert "bash.var_expanded_head" in reason or "named by an expansion" in reason
+    reason = _reason("bash -c ''")
     assert "bash.shell_wrapper" in reason
-    assert "`$` expansions" in reason
     reason = _reason("echo ls | xargs -I{} bash -c '{}'")
     assert "bash.shell_wrapper" in reason
     assert "placeholder" in reason

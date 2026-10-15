@@ -21,6 +21,8 @@
 {"command": "env -u DEBUG make test", "expected": "allow", "mode": "auto", "source": "curated", "note": "env options are peeled; the inner command is benign"}
 {"command": "bash -o pipefail -c 'make test'", "expected": "allow", "mode": "auto", "source": "curated", "note": "shell option values are skipped; -c payload is benign"}
 {"command": "bash -c -- 'ls -la'", "expected": "allow", "mode": "auto", "source": "curated", "note": "-- before the -c string is skipped; payload is benign"}
+{"command": "bash -c 'echo $HOME'", "expected": "allow", "mode": "auto", "source": "curated", "note": "$ in a -c argument is fine; only an expanded command head is opaque"}
+{"command": "sh -c 'cd \"$1\" && make' _ dir", "expected": "allow", "mode": "auto", "source": "curated", "note": "positional in an argument, literal command heads"}
 {"command": "trap -- 'echo done' EXIT", "expected": "allow", "mode": "auto", "source": "curated", "note": "trap -- handler is floor-checked and benign"}
 {"command": "find .. -type d -name __pycache__ -exec rm -rf {} +", "expected": "allow", "mode": "auto", "source": "curated", "note": "filtered find under .. is STEER"}
 {"command": "awk 'BEGIN{system(\"date\")}'", "expected": "allow", "mode": "auto", "source": "curated", "note": "awk system() with a benign literal command"}

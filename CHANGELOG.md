@@ -26,8 +26,8 @@ adheres to [Semantic Versioning](https://semver.org/).
   payloads are checked, a shell reading a here-string or process
   substitution on stdin (`{ bash; } <<< '...'`) counts as running it, and an
   unfiltered `find . -delete` / `find .. -exec rm` is FLOOR. A `-c` string
-  that is empty, a `{}` placeholder or built from `$` expansions is denied in
-  `auto`. Variable and glob command heads (`$R`, `$@`, `/bin/r?`) and
+  that is empty, a `{}` placeholder or runs a command named by an expansion
+  (`bash -c "$X"`) is denied in `auto`; `$` in an argument is fine. Variable and glob command heads (`$R`, `$@`, `/bin/r?`) and
   `bash.admin_default_deny` (secret reads, IAM grants, public access) are
   FLOOR.
 - awk programs are checked in every mode: a literal command in `system()`,

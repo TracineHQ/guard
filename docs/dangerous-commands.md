@@ -40,8 +40,9 @@ function body, a `trap` handler, a `find -exec` command, and the command an
 re-checked with `/` in its place, so `rm -rf $(echo /)` still denies. Wrapper
 options are peeled first (`env -i`, `env -u NAME`, `bash -o pipefail -c`,
 `ssh host --`), so a wrapper never hides the command it runs. A `-c` string
-guard cannot read (empty, an `xargs -I{}` placeholder, or built from `$`
-expansions) is denied. awk is checked in every mode: a literal command in
+guard cannot read (empty, an `xargs -I{}` placeholder, or a command named by
+an expansion such as `bash -c "$X"`) is denied; `$` in an argument
+(`bash -c 'echo $HOME'`) is fine. awk is checked in every mode: a literal command in
 `system()`, `print | "cmd"` or `"cmd" | getline` goes through the floor, and
 one built at run time is denied.
 
@@ -88,7 +89,7 @@ before the colon. A key missing from the table is FLOOR. Pipe-to-shell
 | `bash.eval_builtin` | `eval` runs an arbitrary string as code |
 | `bash.dangerous_construct:executed` | output run as code (`bash -c "$(curl ...)"`, `source <(...)`, a shell fed by `<<<`), or awk running a command built at run time |
 | `bash.dangerous_construct:sensitive_target` | `>` / `>>` / `>|` into `~/.ssh`, a shell rc file, `/etc`, a launch agent, git config or a git hook |
-| `bash.shell_wrapper:opaque` | `-c` string that is empty, a `{}` placeholder or built from `$` expansions |
+| `bash.shell_wrapper:opaque` | `-c` string that is empty, a `{}` placeholder or runs a command named by an expansion |
 | `bash.admin_default_deny` | cloud CLI verb off the read-only catalog: secret reads, IAM grants, public access, key minting |
 | `bash.var_expanded_head` | variable-named command (`$R`, `$SHELL`, `$1`, `$@`); what runs is unknowable |
 | `bash.glob_head` | glob in the command name (`/bin/r?`) hides which binary runs |

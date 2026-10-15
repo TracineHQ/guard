@@ -6586,7 +6586,8 @@ def _decide_inner(
                 body = (
                     f"`{seg[:_SEGMENT_DISPLAY_TRUNC]}` hands the shell a `-c` string "
                     f"(`{opaque[:_SEGMENT_DISPLAY_TRUNC]}`) that is empty, a `{{}}` placeholder "
-                    "or built from `$` expansions, so the code that runs is only known at "
+                    'or runs a command named by an expansion (`$X`, `"$@"`, `$(...)`), so '
+                    "the code that runs is only known at "
                     "run time. Write the commands into the `-c` string literally, or into a "
                     "script file and run that"
                 )
@@ -7327,16 +7328,29 @@ def _remote_payload(tokens: list[str]) -> str | None:
     return " ".join(rest) if head == "ssh" else shlex.join(rest)
 
 
-# A ``$`` expansion (variable, positional, substitution) inside a ``-c`` string.
-_DOLLAR_EXPANSION_RE = re.compile(r"\$[A-Za-z_{(0-9@*#?!$-]")
+def _has_expanded_head(code: str) -> bool:
+    """True when a command in ``code`` is named by an expansion or substitution.
+
+    ``$X``, ``"$@"``, ``$0``, ``$(...)`` or a backtick as the command word: what
+    runs is only known at run time. Leading ``K=V`` assignments are skipped.
+    ``$`` in an argument (``echo $HOME``, ``cd "$1"``) does not count.
+    """
+    for segment in split_pipeline(code):
+        words = segment.split()
+        while words and _SEG_ENV_ASSIGN_RE.match(words[0]):
+            words = words[1:]
+        if words and words[0].lstrip("\"'").startswith(("$", "`")):
+            return True
+    return False
 
 
 def _opaque_shell_string(segment: str) -> str | None:
     """A shell ``-c`` string in ``segment`` whose code guard cannot read, else ``None``.
 
     Missing or empty, an ``xargs -I{}`` / ``find -exec`` ``{}`` placeholder, or
-    built from ``$`` expansions (``bash -c "$X"``, ``sh -c '"$@"' _ ...``): the
-    code that runs is only known at run time, so there is nothing to floor-check.
+    a command named by an expansion (``bash -c "$X"``, ``sh -c '"$@"' _ ...``):
+    the code that runs is only known at run time, so there is nothing to
+    floor-check. Any other string is floor-checked as a command of its own.
     """
     tokens = _payload_tokens(segment.strip())
     for i, tok in enumerate(tokens):
@@ -7347,7 +7361,7 @@ def _opaque_shell_string(segment: str) -> str | None:
             continue
         if payload is None or not payload.strip():
             return ""
-        if "{}" in payload or _DOLLAR_EXPANSION_RE.search(payload):
+        if "{}" in payload or _has_expanded_head(payload):
             return payload
     return None
 

@@ -1549,7 +1549,7 @@ RULE_TIERS: dict[str, TierEntry] = {
         "> / >> / >| into ~/.ssh, a shell rc file, /etc, a launch agent, git config or a git hook",
     ),
     "bash.shell_wrapper:opaque": TierEntry(
-        _F, "-c string that is empty, a {} placeholder or built from $ expansions"
+        _F, "-c string that is empty, a {} placeholder or runs a command named by an expansion"
     ),
     "bash.env_split_string": TierEntry(_F, "env -S rebuilds argv guard cannot see"),
     "bash.wrapper_stacking": TierEntry(_F, "nesting past the unwrap limit hides the inner command"),
