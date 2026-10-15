@@ -9,16 +9,21 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tests._helpers import git, init_git_repo
+
 if TYPE_CHECKING:
     from pathlib import Path
 
 
 @pytest.fixture
 def isolated_scopes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
-    """Return ``(global_dir, project_cwd)`` and chdir the test into project_cwd."""
+    """Return ``(global_dir, project_cwd)`` and chdir the test into project_cwd.
+
+    ``project_cwd`` is a git work tree, so the untracked project file the
+    commands write is trusted.
+    """
     global_dir = tmp_path / "global" / ".claude" / "guard"
-    project = tmp_path / "project"
-    project.mkdir(parents=True)
+    project = init_git_repo(tmp_path / "project")
     monkeypatch.setenv("GUARD_DATA_DIR", str(global_dir))
     monkeypatch.chdir(project)
     return global_dir, project
@@ -37,7 +42,9 @@ def test_list_empty_initially(isolated_scopes: tuple[Path, Path]) -> None:
     from guard.cli import cmd_allowlist_list
 
     payload, pretty = cmd_allowlist_list()
-    assert payload == {"disable_rules": [], "allow_commands": [], "sources": []}
+    assert payload["disable_rules"] == []
+    assert payload["allow_commands"] == []
+    assert payload["sources"] == []
     assert "empty" in pretty
 
 
@@ -142,3 +149,93 @@ def test_list_after_writes_shows_entries(isolated_scopes: tuple[Path, Path]) -> 
     assert "bash.disk_destruction" in payload["disable_rules"]
     assert any(e["rule"] == "bash.aws_destructive" for e in payload["allow_commands"])
     assert "disable_rules" in pretty
+
+
+# === Project allowlist trust ===
+
+
+def _track_project_file(project: Path, doc: dict) -> Path:
+    target = project / ".claude" / "guard" / "allowlist.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(doc), encoding="utf-8")
+    git(project, "add", "-f", ".claude/guard/allowlist.json")
+    return target
+
+
+def test_list_reports_trusted_project_file(isolated_scopes: tuple[Path, Path]) -> None:
+    from guard.cli import cmd_allowlist_disable_rule, cmd_allowlist_list
+
+    cmd_allowlist_disable_rule("bash.disk_destruction", scope="project")
+    payload, pretty = cmd_allowlist_list()
+    assert payload["project_allowlist"]["trusted"] is True
+    assert payload["project_allowlist"]["reason"] == "not tracked by git"
+    assert "trusted: not tracked by git" in pretty
+
+
+def test_list_reports_untrusted_project_file(isolated_scopes: tuple[Path, Path]) -> None:
+    from guard.cli import cmd_allowlist_list
+
+    _, project = isolated_scopes
+    _track_project_file(project, {"disable_rules": ["bash.disk_destruction"]})
+    payload, pretty = cmd_allowlist_list()
+    assert payload["disable_rules"] == []
+    assert payload["project_allowlist"]["trusted"] is False
+    assert payload["project_allowlist"]["reason"] == "tracked by git"
+    assert "UNTRUSTED: tracked by git" in pretty
+
+
+def test_list_reports_no_project_file(isolated_scopes: tuple[Path, Path]) -> None:
+    from guard.cli import cmd_allowlist_list
+
+    payload, _ = cmd_allowlist_list()
+    assert payload["project_allowlist"]["exists"] is False
+    assert payload["project_allowlist"]["trusted"] is None
+
+
+def test_disable_rule_warns_when_project_file_is_tracked(
+    isolated_scopes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    from guard.cli import cmd_allowlist_disable_rule
+
+    _, project = isolated_scopes
+    target = _track_project_file(project, {"disable_rules": []})
+    payload, _ = cmd_allowlist_disable_rule("bash.disk_destruction", scope="project")
+    err = capsys.readouterr().err
+    assert str(target) in err
+    assert "tracked by git" in err
+    assert "won't take effect" in err
+    assert "--global" in err
+    assert payload["project_allowlist"]["trusted"] is False
+
+
+def test_allow_command_warns_when_project_file_is_tracked(
+    isolated_scopes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    from guard.cli import cmd_allowlist_allow_command
+
+    _, project = isolated_scopes
+    _track_project_file(project, {"allow_commands": []})
+    cmd_allowlist_allow_command(rule="r", command="c", reason="x", scope="project")
+    assert "won't take effect" in capsys.readouterr().err
+
+
+def test_write_to_untracked_project_file_does_not_warn(
+    isolated_scopes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    from guard.cli import cmd_allowlist_allow_command, cmd_allowlist_disable_rule
+
+    cmd_allowlist_disable_rule("bash.disk_destruction", scope="project")
+    cmd_allowlist_allow_command(rule="r", command="c", reason="x", scope="project")
+    assert "won't take effect" not in capsys.readouterr().err
+
+
+def test_global_write_ignores_project_trust(
+    isolated_scopes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    from guard.cli import cmd_allowlist_disable_rule
+
+    _, project = isolated_scopes
+    _track_project_file(project, {"disable_rules": []})
+    payload, _ = cmd_allowlist_disable_rule("bash.disk_destruction", scope="global")
+    assert "won't take effect" not in capsys.readouterr().err
+    assert "project_allowlist" not in payload

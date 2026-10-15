@@ -163,6 +163,48 @@ def test_status_no_log(decision_log_env: Path) -> None:
     assert "exists: no" in pretty
 
 
+def _tracked_project_mode(tmp_path: Path, mode: str) -> tuple[Path, Path]:
+    """Return ``(project, allowlist)``: a git repo whose project file is tracked."""
+    from tests._helpers import git, init_git_repo
+
+    project = init_git_repo(tmp_path / "project")
+    target = project / ".claude" / "guard" / "allowlist.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps({"mode": mode}), encoding="utf-8")
+    git(project, "add", "-f", ".claude/guard/allowlist.json")
+    return project, target
+
+
+def test_status_reports_untrusted_project_allowlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decision_log_env: Path
+) -> None:
+    from guard.cli import cmd_status
+
+    project, target = _tracked_project_mode(tmp_path, "off")
+    monkeypatch.chdir(project)
+    payload, pretty = cmd_status()
+    assert payload["mode"] == "enforce"
+    assert payload["project_allowlist"] == {
+        "path": str(target),
+        "exists": True,
+        "trusted": False,
+        "reason": "tracked by git",
+    }
+    assert f"project allowlist: {target}" in pretty
+    assert "UNTRUSTED: tracked by git" in pretty
+
+
+def test_status_reports_missing_project_allowlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decision_log_env: Path
+) -> None:
+    from guard.cli import cmd_status
+
+    monkeypatch.chdir(tmp_path)
+    payload, pretty = cmd_status()
+    assert payload["project_allowlist"]["exists"] is False
+    assert "project allowlist: none" in pretty
+
+
 # === guard status: wiring check ===
 
 
@@ -909,6 +951,34 @@ def test_cmd_mode_round_trip_back_to_enforce(
     cli.main(["--json", "mode", "enforce"])
     doc = json.loads((project / ".claude" / "guard" / "allowlist.json").read_text(encoding="utf-8"))
     assert doc["mode"] == "enforce"
+
+
+def test_cmd_mode_shows_untrusted_project_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``guard mode`` says why a tracked project file's looser mode is ignored."""
+    from guard import cli
+
+    project, _ = _tracked_project_mode(tmp_path, "off")
+    monkeypatch.chdir(project)
+    payload, pretty = cli.cmd_mode(None, scope="project")
+    assert payload["effective_mode"] == "enforce"
+    assert payload["project_mode"] == "off"
+    assert payload["project_allowlist"]["trusted"] is False
+    assert "untrusted: tracked by git" in pretty
+
+
+def test_cmd_mode_write_to_tracked_project_file_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Writing ``off`` into a tracked project file leaves enforce in effect, loudly."""
+    from guard import cli
+
+    project, _ = _tracked_project_mode(tmp_path, "enforce")
+    monkeypatch.chdir(project)
+    payload, _ = cli.cmd_mode("off", scope="project")
+    assert payload["effective_mode"] == "enforce"
+    assert "tracked by git" in capsys.readouterr().err
 
 
 def test_dispatch_allowlist_enable_rule_via_main(

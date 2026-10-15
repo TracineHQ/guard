@@ -16,11 +16,15 @@ from pathlib import Path
 
 from tests._helpers import REPO_ROOT as REPO
 from tests._helpers import decision_from_stdout as _decision
+from tests._helpers import init_git_repo
 
 HOOK = REPO / "src" / "guard" / "hooks" / "bash_command_validator.py"
 
 
 def _write_mode(cwd: Path, mode: str) -> None:
+    # An untracked project file in a git work tree is trusted, so its mode
+    # can loosen guard (a tracked one could only tighten).
+    init_git_repo(cwd)
     allow_dir = cwd / ".claude" / "guard"
     allow_dir.mkdir(parents=True, exist_ok=True)
     (allow_dir / "allowlist.json").write_text(json.dumps({"mode": mode}))

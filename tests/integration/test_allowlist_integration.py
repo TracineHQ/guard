@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tests._helpers import git, init_git_repo
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -161,14 +163,28 @@ def test_project_allowlist_takes_effect(
 ) -> None:
     from guard.hooks.bash_command_validator import decide
 
-    project = tmp_path / "project"
-    project.mkdir()
+    project = init_git_repo(tmp_path / "project")  # untracked project file: trusted
     monkeypatch.chdir(project)
     _write_allowlist(
         project / ".claude" / "guard" / "allowlist.json",
         {"disable_rules": ["bash.disk_destruction"]},
     )
     assert _is_allow(decide("dd if=/dev/zero of=/dev/sda bs=1M"))
+
+
+def test_tracked_project_allowlist_does_not_take_effect(
+    allowlist_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from guard.hooks.bash_command_validator import decide
+
+    project = init_git_repo(tmp_path / "project")
+    monkeypatch.chdir(project)
+    _write_allowlist(
+        project / ".claude" / "guard" / "allowlist.json",
+        {"disable_rules": ["bash.disk_destruction"]},
+    )
+    git(project, "add", ".claude/guard/allowlist.json")
+    assert not _is_allow(decide("dd if=/dev/zero of=/dev/sda bs=1M"))
 
 
 # === Audit log records the bypass ===
