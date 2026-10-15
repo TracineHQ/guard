@@ -6,8 +6,37 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Under Claude Code's `auto` permission mode guard keeps only a hard floor.
+  Every deny rule is now classified FLOOR or STEER (with a one-line rationale)
+  in `registry.py` and in `docs/dangerous-commands.md`. In `auto`, FLOOR rules
+  (destructive, code injection, guard evasion, supply chain, credentials)
+  deny as before; STEER rules (redirects, `bash -c`, `git add -A`, tool
+  nudges, ...) return no decision and are logged as `decision: "pass"` with
+  reason `deferred to auto mode (steer rule <id>)`. Payloads a STEER shape
+  hides (a function body, a trap handler, a `bash -c` string, a remote
+  `ssh` / `docker exec` command, a `find -exec` command) are still checked
+  against the floor. Other permission modes, `lockdown` and allowlist
+  overrides behave exactly as before.
+- The `bash.dangerous_construct` deny now names the construct that actually
+  matched (command substitution, process substitution, here-string,
+  redirect, arithmetic expansion). A redirect is steered to the Write or
+  Edit tool or to a pipe instead of being reported as a substitution.
+
 ### Fixed
 
+- Read-only guard CLI calls (`guard status`, `guard allowlist list`,
+  `guard mode --help`, `guard allowlist --help`) no longer trip
+  `protected_files`.
+- `git -C <repo> fetch` is allowed when it only updates remote-tracking refs.
+  Pruning, forcing, a destination refspec or `--upload-pack` still deny.
+- The `git worktree add` steer now gives a sequence guard actually allows
+  (add the worktree detached, then `git switch -c` inside it).
+- Tests and the corpus no longer touch the developer's real home: conftest
+  isolates `HOME`, `GUARD_DATA_DIR` and the decision-log paths, the corpus
+  adjudicates against guard's shipped policy without writing logs, and a
+  collection-time `decide()` call that wrote to the real decision log is gone.
 - `bash.dangerous_interpreter` no longer blocks running a script or module
   (`uv run python tools/dev.py`, `python3 scripts/x.py`, `python -m pytest`).
   Those runs now pass through to Claude Code's own permission flow; lockdown

@@ -15,6 +15,20 @@ To disable any hook, remove its entry from the `PreToolUse` block in
 `~/.claude/settings.json`, or comment out the matching line in
 `hooks/hooks.json` if you forked the plugin.
 
+## Claude Code `auto` mode: hard floor only
+
+Every deny rule in every hook is FLOOR or STEER (`RULE_TIERS` in
+`src/guard/registry.py`; the full list with a rationale per rule is in
+[dangerous-commands.md](dangerous-commands.md#auto-mode-hard-floor-vs-steering)).
+When the PreToolUse payload says `permission_mode: "auto"` and guard is not in
+`lockdown`, a STEER deny is dropped: the hook returns no decision, Claude
+Code's own auto-mode classifier decides, and guard logs a `pass` record with
+reason `deferred to auto mode (steer rule <key>)` (see
+[JSONL_FORMAT.md §3.6](JSONL_FORMAT.md)). FLOOR rules deny in `auto` exactly as
+in every other mode. Every other permission mode, and `guard mode lockdown`
+in any permission mode, is unchanged. Allowlist overrides work the same in
+every mode.
+
 ---
 
 ## bash_command_validator
@@ -25,14 +39,20 @@ To disable any hook, remove its entry from the `PreToolUse` block in
 ### What it checks
 
 Validates the `command` string in `Bash` tool input. Behavior splits on
-guard mode, never on Claude Code's `permission_mode`:
+guard mode:
 
 - **Lockdown** (`guard mode lockdown`, opt-in) is default-deny: a segment
   must match a known-safe registry prefix to pass, and everything else is
-  denied with a queued-for-session-end message.
+  denied with a queued-for-session-end message. Claude Code's
+  `permission_mode` never turns lockdown on or off.
 - **Enforce** (the default) passes unknown segments through to Claude Code's
   normal permission prompt. Only the dangerous floor and the elevated-risk
-  tier below force a `deny`.
+  tier below force a `deny`. Under Claude Code's `auto` permission mode only
+  the FLOOR rules deny (see above); after skipping a STEER match the
+  validator keeps scanning, and it runs any payload the STEER shape was
+  hiding (a `$(...)` / `<(...)` body, a `bash -c` string, a function body, a
+  `trap` handler, a `find -exec` command, an `ssh` / `docker exec` command)
+  through the floor on its own.
 
 In both modes the validator:
 
@@ -62,10 +82,23 @@ Read-only command substitution (e.g. `echo $(git rev-parse HEAD)`) passes
 outside lockdown; the same construct is re-evaluated for a dangerous inner
 command and denied if one is found, in either mode.
 
+A `bash.dangerous_construct` deny names the construct that actually matched
+(command substitution, process substitution, a here-string, an output
+redirect) and the route to take instead. A plain `>` / `>>` redirect is
+steered to the Write or Edit tool, or to a pipe. Output run as code
+(`bash <(curl ...)`, `bash -c "$(curl ...)"`) and a redirect into a sensitive
+path (`~/.ssh`, a shell rc file, `/etc`) are FLOOR shapes of the same rule.
+
 ### Example block
 
 ```
 git add -A is denied: stages all files indiscriminately
+```
+
+```
+guard [permission_mode=default] denied: bash.dangerous_construct. `echo hi >
+notes.txt` uses an output redirect (> or >>). Use the Write or Edit tool to
+create or change files, or pipe the output to the next command instead. ...
 ```
 
 ---
@@ -79,9 +112,15 @@ git add -A is denied: stages all files indiscriminately
 
 Catches `git -C <path> <subcommand>` invocations that ordinary glob-based
 permission rules struggle to classify (because `*` does not cross `/`).
-Read-only subcommands (`status`, `log`, `diff`, etc.) auto-allow.
+Read-only subcommands (`status`, `log`, `diff`, etc.) auto-allow, and so does
+a plain `fetch`, which only updates remote-tracking refs. A `fetch` that
+prunes, forces, sets an upstream or writes a local ref through a `src:dst` /
+`+` refspec gets the run-it-from-inside-the-repo steer, and
+`fetch --upload-pack` or an `ext::` remote is denied as an exec.
 Destructive ones (`reset`, `clean`) are denied; `stash pop`, `stash drop`,
-and `stash clear` are denied as well.
+and `stash clear` are denied as well. Each deny shape has its own tier key
+(`guard.git_c_validator:<shape>`): `paths_config` and `read_exec` are FLOOR,
+the rest are STEER.
 
 Additional denials beyond the simple subcommand list:
 
@@ -185,7 +224,8 @@ Denies direct `Read` and `Bash(cat|head|tail)` calls against subagent
 output transcripts (paths matching `/(private/)?tmp/claude-<pid>/.../tasks/<id>.output`).
 Those files are large JSONL transcripts; pulling them straight into context
 wastes the entire window. The deny message points the agent at the
-appropriate query CLI instead.
+appropriate query CLI instead. It is a STEER hook: context hygiene rather
+than a safety boundary, so Claude Code's `auto` mode gets a logged pass.
 
 ### Example block
 
@@ -217,7 +257,10 @@ Bash writes are matched too: `_match_for_tool` routes `Bash` payloads through
 in-place-editor targets per command (operands stop at `&&`, `|`, `;`) and
 runs each through `is_protected`. Operators inside quotes stay operands.
 `guard allowlist <write>` and `guard mode <mode>` count as writes to the
-allowlist, so the agent can't reconfigure guard through its CLI. Every other
+allowlist, so the agent can't reconfigure guard through its CLI. Reads stay
+reads: `--help` / `-h`, `guard status`, `guard allowlist list` and a bare
+`guard mode`, and a redirect such as `2>&1` is never taken for a mode
+argument. Every other
 tool passes (`Read`, `Grep`, `Glob`, `WebFetch`, `Agent`, `AskUserQuestion`,
 ...), and interpreter bodies count only when they show write intent.
 

@@ -82,8 +82,13 @@ from guard.registry import (
     SAFE_PREFIXES,
     STRICT_FEEDBACK,
     Safety,
+    Tier,
+    always_deny_key,
+    auto_pass_reason,
+    defers_steer,
     git_read_exec_violation,
     git_ref_violation,
+    rule_tier,
 )
 
 _HOOK_ID = "guard.bash_command_validator"
@@ -131,7 +136,46 @@ _REQUEST_CONTEXT: dict[str, Any] = {
     "permission_mode": "default",
     "mode": "enforce",  # guard mode (enforce|shadow|off|lockdown) resolved from allowlist at hook entry
     "lockdown": False,  # strict default-deny; set by decide() from guard mode, never permission_mode
+    # auto permission mode outside lockdown: STEER rules are deferred to Claude
+    # Code instead of denying. ``deferred`` collects the STEER keys one decide()
+    # call skipped; ``floor_depth`` bounds the nested floor checks.
+    "defer_steer": False,
+    "deferred": [],
+    "floor_depth": 0,
+    "floor_hit": "",
+    "allowlist": None,
+    "original_command": "",
 }
+
+
+def _defer_to_auto(rule_key: str) -> bool:
+    """True when ``rule_key`` is a STEER rule and this call is in auto mode.
+
+    Records the key so ``decide`` logs it as an auto-mode pass. The caller then
+    skips that deny and keeps evaluating, so a FLOOR rule later in the chain
+    (or on another segment) still fires. A rule the user allowlisted is not
+    deferred: it fires and the allowlist turns it into an allow, as in every
+    other mode.
+    """
+    if not _REQUEST_CONTEXT.get("defer_steer") or rule_tier(rule_key) is not Tier.STEER:
+        return False
+    allowlist: Allowlist | None = _REQUEST_CONTEXT.get("allowlist")
+    rule_id = rule_key.split(":", 1)[0]  # tier sub-keys share their rule's allowlist id
+    if allowlist is not None and (
+        allowlist.is_rule_disabled(rule_id)
+        or allowlist.find_command(rule_id, _REQUEST_CONTEXT["original_command"]) is not None
+    ):
+        return False
+    deferred: list[str] = _REQUEST_CONTEXT["deferred"]
+    if rule_key not in deferred:
+        deferred.append(rule_key)
+    return True
+
+
+def _fires(rule_key: str) -> bool:
+    """Matcher filter: a hit fires unless it is a STEER rule deferred to auto mode."""
+    return not _defer_to_auto(rule_key)
+
 
 # Parsed once from GUARD_ADMIN_ALLOW_VERBS on first call to _get_admin_allow_verbs().
 _ADMIN_ALLOW_VERBS_CACHE: dict[str, frozenset[tuple[str, ...]]] | None = None
@@ -167,6 +211,19 @@ def _log_local(
     onto the spec writer in ``guard._utils.log_decision``.
     """
     spec_decision = _SPEC_DECISION_MAP.get(decision, "pass")
+    if not reason.startswith("allowlist:"):
+        if _REQUEST_CONTEXT.get("floor_depth"):
+            # A nested floor check: the outer call logs one record for the
+            # whole command, naming the hidden payload's rule.
+            if spec_decision == "deny":
+                _REQUEST_CONTEXT["floor_hit"] = reason
+            return
+        if (
+            _REQUEST_CONTEXT.get("defer_steer")
+            and _REQUEST_CONTEXT.get("deferred")
+            and spec_decision != "deny"
+        ):
+            return  # decide() writes the auto-mode pass records for this call
     session_id = _REQUEST_CONTEXT["session_id"] or os.environ.get("CLAUDE_SESSION_ID", "")
     log_decision(
         hook_id=_HOOK_ID,
@@ -2266,23 +2323,26 @@ def _candidate_forms(segment: str) -> list[str]:
     return forms
 
 
-def _match_always_deny(segment: str) -> str | None:
+def _match_always_deny(segment: str, accept: Callable[[str], bool] | None = None) -> str | None:
     """Return the longest ALWAYS_DENY prefix matching ``segment`` or ``None``.
 
     Iterates ``_candidate_forms(segment)`` so quote / whitespace / env-prefix
     / git-global-option / runner-wrapper bypasses cannot evade the registry's
-    deny set.
+    deny set. ``accept`` (called with the prefix's tier key) filters out hits
+    deferred to auto mode so scanning continues past them.
     """
     if not segment:
         return None
     for form in _candidate_forms(segment):
-        match = _match_always_deny_literal(form)
+        match = _match_always_deny_literal(form, accept)
         if match is not None:
             return match
     return None
 
 
-def _match_always_deny_literal(normalized: str) -> str | None:
+def _match_always_deny_literal(
+    normalized: str, accept: Callable[[str], bool] | None = None
+) -> str | None:
     """Pure literal prefix lookup against ALWAYS_DENY (no canonicalization).
 
     Recognises the bare-prefix form (``git push --force``) AND the
@@ -2291,7 +2351,10 @@ def _match_always_deny_literal(normalized: str) -> str | None:
     its own canonical attached-value invocation.
     """
     matches = [
-        p for p in ALWAYS_DENY if normalized == p or normalized.startswith((p + " ", p + "="))
+        p
+        for p in ALWAYS_DENY
+        if (normalized == p or normalized.startswith((p + " ", p + "=")))
+        and (accept is None or accept(always_deny_key(p)))
     ]
     if not matches:
         return None
@@ -2601,8 +2664,10 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         "new branch ref (same class as ``git branch <name>``), or the target "
         "resolves under a system root (/etc, /usr, /var, /System, ...) where a "
         "worktree would clobber OS files. For a worktree on an EXISTING branch "
-        "use ``git worktree add <path> <branch>`` under a sibling/``/tmp`` path; "
-        "create the branch explicitly first if needed."
+        "use ``git worktree add <path> <branch>`` under a sibling/``/tmp`` path. "
+        "For a NEW branch, add the worktree detached and create the branch "
+        "inside it: ``git worktree add --detach <path>`` then ``cd <path> && git "
+        "switch -c <name>`` (``git branch <name>`` is blocked too)."
     ),
     _SYNTH_GIT_READ_EXEC_DENY: (
         "Read-only git subcommand coerced into a file write or external-program "
@@ -5258,7 +5323,18 @@ def _match_admin_forbidden_layers(
     return None
 
 
-def _match_synthetic_deny(segment: str) -> tuple[str, str] | tuple[str, str, str] | None:
+def _synth_tier_key(rule_id: str, cand: str) -> str:
+    """Tier key for a synthetic hit: ``source`` / ``.`` steer, ``eval`` is floor."""
+    if rule_id == "bash.eval_builtin":
+        head = cand.split(maxsplit=1)[0] if cand else ""
+        if _basename(head) in {"source", "."}:
+            return "bash.eval_builtin:source"
+    return rule_id
+
+
+def _match_synthetic_deny(
+    segment: str, accept: Callable[[str], bool] | None = None
+) -> tuple[str, str] | tuple[str, str, str] | None:
     """Return ``(label, rule_id)`` or ``(label, rule_id, body)`` if a matcher fires, else ``None``.
 
     Covers non-canonical interpreters, dangerous rm shapes, and the git
@@ -5271,19 +5347,26 @@ def _match_synthetic_deny(segment: str) -> tuple[str, str] | tuple[str, str, str
     a 3-tuple ``(label, rule_id, body)``; all other matchers return the standard
     2-tuple ``(label, rule_id)`` and the caller looks up the body in
     ``_SYNTH_DENY_REASONS``.
+
+    ``accept`` (called with the hit's tier key) drops hits deferred to auto
+    mode, so the scan moves on to the remaining matchers and peeled forms.
     """
     if not segment:
         return None
+
+    def take(key: str) -> bool:
+        return accept is None or accept(key)
+
     forms = _exec_wrapper_candidates(segment)
     for cand in forms:
         # Admin forbidden-layer checks (env-var, subcommand, flag) fire BEFORE
         # the catalog check so they cannot be bypassed by a read-only verb.
         forbidden_hit = _match_admin_forbidden_layers(cand)
-        if forbidden_hit is not None:
+        if forbidden_hit is not None and take(forbidden_hit[1]):
             return forbidden_hit
 
         for matcher, label, rule_id in _PER_FORM_MATCHERS:
-            if matcher(cand):
+            if matcher(cand) and take(_synth_tier_key(rule_id, cand)):
                 if matcher is _is_admin_default_deny_dispatch:
                     # Re-derive the spec + verb_tuple for the dynamic body.
                     for spec in ADMIN_CLI_SPECS:
@@ -5312,15 +5395,15 @@ def _match_synthetic_deny(segment: str) -> tuple[str, str] | tuple[str, str, str
                 return label, rule_id
     # Variable-expanded head token: only the raw normalized form is what
     # matters; runner stripping would just hide the ``$VAR`` head.
-    if _has_var_expanded_head(forms[0]):
+    if _has_var_expanded_head(forms[0]) and take("bash.var_expanded_head"):
         return _SYNTH_VAR_EXPAND_DENY, "bash.var_expanded_head"
     # Shell-wrapper invocations: deny outright regardless of payload.
-    if _is_shell_wrapper_invocation(segment):
+    if _is_shell_wrapper_invocation(segment) and take("bash.shell_wrapper"):
         return _SYNTH_SHELL_WRAPPER_DENY, "bash.shell_wrapper"
     # Wrapper-stacking past the unwrap cap: if no per-form matcher fired and
     # the peel cascade would still strip another layer, the segment is a
     # deliberate bypass attempt.
-    if _exceeds_unwrap_cap(segment):
+    if _exceeds_unwrap_cap(segment) and take("bash.wrapper_stacking"):
         return _SYNTH_WRAPPER_STACKING_DENY, "bash.wrapper_stacking"
     return None
 
@@ -5365,7 +5448,7 @@ def _get_always_deny(segments: list[str]) -> tuple[dict[str, str], str] | None:
         if seg in seen:
             continue
         seen.add(seg)
-        prefix = _match_always_deny(seg)
+        prefix = _match_always_deny(seg, _fires)
         if prefix is not None:
             rule_reason = _ALWAYS_DENY_REASONS.get(prefix)
             body = (
@@ -5374,7 +5457,7 @@ def _get_always_deny(segments: list[str]) -> tuple[dict[str, str], str] | None:
                 else f"Blocked: `{seg[:_SEGMENT_DISPLAY_TRUNC]}` is on the always-deny list"
             )
             return _deny(_format_deny_reason("bash.always_deny", body)), "bash.always_deny"
-        synth = _match_synthetic_deny(seg)
+        synth = _match_synthetic_deny(seg, _fires)
         if synth is not None:
             if len(synth) == 3:
                 label, rule_id, body = synth
@@ -5474,7 +5557,7 @@ def _match_elevated_risk(segments: list[str]) -> tuple[str, str] | None:
             continue
         for cand in _exec_wrapper_candidates(seg):
             for matcher, rule_id, body in _ELEVATED_RISK_MATCHERS:
-                if matcher(cand):
+                if matcher(cand) and _fires(rule_id):
                     return rule_id, body
     return None
 
@@ -5977,7 +6060,7 @@ def _format_deny_reason(rule_id: str, body: str) -> str:
     it to the user (enforce) or surface and stop (lockdown). The body is
     prefixed with a ``guard [permission_mode=<mode>] denied: <rule_id>``
     annunciator so reviewers can see the session's permission mode at a
-    glance; the mode is context only and never changes the decision.
+    glance; only ``auto`` changes a decision (STEER rules are skipped there).
     """
     body = body.rstrip(" .")
     mode = _REQUEST_CONTEXT.get("permission_mode") or "default"
@@ -6078,6 +6161,8 @@ def _evaluate_segments(
                 # matcher, or the awk-sink guard before reaching here.
                 _log_local(command, "passthrough", f"advisory: {base_cmd} read-only")
                 continue
+            if _defer_to_auto("bash.tool_alternative"):
+                return None  # nothing later in the walk can deny
             deny = _deny(_format_deny_reason("bash.tool_alternative", feedback))
             bypass = _maybe_allow_via_allowlist(
                 allowlist, "bash.tool_alternative", original_command, deny
@@ -6200,16 +6285,80 @@ def decide(
     ``original_command`` is the unmodified user-typed command string used for
     allowlist exact-match lookups. When ``None``, defaults to ``command``.
 
-    ``permission_mode`` is the documented Claude Code permission mode. It is
-    recorded in deny reasons and the log for context and never changes the
-    decision. ``lockdown`` (guard mode ``lockdown``) routes through strict
-    default-deny evaluation; otherwise only the blocklist applies. Both are
-    stamped onto ``_REQUEST_CONTEXT`` so downstream helpers (deny
-    annunciator, agent-guidance selector) can read them without an extra
-    parameter through the call graph.
+    ``permission_mode`` is the documented Claude Code permission mode. Outside
+    ``auto`` it is recorded in deny reasons and the log for context only. In
+    ``auto`` (and not in lockdown) guard keeps only its hard floor: a STEER
+    rule that matches is skipped, the scan goes on so a FLOOR rule anywhere in
+    the command still denies, and when nothing on the floor matches the call
+    returns ``None`` with one ``pass`` record per skipped rule. ``lockdown``
+    (guard mode ``lockdown``) routes through strict default-deny evaluation;
+    otherwise only the blocklist applies. Both are stamped onto
+    ``_REQUEST_CONTEXT`` so downstream helpers (deny annunciator,
+    agent-guidance selector) can read them without an extra parameter through
+    the call graph.
     """
     if original_command is None:
         original_command = command
+    _REQUEST_CONTEXT["defer_steer"] = defers_steer(permission_mode, lockdown=lockdown)
+    _REQUEST_CONTEXT["deferred"] = []
+    _REQUEST_CONTEXT["floor_depth"] = 0
+    _REQUEST_CONTEXT["original_command"] = original_command
+    try:
+        result = _decide_inner(command, original_command, permission_mode, lockdown=lockdown)
+    finally:
+        _REQUEST_CONTEXT["defer_steer"] = False
+        _REQUEST_CONTEXT["allowlist"] = None
+    deferred: list[str] = _REQUEST_CONTEXT["deferred"]
+    if not deferred or (result is not None and result.get("permissionDecision") == "deny"):
+        return result
+    for key in deferred:
+        _log_local(command, "passthrough", auto_pass_reason(key))
+    return None
+
+
+def _floor_check(text: str, command: str) -> dict[str, str] | None:
+    """Deny envelope if ``text``, a payload hidden from the segment walk, hits the floor.
+
+    Used in auto mode once a STEER rule that hides a payload (substitution,
+    function body, trap handler, ``bash -c`` string) has been skipped: the
+    payload runs through the full decision with STEER rules still deferred, so
+    only a FLOOR rule can deny. Nesting past ``_MAX_SUBSTITUTION_DEPTH`` fails
+    closed. ``command`` is the outer command, used for the log record.
+    """
+    depth: int = _REQUEST_CONTEXT["floor_depth"]
+    if depth >= _MAX_SUBSTITUTION_DEPTH:
+        body = (
+            f"`{text[:_SEGMENT_DISPLAY_TRUNC]}` nests substitutions, function bodies or "
+            "`-c` strings too deep to check. Flatten the command into separate steps"
+        )
+        hit: dict[str, str] | None = _deny(_format_deny_reason("bash.dangerous_construct", body))
+        _REQUEST_CONTEXT["floor_hit"] = "nested too deep"
+    else:
+        _REQUEST_CONTEXT["floor_depth"] = depth + 1
+        _REQUEST_CONTEXT["floor_hit"] = ""
+        try:
+            hit = _decide_inner(
+                text,
+                _REQUEST_CONTEXT["original_command"],
+                _REQUEST_CONTEXT["permission_mode"],
+                lockdown=False,
+            )
+        finally:
+            _REQUEST_CONTEXT["floor_depth"] = depth
+    if hit is None or hit.get("permissionDecision") != "deny":
+        return None
+    _log_local(command, "deny", f"{_REQUEST_CONTEXT['floor_hit'] or 'floor'} (hidden payload)")
+    return hit
+
+
+def _decide_inner(
+    command: str,
+    original_command: str,
+    permission_mode: str,
+    *,
+    lockdown: bool,
+) -> dict[str, str] | None:
+    """The decision itself; ``decide`` wraps it with the auto-mode bookkeeping."""
     _REQUEST_CONTEXT["permission_mode"] = permission_mode
     _REQUEST_CONTEXT["lockdown"] = lockdown
     # Adversarial-length inputs (200 KB single-token ``echo aaaa...``) drive
@@ -6218,6 +6367,7 @@ def decide(
     # outright before any scan so the validator can't be DoS'd by an agent
     # emitting (or being tricked into emitting) a giant payload.
     allowlist = load_allowlist()
+    _REQUEST_CONTEXT["allowlist"] = allowlist
     if len(command) > _COMMAND_LENGTH_CAP:
         deny = _deny(
             _format_deny_reason(
@@ -6300,12 +6450,28 @@ def decide(
         _log_local(command, "deny", f"always-deny ({rule_id})")
         return deny
 
+    # === Auto mode: floor-check payloads a skipped STEER rule was hiding ===
+    if _REQUEST_CONTEXT["deferred"]:
+        if "bash.function_definition" in _REQUEST_CONTEXT["deferred"] and _is_fork_bomb(cleaned):
+            body = _SYNTH_DENY_REASONS[_SYNTH_FUNC_DEF_DENY]
+            _log_local(command, "deny", "always-deny (bash.function_definition:fork_bomb)")
+            return _deny(_format_deny_reason("bash.function_definition", body))
+        for seg in segments:
+            for body in _hidden_bodies(seg):
+                hidden = _floor_check(body, command)
+                if hidden is not None:
+                    return hidden
+
     # === Pre-evaluation: dangerous-construct deny in BOTH modes ===
-    # ``$(...)``, backticks, and process substitution are exfil/RCE primitives
-    # regardless of pipeline depth or interactive/strict context. Likewise,
-    # CONDITIONAL_SAFE base commands with denied flags (``find -exec``, etc.)
-    # must deny even for single-segment commands where the segment-walk would
-    # otherwise short-circuit to passthrough.
+    # ``$(...)``, backticks, process substitution, here-strings and ``>`` /
+    # ``>>`` file redirects hide what runs or what gets written, regardless of
+    # pipeline depth or interactive/strict context. The deny names the
+    # construct that matched. Likewise, CONDITIONAL_SAFE base commands with
+    # denied flags (``find -exec``, etc.) must deny even for single-segment
+    # commands where the segment-walk would otherwise short-circuit to
+    # passthrough. In auto mode only the executed / sensitive-target /
+    # rooted-find shapes stay on the floor; the rest are skipped after their
+    # hidden payloads are floor-checked.
     pre_deny = _pre_evaluate_dangerous(
         command, segments, seg_ops, allowlist=allowlist, original_command=original_command
     )
@@ -6320,7 +6486,7 @@ def decide(
     # dangerous payload still denies on its own merits; self-scoped to a guard
     # checkout so a pip-installed guard's `guard test` is untouched.
     steer = _match_harness_steering(segments)
-    if steer is not None:
+    if steer is not None and not _defer_to_auto("bash.use_corpus_harness"):
         deny = _deny(_format_deny_reason("bash.use_corpus_harness", steer))
         bypass = _maybe_allow_via_allowlist(
             allowlist, "bash.use_corpus_harness", original_command, deny
@@ -6582,6 +6748,351 @@ def _substitution_only_safe(text: str, depth: int) -> bool:
     return all(_substitution_only_safe(body, depth + 1) for body in bodies)
 
 
+# --- Dangerous-construct classification (deny message + auto-mode tier) ---
+
+_CONSTRUCT_LABELS: dict[str, str] = {
+    "substitution": "command substitution ($(...) or backticks)",
+    "process_substitution": "process substitution (<(...) or >(...))",
+    "here_string": "a here-string (<<<)",
+    "redirect": "an output redirect (> or >>)",
+    "arithmetic": "arithmetic expansion ($((...)))",
+}
+
+_CONSTRUCT_STEERS: dict[str, str] = {
+    "substitution": (
+        "Run the inner command as its own step and pass its output on as a literal "
+        "value (a substitution whose inner commands are all read-only already passes)"
+    ),
+    "process_substitution": (
+        "Write the inner output to a file with the Write tool and pass the path, or pipe it instead"
+    ),
+    "here_string": "Pipe the input to the command instead, or pass it as an argument",
+    "redirect": (
+        "Use the Write or Edit tool to create or change files, or pipe the output "
+        "to the next command instead"
+    ),
+    "arithmetic": "Compute the value in a separate step",
+}
+
+# Heads that run their input as code: shells, interpreters and ``source``.
+_CODE_RUNNER_HEADS: frozenset[str] = (
+    DANGEROUS_SHELL_WRAPPERS
+    | DANGEROUS_INTERPRETERS
+    | frozenset({"source", ".", "eval", "perl", "ruby", "php"})
+)
+
+_REDIRECT_RE = re.compile(r">>|>\s*\S")
+
+
+def _close_paren(text: str, open_idx: int) -> int:
+    """Index of the ``)`` matching ``text[open_idx] == "("``, or ``len(text)``."""
+    depth = 0
+    for j in range(open_idx, len(text)):
+        if text[j] == "(":
+            depth += 1
+        elif text[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return j
+    return len(text)
+
+
+def _construct_spans(masked: str) -> list[tuple[str, int, int, int]]:
+    """``(kind, start, body_start, body_end)`` per top-level substitution span.
+
+    ``masked`` is ``_shell_code_mask``-ed and the mask is length-preserving, so
+    the offsets also index the unmasked segment: callers slice bodies from the
+    original text with their quoting intact. ``kind`` is ``substitution``
+    (``$(...)``, backticks), ``process_in`` (``<(...)``) or ``process_out``
+    (``>(...)``). The closer sits at ``body_end``. ``$((...))`` arithmetic runs
+    no command and is skipped.
+    """
+    spans: list[tuple[str, int, int, int]] = []
+    kinds = {"$(": "substitution", "<(": "process_in", ">(": "process_out"}
+    i, n = 0, len(masked)
+    while i < n:
+        if masked.startswith("$((", i):
+            i = _close_paren(masked, i + 1) + 1
+            continue
+        opener = masked[i : i + 2]
+        if opener in kinds:
+            close = _close_paren(masked, i + 1)
+            spans.append((kinds[opener], i, i + 2, close))
+            i = close + 1
+            continue
+        if masked[i] == "`":
+            close = masked.find("`", i + 1)
+            close = n if close < 0 else close
+            spans.append(("substitution", i, i + 1, close))
+            i = close + 1
+            continue
+        i += 1
+    return spans
+
+
+def _blank_spans(masked: str, spans: list[tuple[str, int, int, int]]) -> str:
+    """``masked`` with every substitution span blanked (length-preserving)."""
+    rest = list(masked)
+    for _kind, start, _body, close in spans:
+        end = min(close + 1, len(rest))
+        rest[start:end] = [" "] * (end - start)
+    return "".join(rest)
+
+
+_REDIRECT_OP_RE = re.compile(r"&?>>?\|?")
+
+
+def _sensitive_redirect_target(
+    segment: str, masked: str, spans: list[tuple[str, int, int, int]]
+) -> str | None:
+    """The first ``>`` / ``>>`` target in ``segment`` that is a sensitive path.
+
+    Operators are found in the masked text (so a ``>`` inside a quoted string
+    is not one); the target is read from the original text at the same offset,
+    quotes and all. ``>&2`` style descriptor copies are not files.
+    """
+    remainder = _blank_spans(masked, spans)
+    for m in _REDIRECT_OP_RE.finditer(remainder):
+        rest = segment[m.end() :].lstrip()
+        if not rest or rest.startswith("&"):
+            continue
+        target = _shlex_tokens(rest)[:1]
+        if target and _operand_is_sensitive(target[0]):
+            return target[0]
+    return None
+
+
+def _construct_kinds(masked: str, spans: list[tuple[str, int, int, int]]) -> list[str]:
+    """Which dangerous constructs ``masked`` actually contains, in message order."""
+    found = {kind for kind, *_ in spans}
+    remainder = SAFE_REDIRECTS.sub("", _blank_spans(masked, spans))
+    kinds: list[str] = []
+    if "substitution" in found:
+        kinds.append("substitution")
+    if found & {"process_in", "process_out"}:
+        kinds.append("process_substitution")
+    if "<<<" in remainder:
+        kinds.append("here_string")
+    if _REDIRECT_RE.search(remainder.replace("<<<", "   ")):
+        kinds.append("redirect")
+    if "$((" in masked:
+        kinds.append("arithmetic")
+    return kinds or ["substitution"]
+
+
+def _executes_construct(segment: str, masked: str, spans: list[tuple[str, int, int, int]]) -> bool:
+    """True when the construct's output is run as code (a FLOOR shape).
+
+    ``$(curl ...)`` as the command itself, ``bash <(curl ...)`` /
+    ``source <(...)`` / ``python3 <<< ...`` (a shell, interpreter or ``source``
+    reading a process substitution or here-string), and ``bash -c "$(...)"``.
+    """
+    has_sub = any(kind == "substitution" for kind, *_ in spans)
+    feeds_code = any(kind == "process_in" for kind, *_ in spans) or "<<<" in masked
+    if masked.lstrip().startswith(("$(", "`")):
+        return True
+    for cand in _exec_wrapper_candidates(segment):
+        tokens = cand.split()
+        if not tokens:
+            continue
+        if cand.startswith(("$(", "`")):
+            return True
+        if _basename(tokens[0]) not in _CODE_RUNNER_HEADS:
+            continue
+        if feeds_code:
+            return True
+        if has_sub and any(
+            _SHELL_C_FLAGS_RE.match(t) or t in INTERPRETER_EVAL_FLAGS for t in tokens[1:]
+        ):
+            return True
+    return False
+
+
+def _join_words(items: list[str]) -> str:
+    if len(items) <= 1:
+        return "".join(items)
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _construct_body(
+    segment: str, kinds: list[str], *, executed: bool, sensitive_target: str | None = None
+) -> str:
+    """Deny body naming the construct that matched and the route to take instead."""
+    shown = segment[:_SEGMENT_DISPLAY_TRUNC]
+    found = _join_words([_CONSTRUCT_LABELS[k] for k in kinds])
+    if executed:
+        return (
+            f"`{shown}` runs the output of {found} as code, a remote-code-execution "
+            "primitive. Write the code to a file, read it, then run that file"
+        )
+    if sensitive_target is not None:
+        return (
+            f"`{shown}` redirects into `{sensitive_target}`, a sensitive path (ssh keys, "
+            "shell rc files, /etc, launch agents). Tell the user what you want to change "
+            "there; don't route around it"
+        )
+    steers = ". ".join(_CONSTRUCT_STEERS[k] for k in kinds)
+    return f"`{shown}` uses {found}. {steers}"
+
+
+def _construct_floor(
+    segment: str, spans: list[tuple[str, int, int, int]], command: str
+) -> dict[str, str] | None:
+    """Floor-check what a skipped substitution / process substitution hides.
+
+    Each body runs as its own command (a ``>(...)`` body reads the outer
+    output, so it is checked as ``cat | <body>`` to catch ``tee >(sh)``).
+    Then the segment is re-checked with every substitution replaced by ``/``,
+    the worst value it could expand to, so ``rm -rf $(echo /)`` still hits the
+    ``rm`` floor.
+    """
+    for kind, _start, body_start, close in spans:
+        body = segment[body_start:close].strip()
+        if not body:
+            continue
+        hit = _floor_check(f"cat | {body}" if kind == "process_out" else body, command)
+        if hit is not None:
+            return hit
+    subs = [(s, c) for kind, s, _b, c in spans if kind == "substitution"]
+    if not subs:
+        return None
+    worst, cursor = [], 0
+    for start, close in subs:
+        worst.append(segment[cursor:start])
+        worst.append("/")
+        cursor = close + 1
+    worst.append(segment[cursor:])
+    return _floor_check("".join(worst), command)
+
+
+# A self-recursive function that pipes into or backgrounds itself: the
+# ``:(){ :|:& };:`` fork bomb under any name. Kept on the floor in auto mode.
+_FUNC_HEAD_RE = re.compile(
+    r"(?:^|[\s;&|(])(?:function\s+)?([A-Za-z0-9_:.+-]+)\s*(?:\(\s*\)\s*)?[{(]"
+)
+
+
+def _is_fork_bomb(command: str) -> bool:
+    for m in _FUNC_HEAD_RE.finditer(command):
+        name = m.group(1)
+        if name == "function":
+            continue
+        body = command[m.end() :]
+        call = re.compile(rf"(?<![\w.:+-]){re.escape(name)}(?![\w.:+-])")
+        if call.search(body) and re.search(r"\||&(?!&)", body):
+            return True
+    return False
+
+
+_FIND_EXEC_FLAGS: frozenset[str] = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+_FIND_ROOT_STARTS: frozenset[str] = DANGEROUS_RM_OPERANDS - {".", "./", "*"}
+
+
+def _find_starts_at_root(tokens: list[str]) -> bool:
+    """True when a ``find`` start path is ``/``, ``~``, ``$HOME`` or a system root."""
+    start = next((i + 1 for i, t in enumerate(tokens) if _basename(t) == "find"), None)
+    if start is None:
+        return False
+    for tok in tokens[start:]:
+        if tok.startswith(("-", "(", "!")):
+            break
+        if tok in _FIND_ROOT_STARTS or tok.rstrip("/") in _FIND_ROOT_STARTS:
+            return True
+    return False
+
+
+def _payload_tokens(segment: str) -> list[str]:
+    r"""Return the shlex tokens of a segment.
+
+    Tolerates the lone ``\`` the splitter leaves behind when it cuts a
+    ``find ... \;`` at the ``;``.
+    """
+    return _shlex_tokens(segment.rstrip().removesuffix("\\"))
+
+
+def _find_exec_payloads(tokens: list[str]) -> list[str]:
+    """Commands a ``find -exec`` / ``-execdir`` / ``-ok`` would run, ``{}`` filled in."""
+    payloads: list[str] = []
+    i = 0
+    while i < len(tokens):
+        if tokens[i] in _FIND_EXEC_FLAGS:
+            j, parts = i + 1, []
+            while j < len(tokens) and tokens[j] not in {";", "\\;", "+"}:
+                parts.append("found-path" if tokens[j] == "{}" else tokens[j])
+                j += 1
+            if parts:
+                payloads.append(shlex.join(parts))
+            i = j
+        i += 1
+    return payloads
+
+
+# Options that take a value, so the host / container is not mistaken for one.
+_SSH_VALUE_FLAGS: frozenset[str] = frozenset(
+    {"-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L", "-l", "-m"}
+    | {"-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w"}
+)
+_EXEC_VALUE_FLAGS: frozenset[str] = frozenset(
+    {"-e", "--env", "--env-file", "-u", "--user", "-w", "--workdir", "--detach-keys"}
+    | {"-c", "--container", "-n", "--namespace"}
+)
+
+
+def _remote_payload(tokens: list[str]) -> str | None:
+    """The command ``ssh host ...`` / ``docker|podman|kubectl exec ...`` would run."""
+    if not tokens:
+        return None
+    head = _basename(tokens[0])
+    if head == "ssh":
+        value_flags, start = _SSH_VALUE_FLAGS, 1
+    elif head in {"docker", "podman", "lxc", "kubectl"} and tokens[1:2] == ["exec"]:
+        if "--" in tokens:
+            return shlex.join(tokens[tokens.index("--") + 1 :]) or None
+        value_flags, start = _EXEC_VALUE_FLAGS, 2
+    else:
+        return None
+    i = start
+    while i < len(tokens) and tokens[i].startswith("-"):
+        i += 2 if tokens[i] in value_flags else 1
+    rest = tokens[i + 1 :]  # tokens[i] is the host / container
+    if not rest:
+        return None
+    # ssh hands the words to the remote shell as one string; exec runs argv.
+    return " ".join(rest) if head == "ssh" else shlex.join(rest)
+
+
+def _hidden_bodies(segment: str) -> list[str]:
+    """Payloads in ``segment`` the per-segment matchers cannot see.
+
+    The body of an inline function definition, a ``trap`` handler, a shell
+    ``-c`` string, and the command an ``ssh`` / ``docker exec`` /
+    ``kubectl exec`` runs elsewhere. Only read in auto mode after a STEER rule
+    over one of these shapes was skipped; each body is then floor-checked as
+    a command.
+    """
+    stripped = segment.strip()
+    bodies: list[str] = []
+    m = _FUNC_DEF_RE.match(stripped) or _FUNCTION_KW_RE.match(stripped)
+    if m:
+        bodies.append(stripped[m.end() :].strip().removesuffix("}").removesuffix(")"))
+    tokens = _payload_tokens(stripped)
+    if len(tokens) > 1 and tokens[0] == "trap" and tokens[1] not in {"-", "-l", "-p"}:
+        bodies.append(tokens[1])
+    for i, tok in enumerate(tokens):
+        if _basename(tok) not in DANGEROUS_SHELL_WRAPPERS:
+            continue
+        for j in range(i + 1, min(i + 4, len(tokens) - 1)):
+            if _SHELL_C_FLAGS_RE.match(tokens[j]):
+                bodies.append(tokens[j + 1])
+                break
+            if not tokens[j].startswith("-"):
+                break
+    remote = _remote_payload(tokens)
+    if remote is not None:
+        bodies.append(remote)
+    return [b for b in dict.fromkeys(b.strip() for b in bodies) if b and b != stripped]
+
+
 def _pre_evaluate_dangerous(
     command: str,
     segments: list[str],
@@ -6622,20 +7133,33 @@ def _pre_evaluate_dangerous(
             # dangerous-construct check on the full segment.
             if _substitution_only_safe(segment, 0):
                 continue
-            body = (
-                f"`{segment[:_SEGMENT_DISPLAY_TRUNC]}` contains a dangerous shell "
-                "construct ($(...), backticks, or process substitution). "
-                "These are exfil/RCE primitives and are denied under "
-                "enforce and lockdown"
-            )
-            deny = _deny(_format_deny_reason("bash.dangerous_construct", body))
-            bypass = _maybe_allow_via_allowlist(
-                allowlist, "bash.dangerous_construct", original_command, deny
-            )
-            if bypass is not None:
-                return bypass
-            _log_local(command, "deny", "dangerous-construct (bash.dangerous_construct)")
-            return deny
+            spans = _construct_spans(masked)
+            executed = _executes_construct(segment, masked, spans)
+            target = None if executed else _sensitive_redirect_target(segment, masked, spans)
+            tier_key = "bash.dangerous_construct"
+            if executed:
+                tier_key += ":executed"
+            elif target is not None:
+                tier_key += ":sensitive_target"
+            if _defer_to_auto(tier_key):
+                hidden = _construct_floor(segment, spans, command)
+                if hidden is not None:
+                    return hidden
+            else:
+                body = _construct_body(
+                    segment,
+                    _construct_kinds(masked, spans),
+                    executed=executed,
+                    sensitive_target=target,
+                )
+                deny = _deny(_format_deny_reason("bash.dangerous_construct", body))
+                bypass = _maybe_allow_via_allowlist(
+                    allowlist, "bash.dangerous_construct", original_command, deny
+                )
+                if bypass is not None:
+                    return bypass
+                _log_local(command, "deny", f"dangerous-construct ({tier_key})")
+                return deny
         # Wrapper / runner prefixes (sudo, env, timeout, nice, stdbuf, flock,
         # ...) would otherwise hide a CONDITIONAL_SAFE base command from the
         # denied-flag check (``sudo find . -delete`` keys on ``sudo``). Re-check
@@ -6647,6 +7171,16 @@ def _pre_evaluate_dangerous(
             cand_base = cand_tokens[0] if cand_tokens else ""
             if cand_base not in CONDITIONAL_SAFE or _is_conditional_safe(cand, cand_base):
                 continue
+            root = cand_base == "find" and _find_starts_at_root(cand_tokens)
+            tier_key = (
+                "bash.conditional_denied_flag:root" if root else "bash.conditional_denied_flag"
+            )
+            if _defer_to_auto(tier_key):
+                for payload in _find_exec_payloads(_payload_tokens(segment)):
+                    hidden = _floor_check(payload, command)
+                    if hidden is not None:
+                        return hidden
+                break  # one flagged form is enough; the payloads are checked
             denied_flags = sorted(CONDITIONAL_SAFE[cand_base])
             body = (
                 f"`{cand_base}` was invoked with a denied flag "
@@ -6660,7 +7194,7 @@ def _pre_evaluate_dangerous(
             )
             if bypass is not None:
                 return bypass
-            _log_local(command, "deny", f"{cand_base}-denied-flag (bash.conditional_denied_flag)")
+            _log_local(command, "deny", f"{cand_base}-denied-flag ({tier_key})")
             return deny
     return None
 

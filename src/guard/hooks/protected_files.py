@@ -785,12 +785,41 @@ _GUARD_ALLOWLIST_WRITES: frozenset[str] = frozenset(
 )
 
 
+# A redirect token: ``2>&1``, ``>out``, ``>>``, ``<in``, ``&>log``. A bare
+# operator (empty group 1) takes the next token as its target.
+_REDIRECT_TOKEN_RE = re.compile(r"^\d*(?:&>>?|>>?|<)(.*)$")
+
+
+def _guard_cli_args(rest: list[str]) -> list[str]:
+    """Positional arguments after ``guard``, with flags and redirects dropped."""
+    args: list[str] = []
+    skip_target = False
+    for tok in rest:
+        if skip_target:
+            skip_target = False
+            continue
+        redirect = _REDIRECT_TOKEN_RE.match(tok)
+        if redirect is not None:
+            skip_target = not redirect.group(1)
+            continue
+        if not tok.startswith("-"):
+            args.append(tok)
+    return args
+
+
 def _guard_cli_writes_allowlist(tokens: list[str]) -> bool:
-    """Return True for a ``guard allowlist <write>`` or ``guard mode <mode>`` command."""
+    """Return True for a ``guard allowlist <write>`` or ``guard mode <mode>`` command.
+
+    ``--help`` / ``-h`` only prints usage, and a redirect such as ``2>&1`` is
+    not an argument, so ``guard mode --help 2>&1`` stays a read.
+    """
     for i, tok in enumerate(tokens):
         if tok.rsplit("/", 1)[-1] != "guard":
             continue
-        args = [t for t in tokens[i + 1 :] if not t.startswith("-")]
+        rest = tokens[i + 1 :]
+        if any(t in {"-h", "--help"} for t in rest):
+            return False
+        args = _guard_cli_args(rest)
         if args[:1] == ["allowlist"]:
             return len(args) > 1 and args[1] in _GUARD_ALLOWLIST_WRITES
         if args[:1] == ["mode"]:

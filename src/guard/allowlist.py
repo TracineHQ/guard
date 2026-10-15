@@ -45,7 +45,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from guard._utils import GUARD_HOME, log_decision
+from guard._utils import GUARD_HOME, log_decision, read_permission_mode
+from guard.registry import auto_pass_reason, is_deferred_to_auto
 
 # ``lockdown`` is ``enforce`` plus strict default-deny for bash and the
 # extended protected-file list. It is opt-in only: Claude Code's
@@ -313,7 +314,7 @@ def hook_bypass_reason(allowlist: Allowlist, hook_id: str, excerpt: str) -> str 
     return None
 
 
-def apply_decision(  # noqa: PLR0913 -- hook id, payload, envelope, excerpt + two policy flags
+def apply_decision(  # noqa: PLR0913 -- hook id, payload, envelope, excerpt + policy flags
     hook_id: str,
     payload: dict[str, Any],
     envelope: dict[str, Any],
@@ -321,13 +322,17 @@ def apply_decision(  # noqa: PLR0913 -- hook id, payload, envelope, excerpt + tw
     *,
     trust_root: bool = False,
     overridable: bool = True,
+    rule: str | None = None,
 ) -> None:
     """Log a hook's decision and hand it to Claude Code, honoring guard mode.
 
     ``off`` emits nothing and ``shadow`` logs a deny without emitting it,
     except for ``trust_root`` decisions (guard's own files), which hold in
     every mode. An allowlist entry for ``hook_id`` turns the decision into
-    a logged pass unless ``overridable`` is False. A deny exits 2.
+    a logged pass unless ``overridable`` is False. In Claude Code's ``auto``
+    permission mode (outside lockdown) a deny whose tier key (``rule``, else
+    ``hook_id``) is a STEER rule becomes a logged pass with no output; FLOOR
+    denies are unchanged. A deny exits 2.
     """
     allowlist = load_allowlist()
     hso = envelope["hookSpecificOutput"]
@@ -336,6 +341,7 @@ def apply_decision(  # noqa: PLR0913 -- hook id, payload, envelope, excerpt + tw
         return
     tool_name = payload.get("tool_name")
     cwd = payload.get("cwd")
+    permission_mode = read_permission_mode(payload)
     record: dict[str, Any] = {
         "hook_id": hook_id,
         "event": "PreToolUse",
@@ -343,11 +349,18 @@ def apply_decision(  # noqa: PLR0913 -- hook id, payload, envelope, excerpt + tw
         "command_excerpt": excerpt,
         "session_id": str(payload.get("session_id", "")),
         "cwd": cwd if isinstance(cwd, str) else None,
+        "permission_mode": permission_mode,
         "mode": allowlist.mode,
     }
     bypass = hook_bypass_reason(allowlist, hook_id, excerpt) if overridable else None
     if bypass is not None:
         log_decision(decision="pass", reason=bypass, **record)
+        return
+    tier_key = rule or hook_id
+    if decision == "deny" and is_deferred_to_auto(
+        tier_key, permission_mode, lockdown=allowlist.mode == "lockdown"
+    ):
+        log_decision(decision="pass", reason=auto_pass_reason(tier_key), **record)
         return
     log_decision(decision=decision, reason=hso["permissionDecisionReason"], **record)
     if decision == "deny" and allowlist.mode == "shadow" and not trust_root:
