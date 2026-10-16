@@ -449,6 +449,27 @@ class TestHookFunction:
         assert capsys.readouterr().out == ""
 
 
+class TestAutoPermissionMode:
+    """The hook is FLOOR: Claude Code's ``auto`` mode changes nothing here."""
+
+    @pytest.mark.parametrize("tool", ["Read", "Bash"])
+    def test_transcript_read_still_denies_in_auto(self, capsys, session: Session, tool: str):
+        path = session.transcript_link()
+        tool_input = {"file_path": path} if tool == "Read" else {"command": f"cat {path}"}
+        with pytest.raises(SystemExit) as exc:
+            hook({"tool_name": tool, "tool_input": tool_input, "permission_mode": "auto"})
+        assert exc.value.code == 2
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    @pytest.mark.parametrize("tool", ["Read", "Bash"])
+    def test_background_output_read_passes_in_auto(self, capsys, session: Session, tool: str):
+        path = session.background()
+        tool_input = {"file_path": path} if tool == "Read" else {"command": f"tail -n 50 {path}"}
+        hook({"tool_name": tool, "tool_input": tool_input, "permission_mode": "auto"})
+        assert capsys.readouterr().out == ""
+
+
 class TestSubprocess:
     def _run_hook(self, stdin_data):
         return subprocess.run(

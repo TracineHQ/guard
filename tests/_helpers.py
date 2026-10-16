@@ -108,8 +108,8 @@ def run_hook(  # noqa: PLR0913 -- kw-only flags, all optional and orthogonal
     The default payload is the canonical bash-command shape. ``strict=True``
     runs the hook in guard's ``lockdown`` mode (strict default-deny) by
     pointing ``GUARD_DATA_DIR`` at a scratch home whose allowlist sets it.
-    ``permission_mode`` sets the payload field (context only; it never
-    changes the decision).
+    ``permission_mode`` sets the payload field; only ``auto`` changes the
+    decision (STEER denies become logged passes).
     """
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_ROOT / "src")

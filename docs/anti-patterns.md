@@ -110,6 +110,8 @@ credentials. The user's review step gets bypassed.
 **What guard does.** Hard deny in the registry (`git-deny` category).
 Stage explicit paths (`git add path/to/file.py`) instead. The deny applies
 even in interactive mode — it's not a confirmation prompt, it's a refusal.
+Under Claude Code's `auto` permission mode it is a STEER rule: the call goes
+to the auto classifier and guard logs a `pass`.
 
 ## Interpreter RCE primitives
 

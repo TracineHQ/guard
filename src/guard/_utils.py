@@ -79,8 +79,10 @@ def read_permission_mode(hook_input: dict[str, Any] | None) -> str:
 
     Defaults to ``"default"`` when the field is absent or non-string.
     Unknown literal values are returned as-is. The value is recorded in the
-    decision log for context; it never changes what guard decides. Strict
-    default-deny is opt-in through ``guard mode lockdown``.
+    decision log. Only ``auto`` changes a decision: there guard keeps its
+    hard floor and hands STEER rules to Claude Code (``guard.registry``).
+    Strict default-deny is opt-in through ``guard mode lockdown``, which
+    ``permission_mode`` never turns on or off.
     """
     if hook_input is not None:
         raw = hook_input.get("permission_mode")

@@ -174,41 +174,136 @@ def _classify_subcommand(
     subcommand: str, remaining: list[str], *, path: str = "<repo>"
 ) -> dict[str, Any]:
     """Classify a parsed subcommand into an allow/deny envelope."""
+    return _classify_with_rule(subcommand, remaining, path=path)[0]
+
+
+def _classify_with_rule(
+    subcommand: str, remaining: list[str], *, path: str = "<repo>"
+) -> tuple[dict[str, Any], str]:
+    """Envelope plus the tier key (``guard.git_c_validator:<shape>``) behind it."""
     if subcommand == "config":
-        return _decide_config(remaining, path=path)
+        return _decide_config(remaining, path=path), _rule("config_write")
     if subcommand == "stash":
         stash_decision = _decide_stash(remaining)
         if stash_decision is not None:
-            return stash_decision
+            return stash_decision, _rule("stash")
+    if subcommand == "fetch":
+        return _decide_fetch(remaining, path=path)
     if subcommand in DENIED_SUBCOMMANDS:
-        return emit_pretooluse_decision(
+        envelope = emit_pretooluse_decision(
             "deny", f"git -C: '{subcommand}' is destructive and blocked"
         )
+        return envelope, _rule("destructive")
     # Read-only subcommands coerced into a file write or external-program exec
     # (git log --output=, git grep --open-files-in-pager). RCE-class -> deny.
     exec_violation = git_read_exec_violation(subcommand, remaining)
     if exec_violation is not None:
-        return emit_pretooluse_decision(
+        envelope = emit_pretooluse_decision(
             "deny",
             f"git -C: '{subcommand} {exec_violation}' writes a file or execs and is blocked",
         )
+        return envelope, _rule("read_exec")
     # Ref create/mutate: branch/tag <name> creation, branch -d/-D/-m, tag -a/-d,
     # remote add/.... ``include_creation=True`` -- a ref write is denied in
     # interactive ``-C`` too, matching the bash ``bash.git_ref_mutation`` floor.
     # Shared predicate so the two paths cannot drift.
     ref_violation = git_ref_violation(subcommand, remaining, include_creation=True)
     if ref_violation is not None:
-        return emit_pretooluse_decision(
+        envelope = emit_pretooluse_decision(
             "deny",
             f"git -C: '{subcommand} {ref_violation}' creates or mutates a ref and is blocked",
         )
+        return envelope, _rule("ref_mutation")
     if subcommand in ALLOWED_SUBCOMMANDS:
-        return emit_pretooluse_decision("allow", f"git -C: '{subcommand}' is read-only")
-    return emit_pretooluse_decision(
+        return emit_pretooluse_decision("allow", f"git -C: '{subcommand}' is read-only"), _HOOK_ID
+    return _not_read_only(subcommand, path)
+
+
+def _rule(shape: str) -> str:
+    """Tier key for one deny shape; the allowlist key stays the hook id."""
+    return f"{_HOOK_ID}:{shape}"
+
+
+def _not_read_only(subcommand: str, path: str) -> tuple[dict[str, Any], str]:
+    envelope = emit_pretooluse_decision(
         "deny",
         f"git -C: '{subcommand}' isn't on the read-only list. Run it from inside "
         f"the repo instead: `cd {path} && git {subcommand} ...`.",
     )
+    return envelope, _rule("not_read_only")
+
+
+# ``git fetch`` flags that do more than update remote-tracking refs: prune or
+# force-update local refs, touch HEAD, or write upstream config.
+_FETCH_WRITE_FLAGS: frozenset[str] = frozenset(
+    {
+        "-p",
+        "-P",
+        "--prune",
+        "--prune-tags",
+        "-f",
+        "--force",
+        "-u",
+        "--update-head-ok",
+        "--set-upstream",
+        "--refmap",
+    }
+)
+
+# ``git fetch`` options whose value may follow as a separate token.
+_FETCH_VALUE_FLAGS: frozenset[str] = frozenset(
+    {
+        "--depth",
+        "--deepen",
+        "--shallow-since",
+        "--shallow-exclude",
+        "-j",
+        "--jobs",
+        "--filter",
+        "--negotiation-tip",
+        "-o",
+        "--server-option",
+        "--recurse-submodules-default",
+        "--submodule-prefix",
+    }
+)
+
+
+def _decide_fetch(remaining: list[str], *, path: str) -> tuple[dict[str, Any], str]:
+    """``git -C <repo> fetch``: allowed unless it runs a program or writes local refs.
+
+    ``--upload-pack`` names a program to run and an ``ext::`` remote runs a
+    command, so both are exec-class. Prune / force / ``--set-upstream`` flags
+    and a ``src:dst`` or ``+`` refspec write local refs or config; those get
+    the run-it-from-inside-the-repo steer.
+    """
+    positionals = 0
+    skip_value = False
+    for arg in remaining:
+        if skip_value:
+            skip_value = False
+            continue
+        flag = arg.split("=", 1)[0]
+        if flag in {"--upload-pack", "--exec"} or arg.startswith("ext::"):
+            envelope = emit_pretooluse_decision(
+                "deny", f"git -C: 'fetch {flag}' runs a program and is blocked"
+            )
+            return envelope, _rule("read_exec")
+        if flag in _FETCH_WRITE_FLAGS:
+            return _not_read_only("fetch", path)
+        if arg.startswith("-"):
+            skip_value = arg in _FETCH_VALUE_FLAGS
+            continue
+        positionals += 1
+        # The first positional is the repository (``user@host:path`` has a
+        # colon too); every later one is a refspec, and ``src:dst`` / ``+src``
+        # writes a local ref.
+        if positionals > 1 and (arg.startswith("+") or ":" in arg):
+            return _not_read_only("fetch", path)
+    envelope = emit_pretooluse_decision(
+        "allow", "git -C: 'fetch' only updates remote-tracking refs"
+    )
+    return envelope, _HOOK_ID
 
 
 _COMMIT_HEAD_TOKENS = 3  # ['git', 'commit', <at least one more arg>]
@@ -374,12 +469,17 @@ def _has_dangerous_paths_config(command: str) -> tuple[str, str] | None:
 
 def decide(command: str) -> dict[str, Any] | None:
     """Return a permission envelope, or ``None`` to fall through."""
+    return decide_with_rule(command)[0]
+
+
+def decide_with_rule(command: str) -> tuple[dict[str, Any] | None, str]:
+    """``decide`` plus the tier key behind the decision (see ``guard.registry``)."""
     if has_shell_operators(command):
-        return None
+        return None, _HOOK_ID
     dangerous = _has_dangerous_paths_config(command)
     if dangerous is not None:
         key, value = dangerous
-        return emit_pretooluse_decision(
+        envelope = emit_pretooluse_decision(
             "deny",
             (
                 f"git -c {key}={value}: command-line override of "
@@ -390,15 +490,17 @@ def decide(command: str) -> dict[str, Any] | None:
                 "settings or `.git/hooks/` for repo-local hooks."
             ),
         )
+        return envelope, _rule("paths_config")
     if _is_commit_reuse(command):
-        return emit_pretooluse_decision(
+        envelope = emit_pretooluse_decision(
             "deny",
             "git commit -C / --reuse-message: silent commit-message reuse is blocked",
         )
+        return envelope, _rule("commit_reuse")
     path, subcommand, remaining = parse_git_c_command(command)
     if path is None or subcommand is None:
-        return None
-    return _classify_subcommand(subcommand, remaining, path=path)
+        return None, _HOOK_ID
+    return _classify_with_rule(subcommand, remaining, path=path)
 
 
 def hook(payload: dict[str, Any]) -> None:
@@ -429,9 +531,9 @@ def hook(payload: dict[str, Any]) -> None:
     if not has_config_or_dir_flag and "commit" not in rest:
         return
 
-    envelope = decide(command)
+    envelope, rule = decide_with_rule(command)
     if envelope is not None:
-        apply_decision(_HOOK_ID, payload, envelope, command)
+        apply_decision(_HOOK_ID, payload, envelope, command, rule=rule)
 
 
 if __name__ == "__main__":

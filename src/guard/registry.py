@@ -1450,3 +1450,283 @@ def get_rules_by_safety(safety: Safety) -> list[CommandRule]:
 def get_rules_by_category(category: str) -> list[CommandRule]:
     """Get all rules in a given category."""
     return [cmd for cmd in COMMANDS if cmd.category == category]
+
+
+# === Hard floor vs steering (Claude Code ``auto`` permission mode) ===
+#
+# In ``auto`` mode Claude Code's own classifier reviews every action with the
+# full conversation in view; guard sees one tool call. So in ``auto`` guard
+# keeps only its hard floor: FLOOR rules deny exactly as in every other mode,
+# STEER rules return no decision (logged as a ``pass``) and leave the call to
+# Claude Code's flow. Every other permission mode, and ``guard mode lockdown``,
+# denies on both tiers as before.
+#
+# FLOOR: irreversible or catastrophic, code injection, hook / guard evasion,
+# supply chain, credential exfiltration, and boundaries the auto classifier
+# cannot see (guard's trust root, the user's protected list, subagent scope,
+# the commit-attribution policy). STEER: shape and style rules.
+#
+# Keys are rule ids (``bash.*``), hook ids (``guard.*``), or ``<id>:<shape>``
+# for a sub-shape whose tier differs from its rule's. The allowlist key a user
+# sees stays the plain rule id. A key missing here is FLOOR (fail closed).
+
+
+class Tier(Enum):
+    FLOOR = "floor"
+    STEER = "steer"
+
+
+@dataclass(frozen=True)
+class TierEntry:
+    tier: Tier
+    why: str
+
+
+_F = Tier.FLOOR
+_S = Tier.STEER
+
+RULE_TIERS: dict[str, TierEntry] = {
+    # --- bash_command_validator: FLOOR ---
+    "bash.always_deny": TierEntry(_F, "registry literal; ALWAYS_DENY_TIERS decides per prefix"),
+    "bash.admin_forbidden_flag": TierEntry(
+        _F, "cloud CLI flag redirects endpoint, swaps credentials or drops TLS"
+    ),
+    "bash.admin_forbidden_subcommand": TierEntry(
+        _F, "raw REST / credential-swap subcommand skips the destructive-verb rules"
+    ),
+    "bash.admin_sensitive_env_override": TierEntry(
+        _F, "inline env redirects a cloud CLI's endpoint or credentials"
+    ),
+    "bash.aws_destructive": TierEntry(_F, "irreversible cloud resource deletion"),
+    "bash.aws_s3_destructive": TierEntry(_F, "irreversible bucket / object deletion"),
+    "bash.az_destructive": TierEntry(_F, "irreversible cloud resource deletion"),
+    "bash.gcloud_destructive": TierEntry(_F, "irreversible cloud resource deletion"),
+    "bash.cargo_remote_install": TierEntry(
+        _F, "supply chain: installs code from an arbitrary remote source"
+    ),
+    "bash.gem_remote_install": TierEntry(
+        _F, "supply chain: installs code from an arbitrary remote source"
+    ),
+    "bash.go_remote_install": TierEntry(
+        _F, "supply chain: installs code from an arbitrary remote source"
+    ),
+    "bash.helm_remote_install": TierEntry(
+        _F, "supply chain: installs charts from an arbitrary remote source"
+    ),
+    "bash.npm_url_install": TierEntry(
+        _F, "supply chain: installs code from an arbitrary remote source"
+    ),
+    "bash.npx_remote": TierEntry(_F, "supply chain: runs an arbitrary remote package"),
+    "bash.pip_install_url": TierEntry(
+        _F, "supply chain: runs setup code from an arbitrary remote source"
+    ),
+    "bash.registry_config": TierEntry(
+        _F, "supply chain: repoints every later install at another registry"
+    ),
+    "bash.chmod_dangerous": TierEntry(_F, "recursive 777 on a system root"),
+    "bash.chmod_setuid": TierEntry(_F, "setuid / setgid bit is a privilege-escalation primitive"),
+    "bash.chmod_sensitive_target": TierEntry(_F, "opens a credential store to other users"),
+    "bash.fs_attr_sensitive": TierEntry(
+        _F, "ownership / immutability change on a credential store"
+    ),
+    "bash.command_too_long": TierEntry(_F, "past the scan budget no floor rule can be checked"),
+    "bash.credential_leak": TierEntry(_F, "prints a credential into the transcript"),
+    "bash.secret_value": TierEntry(_F, "literal secret on the command line"),
+    "bash.secret_egress": TierEntry(_F, "uploads a credential file"),
+    "bash.dns_exfil": TierEntry(_F, "DNS-tunnel exfiltration shape"),
+    "bash.dangerous_env_sink": TierEntry(
+        _F, "exec / loader hijack env (GIT_SSH_COMMAND, LD_PRELOAD, ...)"
+    ),
+    "bash.dangerous_interpreter": TierEntry(_F, "inline interpreter code"),
+    "bash.eval_builtin": TierEntry(_F, "eval runs an arbitrary string as code"),
+    "bash.dangerous_construct:executed": TierEntry(
+        _F,
+        'output run as code (bash -c "$(curl ...)", source <(...), a shell fed by <<<), '
+        "or awk / osascript running a command built at run time",
+    ),
+    "bash.dangerous_construct:sensitive_target": TierEntry(
+        _F,
+        "> / >> / >| into ~/.ssh, a shell rc file, /etc, a launch agent, git config or a git hook",
+    ),
+    "bash.shell_wrapper:opaque": TierEntry(
+        _F, "-c string that is empty, a {} placeholder or runs a command named by an expansion"
+    ),
+    "bash.env_split_string": TierEntry(_F, "env -S rebuilds argv guard cannot see"),
+    "bash.wrapper_stacking": TierEntry(_F, "nesting past the unwrap limit hides the inner command"),
+    "bash.dangerous_rm": TierEntry(_F, "recursive rm of /, ~, $HOME or cwd"),
+    "bash.function_definition:fork_bomb": TierEntry(
+        _F,
+        "a function whose body pipes into or backgrounds a call back to itself exhausts the process table",
+    ),
+    "bash.conditional_denied_flag:root": TierEntry(
+        _F,
+        "find -delete / -exec rooted at /, a home dir or a system directory, "
+        "or an unfiltered delete of . or ..",
+    ),
+    "bash.disk_destruction": TierEntry(_F, "disk / partition / filesystem destruction"),
+    "bash.db_cli_destructive": TierEntry(_F, "irreversible database destruction"),
+    "bash.dropdb_or_mysqladmin": TierEntry(_F, "irreversible database destruction"),
+    "bash.mongo_destructive": TierEntry(_F, "irreversible database destruction"),
+    "bash.iac_destruction": TierEntry(_F, "tears down a whole IaC stack"),
+    "bash.kubectl_destructive": TierEntry(_F, "cluster-wide kubectl deletion"),
+    "bash.gh_api_destructive": TierEntry(
+        _F, "raw gh api mutation (DELETE / PATCH / PUT / graphql mutation)"
+    ),
+    "bash.gpg_secret_delete": TierEntry(_F, "destroys private key material"),
+    "bash.git_force_push": TierEntry(_F, "rewrites shared remote history"),
+    "bash.git_force_refspec": TierEntry(_F, "+refspec force-push rewrites shared remote history"),
+    "bash.git_config_injection": TierEntry(
+        _F, "git config exec sink (core.hooksPath, alias !cmd, ...)"
+    ),
+    "bash.git_read_exec": TierEntry(
+        _F, "read-only git verb coerced into exec or an arbitrary file write"
+    ),
+    "bash.escalation_shell": TierEntry(_F, "su / doas / pkexec shell outside guard's view"),
+    "bash.sudo_escalation": TierEntry(_F, "root shell or env transfer outside guard's view"),
+    "bash.host_control": TierEntry(_F, "reboot / shutdown kills the session and the host"),
+    "bash.kernel_module_load": TierEntry(_F, "loads code into the kernel"),
+    "bash.network_policy_wipe": TierEntry(_F, "firewall wipe can lock the operator out"),
+    "bash.persistence": TierEntry(
+        _F, "schedules code that outlives the session (cron, launchd, systemd)"
+    ),
+    "bash.process_attach": TierEntry(_F, "reads another process's memory"),
+    "bash.process_tree_kill": TierEntry(_F, "kills every process the user owns"),
+    "bash.sensitive_write": TierEntry(
+        _F, "writes to ~/.ssh, shell rc files, /etc or launch agents"
+    ),
+    "bash.admin_default_deny": TierEntry(
+        _F,
+        "cloud CLI verb off the read-only catalog: secret reads, IAM grants, public access, key minting",
+    ),
+    "bash.var_expanded_head": TierEntry(
+        _F, "variable-named command ($R, $SHELL, $1, $@); what runs is unknowable"
+    ),
+    "bash.glob_head": TierEntry(_F, "glob in the command name (/bin/r?) hides which binary runs"),
+    # --- bash_command_validator: STEER ---
+    "bash.admin_unknown_flag_strict": TierEntry(_S, "lockdown-only unknown-flag escalation"),
+    "bash.conditional_denied_flag": TierEntry(_S, "find -exec / -delete, yq -i on a project path"),
+    "bash.dangerous_construct": TierEntry(
+        _S,
+        "command / process substitution, here-string, file redirect; bodies are still floor-checked",
+    ),
+    "bash.dangerous_interpreter:literal": TierEntry(
+        _S,
+        "inline program written out literally (python3 -c '...', python3 - <<'EOF', node -e, "
+        "osascript / ruby / perl -e): as visible as a script file, which already passes. "
+        "A program from a pipe, a variable or a substitution, or one that evals stdin, stays "
+        "FLOOR; an osascript do shell script string is floor-checked like bash -c",
+    ),
+    "bash.eval_builtin:source": TierEntry(_S, "source / . of a file, e.g. loading a .env"),
+    "bash.exec_wrapper": TierEntry(_S, "the peeled inner command is matched by its own rule"),
+    "bash.function_definition": TierEntry(_S, "shell function; the body is still floor-checked"),
+    "bash.trap_exploit": TierEntry(_S, "trap handler; the handler body is still floor-checked"),
+    "bash.shell_wrapper": TierEntry(_S, "bash -c payload is re-split and floor-checked"),
+    "bash.remote_shell_wrapper": TierEntry(
+        _S, "ssh / container exec / nsenter; the remote payload is still floor-checked"
+    ),
+    "bash.git_ref_mutation": TierEntry(_S, "local branch / tag / remote-config write"),
+    "bash.git_worktree_add": TierEntry(
+        _S, "worktree add -b creates a local branch; a system-root target needs root anyway"
+    ),
+    "bash.git_submodule_add": TierEntry(
+        _S, "adds a submodule; nothing runs until it is initialized"
+    ),
+    "bash.tool_alternative": TierEntry(_S, "prefer-a-dedicated-tool nudge"),
+    "bash.use_corpus_harness": TierEntry(_S, "guard-checkout workflow nudge"),
+    "bash.strict_default_deny": TierEntry(_S, "lockdown-only default deny"),
+    "bash.strict_feedback": TierEntry(_S, "lockdown-only feedback deny"),
+    # --- git_c_validator (sub-shapes; the allowlist key is the hook id) ---
+    "guard.git_c_validator": TierEntry(_F, "unclassified git -C deny fails closed"),
+    "guard.git_c_validator:paths_config": TierEntry(
+        _F, "-c core.hooksPath / core.attributesFile loads hooks from elsewhere"
+    ),
+    "guard.git_c_validator:read_exec": TierEntry(
+        _F, "read verb coerced into exec or a file write; fetch --upload-pack"
+    ),
+    "guard.git_c_validator:config_write": TierEntry(
+        _S, "git -C config write; exec-sink keys are FLOOR under bash.git_config_injection"
+    ),
+    "guard.git_c_validator:commit_reuse": TierEntry(_S, "git commit -C / --reuse-message"),
+    "guard.git_c_validator:destructive": TierEntry(
+        _S, "reset / clean under -C, which guard does not block without -C"
+    ),
+    "guard.git_c_validator:stash": TierEntry(_S, "stash pop / drop / clear"),
+    "guard.git_c_validator:ref_mutation": TierEntry(_S, "local branch / tag / remote-config write"),
+    "guard.git_c_validator:not_read_only": TierEntry(
+        _S, "subcommand off the git -C read-only list"
+    ),
+    # --- whole hooks ---
+    "guard.protected_files": TierEntry(
+        _F, "guard's trust root, its allowlist and the user's protected list"
+    ),
+    "guard.credential_check": TierEntry(_F, "credential material in a tool input"),
+    "guard.commit_message_validator": TierEntry(
+        _F,
+        "AI attribution policy the auto classifier cannot know; a pushed trailer needs a history rewrite",
+    ),
+    "guard.subagent_scope": TierEntry(_F, "declared subagent scope the auto classifier cannot see"),
+    "guard.agent_output_guard": TierEntry(
+        _F,
+        "only subagent transcripts deny (background output passes); a transcript floods context",
+    ),
+}
+
+# Per-prefix tiers for the ALWAYS_DENY registry literals (rule
+# ``bash.always_deny``). The CommandRule ``reason`` is the rationale.
+_ALWAYS_DENY_STEER: frozenset[str] = frozenset(
+    {
+        "git add -A",
+        "git add --all",
+        "git add .",
+        "git add -a",
+        "git branch -D",
+        "git remote add",
+        "git remote set-url",
+        "git remote rename",
+        "git remote remove",
+        "git remote rm",
+        "git remote prune",
+        "git remote update",
+        "git remote set-head",
+        "git remote set-branches",
+        "env -i",
+    }
+)
+
+ALWAYS_DENY_TIERS: dict[str, TierEntry] = {
+    cmd.prefix: TierEntry(_S if cmd.prefix in _ALWAYS_DENY_STEER else _F, cmd.reason)
+    for cmd in COMMANDS
+    if cmd.safety == Safety.DENY
+}
+
+AUTO_PERMISSION_MODE = "auto"
+_ALWAYS_DENY_KEY_PREFIX = "bash.always_deny:"
+
+
+def always_deny_key(prefix: str) -> str:
+    """Tier key for one ALWAYS_DENY registry literal."""
+    return f"{_ALWAYS_DENY_KEY_PREFIX}{prefix}"
+
+
+def rule_tier(key: str) -> Tier:
+    """Return the tier for a rule key; anything unclassified is FLOOR."""
+    if key.startswith(_ALWAYS_DENY_KEY_PREFIX):
+        entry = ALWAYS_DENY_TIERS.get(key[len(_ALWAYS_DENY_KEY_PREFIX) :])
+    else:
+        entry = RULE_TIERS.get(key)
+    return entry.tier if entry is not None else Tier.FLOOR
+
+
+def defers_steer(permission_mode: str | None, *, lockdown: bool) -> bool:
+    """True when STEER rules hand the call to Claude Code (``auto``, not lockdown)."""
+    return permission_mode == AUTO_PERMISSION_MODE and not lockdown
+
+
+def is_deferred_to_auto(key: str, permission_mode: str | None, *, lockdown: bool) -> bool:
+    """True when a deny under ``key`` becomes an auto-mode pass."""
+    return defers_steer(permission_mode, lockdown=lockdown) and rule_tier(key) is Tier.STEER
+
+
+def auto_pass_reason(key: str) -> str:
+    """Decision-log reason for a STEER deny deferred to auto mode."""
+    return f"deferred to auto mode (steer rule {key})"

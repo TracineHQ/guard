@@ -76,12 +76,32 @@ def test_strict_allows_safe_command(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("strict", [True, False])
-def test_interactive_still_denies_always_deny(tmp_path: Path, strict: bool) -> None:  # noqa: FBT001 -- bool from parametrize
-    """`git add -A` is in ALWAYS_DENY — denied in BOTH modes."""
+def test_auto_still_denies_floor_always_deny(tmp_path: Path, strict: bool) -> None:  # noqa: FBT001 -- bool from parametrize
+    """`git push --force` is a FLOOR ALWAYS_DENY entry: denied in auto, lockdown or not."""
     _rc, stdout, _stderr = _run(
-        "git add -A", strict=strict, decisions_path=tmp_path / f"log-{strict}.jsonl"
+        "git push --force origin main",
+        strict=strict,
+        decisions_path=tmp_path / f"log-{strict}.jsonl",
     )
     assert _decision(stdout) == "deny", f"strict={strict} expected deny, got stdout={stdout[:300]}"
+
+
+@pytest.mark.parametrize(("strict", "expected"), [(True, "deny"), (False, None)])
+def test_auto_defers_steer_always_deny_outside_lockdown(
+    tmp_path: Path,
+    strict: bool,  # noqa: FBT001 -- bool from parametrize
+    expected: str | None,
+) -> None:
+    """`git add -A` is a STEER ALWAYS_DENY entry: auto hands it to Claude Code, lockdown denies."""
+    log = tmp_path / f"log-{strict}.jsonl"
+    _rc, stdout, _stderr = _run("git add -A", strict=strict, decisions_path=log)
+    assert _decision(stdout) == expected, f"strict={strict} got stdout={stdout[:300]}"
+    if expected is None:
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        assert [r["decision"] for r in records] == ["pass"]
+        assert records[0]["reason"] == (
+            "deferred to auto mode (steer rule bash.always_deny:git add -A)"
+        )
 
 
 @pytest.mark.parametrize("prefix", sorted(STRICT_FEEDBACK.keys()))

@@ -61,7 +61,7 @@ section is the contract. Consumers can opt-in by reading the env var directly
 | `event` | string | yes (decision) | matches Claude Code event names (`PreToolUse`, `PostToolUse`) |
 | `tool_name` | string \| null | yes for PreToolUse/PostToolUse | `Bash`, `Edit`, etc. |
 | `decision` | enum string | yes (decision) | one of `allow`, `deny`, `defer`, `pass`. Guard no longer asks; logs written by older releases may also hold `ask`. |
-| `permission_mode` | enum string \| null | optional | Claude Code `permission_mode` at decision time (`default`, `plan`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`). Threaded from the PreToolUse payload; populated for Bash decisions. |
+| `permission_mode` | enum string \| null | optional | Claude Code `permission_mode` at decision time (`default`, `plan`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`). Threaded from the PreToolUse payload; populated for Bash decisions and for every hook that logs through the shared allowlist path. `auto` is the only value that changes a decision (§3.6). |
 | `reason` | string | yes (decision) | human-readable; ≤ 1024 chars. Secret-shapes are redacted at write time. |
 | `command_excerpt` | string \| null | optional | truncated to 4096 chars; only set for Bash-related decisions. Secret-shapes are redacted at write time. |
 | `session_id` | string | yes (decision) | from Claude Code stdin |
@@ -123,10 +123,12 @@ Top-level categories:
 | `bash.strict_feedback` / `bash.strict_default_deny` | lockdown default-deny for non-admin commands not on the allowlist | lockdown-only |
 | `bash.command_too_long` | command exceeded `_COMMAND_LENGTH_CAP` after canonicalization | DoS guard |
 
-`git_c_validator` decisions do not carry a `rule_id`; the deny `reason` is
+`git_c_validator` deny reasons do not carry a `rule_id`; they are
 self-describing (`"git -C: 'reset' is destructive and blocked"`,
 `"git -c <key>=<value>: command-line override of core.hooksPath / ..."`).
-Group git-C decisions on `hook_id == "guard.git_c_validator"`.
+Group git-C decisions on `hook_id == "guard.git_c_validator"`. Its tier keys
+(`guard.git_c_validator:<shape>`) appear only in auto-mode pass reasons
+(§3.6).
 
 Lockdown rule_ids (`bash.admin_unknown_flag_strict`,
 `bash.strict_default_deny`, `bash.strict_feedback`) and
@@ -178,6 +180,32 @@ record is observation-only, and the prompt proceeds normally.
 synthetic bucket `(hook_id="permission_request", decision="<tool_name>")`
 so operators see prompt frequency alongside deny frequency. Pass
 `--no-prompts` to revert to decisions-only.
+
+### 3.6 Auto-mode pass records
+
+In Claude Code's `auto` permission mode (and not under `guard mode
+lockdown`) guard keeps only its hard floor. A STEER rule that matches returns
+no decision to Claude Code and is logged as a decision record with:
+
+- `decision: "pass"`
+- `permission_mode: "auto"`
+- `reason: "deferred to auto mode (steer rule <key>)"`
+
+The reason string is part of the contract; consumers can match it with the
+prefix `deferred to auto mode (steer rule ` and read `<key>` up to the final
+`)`. `<key>` is a tier key from `RULE_TIERS` in `src/guard/registry.py`:
+a rule id (`bash.shell_wrapper`), a hook id,
+`bash.always_deny:<prefix>` for a registry literal, or `<rule>:<shape>` for a
+sub-shape (`guard.git_c_validator:config_write`). The allowlist id is the
+part before the first colon.
+
+`bash_command_validator` writes one pass record per STEER rule it skipped
+for a command, and only when nothing on the floor matched; if a FLOOR rule
+denies, the log holds that deny and no pass records. A deny found in a
+payload a STEER shape was hiding (a `$(...)` body, a `bash -c` string, a
+function body) is logged once for the whole command with a reason ending in
+`(hidden payload)`. FLOOR denies log exactly as in every other mode. See
+`docs/dangerous-commands.md` for the FLOOR / STEER list.
 
 ## 4. Schema versioning rules
 
