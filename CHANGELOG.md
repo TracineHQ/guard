@@ -6,8 +6,96 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Under Claude Code's `auto` permission mode guard keeps only a hard floor.
+  Every deny rule is now classified FLOOR or STEER (with a one-line rationale)
+  in `registry.py` and in `docs/dangerous-commands.md`. In `auto`, FLOOR rules
+  (destructive, code injection, guard evasion, supply chain, credentials)
+  deny as before; STEER rules (redirects, `bash -c`, `git add -A`, tool
+  nudges, ...) return no decision and are logged as `decision: "pass"` with
+  reason `deferred to auto mode (steer rule <id>)`. Payloads a STEER shape
+  hides (a function body, a trap handler, a `bash -c` string, a remote
+  `ssh` / `docker exec` command, a `find -exec` command) are still checked
+  against the floor. Other permission modes, `lockdown` and allowlist
+  overrides behave exactly as before.
+- `agent_output_guard` is FLOOR: a subagent transcript read denies in `auto`
+  too, while background command output passes in every mode.
+- The floor holds against the wrappers that used to hide a command from it.
+  `env` options are peeled (`env -i`, `-u NAME`, `-C DIR`, `--`) and the
+  assignments after them still meet `bash.dangerous_env_sink`
+  (`env -i LD_PRELOAD=... cmd`), shell
+  options before `-c` are skipped (`bash -o pipefail -c`, `bash -c --`),
+  `ssh host --`, `docker container exec`, `docker compose exec` and `nsenter`
+  payloads are checked, a shell reading a here-string or process
+  substitution on stdin (`{ bash; } <<< '...'`) counts as running it, and an
+  unfiltered `find . -delete` / `find .. -exec rm` is FLOOR. A `-c` string
+  that is empty, a `{}` placeholder or runs a command named by an expansion
+  (`bash -c "$X"`) is denied in `auto`; `$` in an argument is fine. Variable and glob command heads (`$R`, `$@`, `/bin/r?`) and
+  `bash.admin_default_deny` (secret reads, IAM grants, public access) are
+  FLOOR.
+- awk programs are checked in every mode: a literal command in `system()`,
+  `print | "cmd"` or `"cmd" | getline` goes through the floor, and one built
+  at run time (`system($0)`) is denied.
+- Redirects into `.git/config`, `.git/hooks/`, `~/.gitconfig` and
+  `$XDG_CONFIG_HOME/git/config` are FLOOR, and `>|` is read as a redirect
+  rather than a pipe.
+- The `bash.dangerous_construct` deny now names the construct that actually
+  matched (command substitution, process substitution, here-string,
+  redirect, arithmetic expansion). A redirect is steered to the Write or
+  Edit tool or to a pipe instead of being reported as a substitution.
+- An inline program written out literally (`python3 -c '...'`,
+  `python3 - <<'EOF'`, `node -e`, `node --input-type=module < file.mjs`,
+  `osascript -e`, `ruby -e`, `perl -e`) is STEER in `auto` under
+  `bash.dangerous_interpreter:literal`: it is as visible as a script file,
+  which already passes. A program from a pipe, a variable, a substitution or
+  an unquoted heredoc that expands stays FLOOR, and so does one that evals
+  stdin (`cat s | python3 -c 'exec(sys.stdin.read())'`, `ruby -e 'eval
+  STDIN.read'`, `perl -ne 'eval'`). Each `osascript` `do shell script` string
+  (and `do script`, `write text`, JXA `doShellScript`) is floor-checked like a
+  `bash -c` string; one built at run time, `run script`, a raw Apple event and
+  JXA `$.system` deny. Default mode and `lockdown` still deny all of these.
+- Pipe-to-shell denies only when the consumer reads its program from stdin
+  (`curl ... | sh`, `cat s | python3`, `cat s | python3 -`). Piping local data
+  into a script or module (`python3 tool.py`, `python3 -m json.tool`) passes
+  in every mode. Network output (`curl`, `wget`, `nc`, `ssh`, `gh api`, ...)
+  piped into any shell or interpreter, or fed to one through a substitution, is
+  denied whatever its arguments (`wget -qO- x | python3 tool.py`).
+  `| python3 -m json.tool`, `| jq` and a literal `-c` / `-e` program with no
+  code sink (`| python3 -c 'import json,sys; ...'`) only parse it and pass.
+
 ### Fixed
 
+- Over-blocking in `auto` found by replaying real agent commands:
+  - The fork bomb check reads only the function body, so `f() { ...; } && f`,
+    `f 2>&1` and `f | head` pass, and its deny says "fork bomb".
+  - Heredoc bodies are data. A body written to a file or fed to a filter no
+    longer trips line-based rules (a code fence, a lone `]`, prose starting
+    "at"). A heredoc read by a shell, `ssh`, `docker exec` or `xargs` is
+    still commands, and `$(...)` / backticks in an unquoted body are still
+    checked against the floor. An interpreter's program on stdin
+    (`python3 - <<'EOF'`) is judged as that program, not line by line.
+  - A `-c` string's command heads are found with its quotes and `$(...)`
+    intact (`sh -c 'f=$(basename "$1"); ...'`).
+  - An awk command that starts with a literal (`cmd = "wc -l " $1`) is
+    checked by that literal; only a command built entirely at run time
+    (`system($0)`) is denied.
+
+- Read-only guard CLI calls (`guard status`, `guard allowlist list`,
+  `guard mode --help`, `guard allowlist --help`) no longer trip
+  `protected_files`.
+- `git config` reads (`--get core.hooksPath`, `--list`, `get <key>`) are no
+  longer denied as config injection, and writes no longer slip past it when
+  an option value comes first (`--file .git/config`, `--type path`) or the
+  `set` subcommand is used.
+- `git -C <repo> fetch` is allowed when it only updates remote-tracking refs.
+  Pruning, forcing, a destination refspec or `--upload-pack` still deny.
+- The `git worktree add` steer now gives a sequence guard actually allows
+  (add the worktree detached, then `git switch -c` inside it).
+- Tests and the corpus no longer touch the developer's real home: conftest
+  isolates `HOME`, `GUARD_DATA_DIR` and the decision-log paths, the corpus
+  adjudicates against guard's shipped policy without writing logs, and a
+  collection-time `decide()` call that wrote to the real decision log is gone.
 - `bash.dangerous_interpreter` no longer blocks running a script or module
   (`uv run python tools/dev.py`, `python3 scripts/x.py`, `python -m pytest`).
   Those runs now pass through to Claude Code's own permission flow; lockdown

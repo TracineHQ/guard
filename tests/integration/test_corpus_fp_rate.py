@@ -8,7 +8,8 @@ The ``allow``/``deny`` files are the original false-positive / false-negative
 ratchets (seeded from real convo session history); the threat-category files
 (``escalation.jsonl``, ``host_control.jsonl``, ...) add the elevated-risk tier
 and its sibling hard denies. ``mode: lockdown`` rows exercise strict
-default-deny; any other mode is a Claude Code permission_mode (context only). A probe of "does guard classify this right?" becomes a
+default-deny; any other mode is a Claude Code permission_mode, and only ``auto``
+changes an outcome (STEER rules pass, FLOOR rules deny). A probe of "does guard classify this right?" becomes a
 permanent row here instead of a throwaway ``guard test`` string.
 
 This module and the ``guard corpus`` CLI both read the SAME rows through

@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from guard.hooks.git_c_validator import (
+    decide_with_rule,
     hook,
 )
 
@@ -127,7 +128,6 @@ class TestAskSubcommands:
             "rebase",
             "cherry-pick",
             "revert",
-            "fetch",
         ],
     )
     def test_write_subcommands_deny(self, subcmd):
@@ -137,6 +137,84 @@ class TestAskSubcommands:
     def test_config_write(self):
         decision, _ = _run("git -C /path config user.email foo@bar.com")
         assert decision == "deny"
+
+
+class TestFetch:
+    """``git -C <repo> fetch`` only updates remote-tracking refs, so it is safe."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git -C /repo fetch",
+            "git -C /repo fetch origin",
+            "git -C /repo fetch origin main",
+            "git -C /repo fetch --all --tags",
+            "git -C /repo fetch --depth 1 git@github.com:o/r.git",
+            "git -C /repo fetch https://github.com/o/r.git main",
+            "git -C /repo fetch --dry-run -v origin",
+        ],
+    )
+    def test_plain_fetch_allows(self, command):
+        envelope, rule = decide_with_rule(command)
+        assert _envelope_decision(envelope) == "allow"
+        assert rule == "guard.git_c_validator"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git -C /repo fetch --prune",
+            "git -C /repo fetch -p origin",
+            "git -C /repo fetch --prune-tags origin",
+            "git -C /repo fetch --force origin",
+            "git -C /repo fetch -u origin main:main",
+            "git -C /repo fetch origin main:main",
+            "git -C /repo fetch origin +refs/heads/*:refs/remotes/origin/*",
+            "git -C /repo fetch --set-upstream origin main",
+            "git -C /repo fetch --refmap= origin",
+        ],
+    )
+    def test_ref_writing_fetch_steers(self, command):
+        envelope, rule = decide_with_rule(command)
+        assert _envelope_decision(envelope) == "deny"
+        assert rule == "guard.git_c_validator:not_read_only"
+        reason = envelope["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "cd /repo && git fetch" in reason
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git -C /repo fetch --upload-pack=touch /tmp/x origin",
+            "git -C /repo fetch --upload-pack 'sh -c id' origin",
+            "git -C /repo fetch 'ext::sh -c touch% /tmp/pwned'",
+        ],
+    )
+    def test_exec_fetch_is_floor(self, command):
+        envelope, rule = decide_with_rule(command)
+        assert _envelope_decision(envelope) == "deny"
+        assert rule == "guard.git_c_validator:read_exec"
+
+
+class TestRuleKeys:
+    """Each deny shape carries the tier key the auto-mode split reads."""
+
+    @pytest.mark.parametrize(
+        ("command", "rule"),
+        [
+            ("git -C /repo config user.name bob", "guard.git_c_validator:config_write"),
+            ("git -C /repo stash drop", "guard.git_c_validator:stash"),
+            ("git -C /repo reset --hard", "guard.git_c_validator:destructive"),
+            ("git -C /repo clean -fd", "guard.git_c_validator:destructive"),
+            ("git -C /repo log --output=/tmp/x", "guard.git_c_validator:read_exec"),
+            ("git -C /repo branch feature", "guard.git_c_validator:ref_mutation"),
+            ("git -C /repo push", "guard.git_c_validator:not_read_only"),
+            ("git -c core.hooksPath=/tmp/h -C /repo status", "guard.git_c_validator:paths_config"),
+            ("git commit -C HEAD", "guard.git_c_validator:commit_reuse"),
+        ],
+    )
+    def test_deny_rule_key(self, command, rule):
+        envelope, got = decide_with_rule(command)
+        assert _envelope_decision(envelope) == "deny"
+        assert got == rule
 
 
 class TestSecurity:
@@ -461,7 +539,7 @@ class TestClassifySubcommandDirect:
 
     @pytest.mark.parametrize(
         "sub",
-        ["push", "pull", "commit", "checkout", "switch", "merge", "rebase", "fetch", "cherry-pick"],
+        ["push", "pull", "commit", "checkout", "switch", "merge", "rebase", "cherry-pick"],
     )
     def test_unknown_denies(self, sub):
         env = _classify_subcommand(sub, [])

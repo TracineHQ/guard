@@ -9,8 +9,10 @@ command shapes guard must classify a particular way. One row is one fixture::
      "note": "...", "source": "..."}
 
 ``mode`` is ``lockdown`` (guard's opt-in strict default-deny) or a Claude Code
-``permission_mode`` such as ``default`` / ``auto``, which is context only and
-never changes the decision.
+``permission_mode`` such as ``default`` / ``auto``. Only ``auto`` changes the
+decision: there guard keeps its FLOOR rules and hands STEER rules to Claude
+Code (see ``guard.registry.RULE_TIERS``). Rows are adjudicated against the
+shipped policy, never the developer's allowlist.
 
 Both consumers read THIS module, so the fixtures are never duplicated:
 
@@ -34,15 +36,20 @@ threading -- so this engine iterates in-process and stays simple.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from guard import _utils
+from guard.allowlist import Allowlist
+from guard.hooks import bash_command_validator as _bcv
 from guard.hooks.bash_command_validator import decide
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
 
 # Decision classes a fixture's ``expected`` (and decide()'s actual) collapse to.
 # Guard never asks, so there is no ``ask`` class.
@@ -172,11 +179,42 @@ def classify(result: dict[str, str] | None) -> str:
     return decision if decision in _DECISIONS else ALLOW
 
 
+@contextlib.contextmanager
+def _builtin_policy() -> Iterator[None]:
+    """Adjudicate against guard's shipped policy alone, writing nothing.
+
+    A fixture states what guard ships, so neither the developer's global or
+    project allowlist (``disable_rules``, ``allow_commands``, ``mode``) may
+    change the answer, and a corpus run must not append its rows to the real
+    decision log or strict-deny queue. Patches the bindings ``decide()``
+    reads at call time and restores them on exit.
+    """
+    targets = (
+        (_bcv, "load_allowlist", lambda _cwd=None: Allowlist()),
+        (_utils, "GUARD_DECISIONS_PATH", os.devnull),
+        (_utils, "GUARD_STRICT_DENY_QUEUE_PATH", os.devnull),
+        (_bcv, "GUARD_STRICT_DENY_QUEUE_PATH", os.devnull),
+    )
+    saved = [(obj, name, getattr(obj, name)) for obj, name, _new in targets]
+    try:
+        for obj, name, new in targets:
+            setattr(obj, name, new)
+        yield
+    finally:
+        for obj, name, old in saved:
+            setattr(obj, name, old)
+
+
 def adjudicate(command: str, mode: str) -> str:
-    """Return the decision class ``decide()`` reaches for ``command`` in ``mode``."""
-    if mode == LOCKDOWN:
-        return classify(decide(command, lockdown=True))
-    return classify(decide(command, permission_mode=mode))
+    """Return the decision class ``decide()`` reaches for ``command`` in ``mode``.
+
+    Runs under ``_builtin_policy``: the developer's allowlist never changes a
+    fixture's outcome and nothing is logged.
+    """
+    with _builtin_policy():
+        if mode == LOCKDOWN:
+            return classify(decide(command, lockdown=True))
+        return classify(decide(command, permission_mode=mode))
 
 
 def evaluate(rows: Iterable[CorpusRow]) -> CorpusReport:

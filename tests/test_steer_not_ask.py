@@ -21,7 +21,7 @@ import os
 import re
 import shlex
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -34,6 +34,9 @@ from guard.hooks import (
     protected_files,
     subagent_scope,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "guard"
 # Built at runtime so this source never holds a literal agent-output path
@@ -374,19 +377,23 @@ def test_subagent_scope_honors_mode(
 
 
 @pytest.mark.parametrize(
-    "envelope",
+    "make_envelope",
     [
-        protected_files.decide("Edit", {"file_path": "/repo/src/guard/registry.py"}),
-        protected_files.decide("Bash", {"command": "cp /tmp/x /repo/src/guard/registry.py"}),
-        bash_command_validator.decide("rm -rf /"),
-        bash_command_validator.decide("flarbnoz --gronk", lockdown=True),
+        # Thunks, not calls: a decide() at collection time runs before the
+        # per-test isolation fixture and would log to the default path.
+        lambda: protected_files.decide("Edit", {"file_path": "/repo/src/guard/registry.py"}),
+        lambda: protected_files.decide(
+            "Bash", {"command": "cp /tmp/x /repo/src/guard/registry.py"}
+        ),
+        lambda: bash_command_validator.decide("rm -rf /"),
+        lambda: bash_command_validator.decide("flarbnoz --gronk", lockdown=True),
     ],
 )
-def test_override_hints_parse(envelope: dict[str, Any] | None) -> None:
+def test_override_hints_parse(make_envelope: Callable[[], dict[str, Any] | None]) -> None:
     """Every ``guard allowlist ...`` a deny suggests must parse with the real CLI."""
     from guard import cli
 
-    hints = re.findall(r"`(guard allowlist [^`]+)`", _reason(_require(envelope)))
+    hints = re.findall(r"`(guard allowlist [^`]+)`", _reason(_require(make_envelope())))
     assert hints
     parser = cli._build_parser()  # noqa: SLF001 -- the CLI's own parser
     for hint in hints:

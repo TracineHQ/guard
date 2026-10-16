@@ -32,12 +32,16 @@ runner and CI pick it up automatically. No code change needed to add a case.
 |---|---|---|
 | `command` | yes | The exact bash command string fed to `decide()`. |
 | `expected` | yes | The decision class guard must reach: `allow` or `deny`. |
-| `mode` | no (default `default`) | `lockdown` runs the strict default-deny (guard's opt-in lockdown mode). Any other value is passed to `decide()` as the Claude Code permission mode, which never changes the outcome on its own. |
+| `mode` | no (default `default`) | `lockdown` runs the strict default-deny (guard's opt-in lockdown mode). Any other value is passed to `decide()` as the Claude Code permission mode. Only `auto` changes the outcome: there STEER rules pass and FLOOR rules still deny (see `docs/dangerous-commands.md`). |
 | `source` | no | Provenance: `curated` (hand-written), `adversarial` (found by a sweep), `convo:session` (seeded from real usage). |
 | `note` | no | One line on why the row exists / what it guards against. |
 
 `expected` collapses guard's envelope: interactive passthrough (`None`) and an
 explicit allow both count as `allow`; `deny` is the literal decision. Guard never asks.
+
+Rows are adjudicated against guard's shipped policy: your global or project
+allowlist never changes an outcome, and a corpus run writes nothing to the
+decision log or the strict-deny queue.
 
 Blank lines and `#` comment lines are ignored.
 
@@ -56,6 +60,7 @@ evaluates every file. Rows are self-describing via `expected`/`mode`.
 | `fs_attr.jsonl` | Filesystem-attribute tampering on sensitive paths (`chown`/`chgrp`/`chattr`/`setfacl`). Both-mode hard deny. |
 | `secret_egress.jsonl` | Credential-file network egress (`curl -T ~/.ssh/id_rsa`, `nc < key`). Both-mode hard deny. |
 | `crossexam.jsonl` | Adversarial cross-examination findings -- the default append target for `guard corpus add`. Grows append-only as new bypasses / FPs are found. |
+| `auto.jsonl` | Claude Code `auto` permission mode: STEER shapes must pass, FLOOR shapes (including payloads a STEER shape hides) must still deny, and lockdown / default rows pin that nothing else changed. |
 
 ## Adding a fixture
 

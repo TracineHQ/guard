@@ -70,6 +70,15 @@ for the per-user file). Every hook honors it.
   Claude Code's `permission_mode` (`auto`, `dontAsk`, `bypassPermissions`)
   never turns it on.
 
+Claude Code's `auto` permission mode (outside `lockdown`) keeps only guard's
+hard floor. Every deny rule is FLOOR (irreversible, code injection, guard
+evasion, supply chain, credential exfiltration, guard's own files) or STEER
+(shape and style nudges); the list is in `docs/dangerous-commands.md`. In
+`auto` a STEER match passes to Claude Code's own classifier and is logged as
+`decision: "pass"` with reason `deferred to auto mode (steer rule <key>)`;
+FLOOR rules still deny. Asked "why did guard let X through in auto mode"?
+Grep the log for that reason.
+
 ## Environment variables
 
 | Variable | Purpose | Default |
