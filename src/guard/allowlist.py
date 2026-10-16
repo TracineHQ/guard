@@ -25,6 +25,23 @@ concatenated. Project entries are listed first so they're easy to spot in
 ``guard allowlist list`` output, but match priority is irrelevant: any
 rule on either list disables, any matching command on either list allows.
 
+Project trust. Any repo someone clones can ship a project file, so guard
+trusts it only when it is a regular file (no symlink below the working
+directory) whose ``.claude`` directory sits directly in a git work-tree
+root, and no path git tracks is that same file (compared by device and
+inode, so case and Unicode-folding tricks can't hide it): untracked or
+gitignored, the normal home for a user's own local entries. A trusted file
+behaves as above. An untrusted one (tracked, below the repository root,
+outside any work tree, behind a symlink, or unverifiable because git is
+missing, fails or times out) can only tighten: its mode applies only when
+stricter than the global/default mode (off < shadow < enforce < lockdown),
+its ``disable_rules`` and ``allow_commands`` are ignored, and one stderr
+warning per process says so. Git is consulted only when a project file
+would loosen something, and its verdict is cached in
+``project-trust-cache.json`` next to the global file, keyed on the file
+path plus the file's and the git index's stat (a failed check is cached for
+a minute so a broken or slow git isn't re-run on every hook).
+
 Files are parsed with ``json.loads``; malformed JSON or non-object top-level
 shape is logged as a stderr warning and the file is ignored. Individual
 entries that fail validation are dropped with a warning emitted to stderr —
@@ -40,13 +57,19 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import sys
+import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
-from guard._utils import GUARD_HOME, log_decision, read_permission_mode
+from guard._utils import GUARD_HOME, log_decision, read_permission_mode, sanitize_for_stderr
 from guard.registry import auto_pass_reason, is_deferred_to_auto
+
+if TYPE_CHECKING:
+    import subprocess  # nosec B404 -- typing only; imported lazily where git runs
 
 # ``lockdown`` is ``enforce`` plus strict default-deny for bash and the
 # extended protected-file list. It is opt-in only: Claude Code's
@@ -54,8 +77,26 @@ from guard.registry import auto_pass_reason, is_deferred_to_auto
 Mode = Literal["enforce", "shadow", "off", "lockdown"]
 _VALID_MODES: frozenset[str] = frozenset(("enforce", "shadow", "off", "lockdown"))
 _DEFAULT_MODE: Mode = "enforce"
+# Strictness order. An untrusted project file may only move the mode up.
+_MODE_RANK: dict[str, int] = {"off": 0, "shadow": 1, "enforce": 2, "lockdown": 3}
 
 PROJECT_ALLOWLIST_RELPATH = Path(".claude") / "guard" / "allowlist.json"
+
+# Project trust check. One ``git ls-files`` per cache miss, bounded by a
+# short timeout; anything that isn't a clean answer is untrusted.
+_GIT_TIMEOUT_S = 2.0
+_TRUST_CACHE_NAME = "project-trust-cache.json"
+_TRUST_CACHE_VERSION = 2
+_TRUST_CACHE_MAX_ENTRIES = 32
+_UNVERIFIABLE_TTL_S = 60.0
+# Every tracked path that could be the project file under another spelling.
+# Each is stat'ed and compared to the file guard read. Only depth-3 paths
+# matter (the file must sit at the work-tree root); ``icase`` covers case,
+# and the ``*`` around each letter admits the characters case-insensitive
+# HFS+ ignores in names (U+200C-200F, U+202A-202E, U+206A-206F, U+FEFF).
+# ``glob`` keeps each ``*`` inside one path component.
+_TRACKED_CANDIDATES_PATHSPEC = ":(top,icase,glob)*.*c*l*a*u*d*e*/*g*u*a*r*d*/*"
+_HEX_OID_RE = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
 
 # Bash matcher rule_ids — fine-grained, one per matcher function. Keep in
 # sync with the matchers in ``bash_command_validator.py``. The whole-hook
@@ -174,7 +215,7 @@ class Allowlist:
     disable_rules: frozenset[str] = field(default_factory=frozenset)
     allow_commands: tuple[AllowEntry, ...] = ()
     sources: tuple[Path, ...] = ()  # files actually read (for diagnostics)
-    mode: Mode = _DEFAULT_MODE  # enforce | shadow | off | lockdown; project overrides global
+    mode: Mode = _DEFAULT_MODE  # enforce | shadow | off | lockdown; trusted project wins
 
     def is_rule_disabled(self, rule_id: str) -> bool:
         """True if ``rule_id`` is in ``disable_rules``."""
@@ -290,6 +331,327 @@ def project_allowlist_path(cwd: Path | None = None) -> Path:
     """Return the path of the project allowlist file rooted at ``cwd`` (may not exist)."""
     base = cwd if cwd is not None else Path.cwd()
     return base / PROJECT_ALLOWLIST_RELPATH
+
+
+# === Project allowlist trust ===
+
+
+@dataclass(frozen=True)
+class ProjectTrust:
+    """Whether the project allowlist may loosen guard, and why.
+
+    ``transient`` marks "couldn't ask git" verdicts: they are cached only
+    briefly, so a broken git isn't re-run on every hook but isn't pinned.
+    """
+
+    trusted: bool
+    reason: str
+    transient: bool = False
+
+
+_TRUSTED = ProjectTrust(trusted=True, reason="not tracked by git")
+_GLOBAL_FILE = ProjectTrust(trusted=True, reason="it is the global allowlist")
+_TRACKED = ProjectTrust(trusted=False, reason="tracked by git")
+_NO_WORK_TREE = ProjectTrust(trusted=False, reason="not inside a git work tree")
+_NOT_AT_ROOT = ProjectTrust(trusted=False, reason="not at the repository root")
+_SYMLINKED = ProjectTrust(trusted=False, reason="reached through a symlink")
+
+# Per-process state. Several hooks call ``load_allowlist`` more than once per
+# run; the memo keeps that to one trust check and the set to one warning.
+# Memo values are ``(cache key, verdict, expiry or None)``.
+_TRUST_MEMO: dict[str, tuple[list[Any], ProjectTrust, float | None]] = {}
+_WARNED_UNTRUSTED: set[str] = set()
+
+
+def _unverifiable(why: str) -> ProjectTrust:
+    return ProjectTrust(trusted=False, reason=f"unverifiable: {why}", transient=True)
+
+
+def project_allowlist_trust(cwd: Path | None = None) -> ProjectTrust | None:
+    """Return the trust verdict for the project allowlist, or None if there is none."""
+    base = cwd if cwd is not None else Path.cwd()
+    path = base / PROJECT_ALLOWLIST_RELPATH
+    if not path.is_file():
+        return None
+    return _project_trust(base, path)
+
+
+def _project_trust(base: Path, path: Path) -> ProjectTrust:
+    """Trusted iff ``path`` is a regular file at a work-tree root that git does not track."""
+    if _is_global_allowlist(path):
+        return _GLOBAL_FILE  # with cwd = HOME the project path is the global file itself
+    if _has_symlink(base):
+        return _SYMLINKED
+    try:
+        real = path.resolve(strict=True)
+        st = real.stat()
+    except (OSError, RuntimeError):
+        return _unverifiable("the file could not be resolved")
+    found = _find_work_tree(real.parent)
+    if found is None:
+        return _NO_WORK_TREE
+    root, index = found
+    # Gitignored trees below the root (node_modules/, .venv/, vendored
+    # archives) hold files nobody reviewed, so only the root's own counts.
+    if root != real.parents[len(PROJECT_ALLOWLIST_RELPATH.parts) - 1]:
+        return _NOT_AT_ROOT
+    return _cached_git_trust(real, st, root, index)
+
+
+def _is_global_allowlist(path: Path) -> bool:
+    try:
+        return path.samefile(global_allowlist_path())
+    except OSError:
+        return False
+
+
+def _has_symlink(base: Path) -> bool:
+    """True if any component of the project path below ``base`` is a symlink.
+
+    A symlink can point at a tracked file git can't see through, or at a
+    file git never lists (one under .git/), so any symlink is untrusted.
+    """
+    probe = base
+    for part in PROJECT_ALLOWLIST_RELPATH.parts:
+        probe /= part
+        if probe.is_symlink():
+            return True
+    return False
+
+
+def _cached_git_trust(real: Path, st: os.stat_result, root: Path, index: Path) -> ProjectTrust:
+    """Per-process memo, then the on-disk cache, then git."""
+    file_key = str(real)
+    key = [*_stat_signature(real), str(index), *_stat_signature(index)]
+    now = time.time()
+    memo = _TRUST_MEMO.get(file_key)
+    if memo is not None and memo[0] == key and (memo[2] is None or now < memo[2]):
+        return memo[1]
+    cached = _cache_lookup(file_key, key, now)
+    if cached is not None:
+        verdict, until = cached
+    else:
+        verdict = _git_trust(root, st)
+        until = now + _UNVERIFIABLE_TTL_S if verdict.transient else None
+        _cache_store(file_key, key, verdict, until)
+    _TRUST_MEMO[file_key] = (key, verdict, until)
+    return verdict
+
+
+def _find_work_tree(start: Path) -> tuple[Path, Path] | None:
+    """Return ``(work-tree root, index path)`` for the repo containing ``start``.
+
+    Mirrors git's discovery: walk up to the first ``.git`` that is a valid
+    git directory (a ``.git`` dir that isn't one is skipped, as git does) or
+    a ``gitdir: <path>`` file (linked worktrees, submodules), where a bad
+    one ends the search because git stops there with an error.
+    """
+    for directory in (start, *start.parents):
+        dotgit = directory / ".git"
+        if dotgit.is_file():
+            gitdir = _read_gitfile(dotgit)
+            if gitdir is None or not _is_git_dir(gitdir):
+                return None
+            return directory, gitdir / "index"
+        if dotgit.is_dir() and _is_git_dir(dotgit):
+            return directory, dotgit / "index"
+    return None
+
+
+def _read_gitfile(dotgit: Path) -> Path | None:
+    try:
+        first_line = dotgit.read_text(encoding="utf-8").splitlines()[0]
+    except (OSError, UnicodeDecodeError, IndexError):
+        return None
+    if not first_line.startswith("gitdir:"):
+        return None
+    target = first_line.removeprefix("gitdir:").strip()
+    return dotgit.parent / target if target else None
+
+
+def _is_git_dir(gitdir: Path) -> bool:
+    """Mirror git's ``is_git_directory``: a valid HEAD, plus ``objects/`` and ``refs/``."""
+    head = gitdir / "HEAD"
+    try:
+        if head.is_symlink():
+            valid_head = head.readlink().as_posix().startswith("refs/")
+        else:
+            text = head.read_text(encoding="utf-8", errors="replace").strip()
+            valid_head = (
+                text.startswith("ref:") and text[4:].lstrip().startswith("refs/")
+            ) or _HEX_OID_RE.fullmatch(text) is not None
+        common = gitdir
+        commondir = gitdir / "commondir"
+        if commondir.is_file():
+            common = gitdir / commondir.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return (
+        valid_head
+        and os.access(common / "objects", os.X_OK)
+        and os.access(common / "refs", os.X_OK)
+    )
+
+
+def _stat_signature(path: Path) -> list[int]:
+    try:
+        st = path.stat()
+    except OSError:
+        return [0, 0, 0, 0]
+    return [st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino]
+
+
+def _git_trust(root: Path, st: os.stat_result) -> ProjectTrust:
+    """Tracked iff some path in the index is the same file (device, inode) as ``st``.
+
+    Comparing names can't work on a case- or normalization-insensitive
+    filesystem: a clone whose index holds ``.claude/GUARD/a`` and
+    ``.claude/guard/allowlist.json`` writes the tracked file into
+    ``.claude/GUARD/``, where guard still reads it but no exact or
+    ``icase`` name match finds it. So git lists every tracked path that
+    could be the file under any spelling, and each one is stat'ed.
+    """
+    proc = _run_git_ls_files(root)
+    if isinstance(proc, ProjectTrust):
+        return proc
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", "replace").strip()
+        if "not a git repository" in err:
+            return _NO_WORK_TREE
+        first = err.splitlines()[0] if err else f"exit {proc.returncode}"
+        return _unverifiable(f"git failed ({sanitize_for_stderr(first, max_len=120)})")
+    identity = (st.st_dev, st.st_ino)
+    for entry in proc.stdout.split(b"\0"):
+        if not entry:
+            continue
+        try:
+            candidate = (root / os.fsdecode(entry)).stat()
+        except OSError:
+            continue  # not checked out (sparse, deleted): can't be the file guard read
+        if (candidate.st_dev, candidate.st_ino) == identity:
+            return _TRACKED
+    return _TRUSTED
+
+
+def _run_git_ls_files(directory: Path) -> subprocess.CompletedProcess[bytes] | ProjectTrust:
+    """List tracked project-file candidates, as paths relative to ``directory``.
+
+    A ``ProjectTrust`` comes back when git couldn't run.
+    """
+    import subprocess  # noqa: PLC0415  # nosec B404 -- lazy: most hooks never get here
+
+    argv = [
+        "git",
+        "-c",
+        "core.fsmonitor=false",  # never run a repo-configured fsmonitor hook
+        "--no-pager",
+        "-C",
+        str(directory),
+        "ls-files",
+        "-z",
+        "--cached",
+        "--",
+        _TRACKED_CANDIDATES_PATHSPEC,
+    ]
+    # Drop GIT_DIR / GIT_INDEX_FILE / GIT_CONFIG_* and friends: inherited
+    # overrides would make git answer about some other repo or config. The
+    # C locale keeps the error text guard matches on in English.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["LC_ALL"] = "C"
+    try:
+        return subprocess.run(  # noqa: S603  # nosec B603 -- fixed argv list, no shell; only the cwd-derived dir varies
+            argv,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            timeout=_GIT_TIMEOUT_S,
+            check=False,
+        )
+    except FileNotFoundError:
+        return _unverifiable("git was not found")
+    except subprocess.TimeoutExpired:
+        return _unverifiable("the git check timed out")
+    except OSError as exc:
+        return _unverifiable(f"git could not run ({exc.strerror or type(exc).__name__})")
+
+
+def _trust_cache_path() -> Path:
+    return global_allowlist_path().parent / _TRUST_CACHE_NAME
+
+
+def _cache_entries() -> dict[str, Any]:
+    try:
+        data = json.loads(_trust_cache_path().read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("version") != _TRUST_CACHE_VERSION:
+        return {}
+    entries = data.get("entries")
+    return entries if isinstance(entries, dict) else {}
+
+
+def _cache_lookup(
+    file_key: str, key: list[Any], now: float
+) -> tuple[ProjectTrust, float | None] | None:
+    """Return ``(verdict, expiry)`` for a current entry, else None."""
+    entry = _cache_entries().get(file_key)
+    if not isinstance(entry, dict) or entry.get("key") != key:
+        return None
+    trusted = entry.get("trusted")
+    reason = entry.get("reason")
+    until = entry.get("until")
+    if not isinstance(trusted, bool) or not isinstance(reason, str):
+        return None
+    if until is None:
+        return ProjectTrust(trusted=trusted, reason=reason), None
+    if not isinstance(until, (int, float)) or isinstance(until, bool) or now >= until:
+        return None
+    return ProjectTrust(trusted=trusted, reason=reason, transient=True), float(until)
+
+
+def _cache_store(file_key: str, key: list[Any], verdict: ProjectTrust, until: float | None) -> None:
+    """Best-effort atomic write; concurrent hooks may drop each other's entries."""
+    entries = _cache_entries()
+    entries.pop(file_key, None)
+    entries[file_key] = {
+        "key": key,
+        "trusted": verdict.trusted,
+        "reason": verdict.reason,
+        "until": until,
+    }
+    while len(entries) > _TRUST_CACHE_MAX_ENTRIES:
+        entries.pop(next(iter(entries)))
+    path = _trust_cache_path()
+    with contextlib.suppress(OSError):
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, tmp_name = tempfile.mkstemp(prefix=".project-trust-", dir=path.parent)
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({"version": _TRUST_CACHE_VERSION, "entries": entries}, fh)
+            tmp.replace(path)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+
+def _warn_untrusted(path: Path, trust: ProjectTrust, base_mode: Mode) -> None:
+    """One stderr warning per process per file, never on stdout."""
+    try:
+        key = str(path.resolve())
+    except (OSError, RuntimeError):
+        key = str(path)
+    if key in _WARNED_UNTRUSTED:
+        return
+    _WARNED_UNTRUSTED.add(key)
+    shown = sanitize_for_stderr(str(path), max_len=400)
+    # This can reach the model on a deny, so it says what and why but leaves
+    # the way to make the file trusted to `guard status`.
+    _warn(
+        f"project allowlist at {shown} is untrusted ({trust.reason}), so its loosening "
+        f"entries are ignored (disable_rules, allow_commands, and any mode looser than "
+        f"{base_mode!r}). Run `guard status` for details."
+    )
 
 
 def hook_bypass_reason(allowlist: Allowlist, hook_id: str, excerpt: str) -> str | None:
@@ -541,9 +903,15 @@ def load_allowlist(cwd: Path | None = None) -> Allowlist:
 
     Missing files are silently skipped. Malformed files emit a warning to
     stderr and contribute nothing.
+
+    An untrusted project file (see the module docstring) can only tighten:
+    its lists are dropped and its mode counts only when stricter than the
+    global/default mode. Trust is checked only when the file would loosen
+    something, so a missing or tighten-only project file never spawns git.
     """
     sources: list[Path] = []
-    project_path = project_allowlist_path(cwd)
+    base = cwd if cwd is not None else Path.cwd()
+    project_path = base / PROJECT_ALLOWLIST_RELPATH
     project_rules, project_cmds, project_mode = _load_one(project_path, "project")
     if project_path.exists():
         sources.append(project_path)
@@ -553,10 +921,20 @@ def load_allowlist(cwd: Path | None = None) -> Allowlist:
     if global_path.exists():
         sources.append(global_path)
 
-    # Project beats global beats default. Once mode lands, an operator
-    # flipping the project file to ``shadow`` overrides the global setting
-    # so per-repo experiments don't leak across the rest of their machine.
-    effective_mode: Mode = project_mode or global_mode or _DEFAULT_MODE
+    base_mode: Mode = global_mode or _DEFAULT_MODE
+    looser_mode = project_mode is not None and _MODE_RANK[project_mode] < _MODE_RANK[base_mode]
+    if project_rules or project_cmds or looser_mode:
+        trust = _project_trust(base, project_path)
+        if not trust.trusted:
+            _warn_untrusted(project_path, trust, base_mode)
+            project_rules, project_cmds = [], []
+            if looser_mode:
+                project_mode = None
+
+    # Trusted project beats global beats default, so an operator flipping
+    # their own project file to ``shadow`` doesn't leak the experiment
+    # across the rest of their machine.
+    effective_mode: Mode = project_mode or base_mode
 
     return Allowlist(
         disable_rules=frozenset(project_rules) | frozenset(global_rules),

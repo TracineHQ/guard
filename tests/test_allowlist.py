@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tests._helpers import init_git_repo
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -23,11 +25,12 @@ def isolated_homes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Pat
     """Return ``(global_dir, project_cwd)`` — both clean, no existing allowlists.
 
     Points ``GUARD_HOME`` at the temp global dir via env so the module-level
-    constant resolves there without re-importing.
+    constant resolves there without re-importing. ``project_cwd`` is a git
+    work tree, so an untracked project file there is trusted (see
+    ``test_allowlist_trust.py`` for the untrusted cases).
     """
     global_dir = tmp_path / "global" / ".claude" / "guard"
-    project_cwd = tmp_path / "project"
-    project_cwd.mkdir(parents=True)
+    project_cwd = init_git_repo(tmp_path / "project")
     monkeypatch.setenv("GUARD_DATA_DIR", str(global_dir))
     # Re-import to pick up the env var.
     import importlib

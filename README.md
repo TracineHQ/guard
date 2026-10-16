@@ -82,7 +82,11 @@ failure. Suitable for CI gates and cron-based monitors.
 **Mode (enforce / shadow / off / lockdown):** the effective mode lives in
 `.claude/guard/allowlist.json` as a top-level `"mode"` field (project),
 with `~/.claude/guard/allowlist.json` (global) as fallback. Default is
-`"enforce"`. Every hook honors it:
+`"enforce"`. The project file counts only when it sits at the repository
+root and git doesn't track it (untracked or gitignored); a tracked one, like
+a file shipped in a repo you cloned, can only tighten. See
+[Project trust](SKILL.md#project-trust).
+Every hook honors the mode:
 
 - `enforce` -- deny what matches; everything else goes to Claude Code's
   normal permission flow.

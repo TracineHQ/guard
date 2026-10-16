@@ -114,7 +114,7 @@ def test_off_mode_skips_logging(tmp_path: Path) -> None:
     log_path = tmp_path / "decisions.jsonl"
     cwd = tmp_path / "proj"
     cwd.mkdir()
-    # Project-scope mode=off in the allowlist at the cwd.
+    # mode=off in the global allowlist: _run points GUARD_DATA_DIR at <cwd>/.claude/guard.
     project_allowlist = cwd / ".claude" / "guard" / "allowlist.json"
     project_allowlist.parent.mkdir(parents=True)
     project_allowlist.write_text(json.dumps({"mode": "off"}), encoding="utf-8")
