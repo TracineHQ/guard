@@ -26,8 +26,15 @@ in `src/guard/registry.py`; the tables below mirror it.
   guard evasion, supply chain, credential exfiltration, and boundaries Claude
   Code's auto classifier cannot see (guard's own files, subagent scope, the
   commit-attribution policy). Denied in every permission mode.
-- **STEER** -- shape and style rules that point the agent at a better route.
-  Denied in every permission mode except Claude Code's `auto`.
+- **STEER** -- shape and style rules that point the agent at a better route,
+  and shape detectors whose real-session denies were almost all harmless
+  commands: a variable or glob as the command name, exec env vars, `pip` /
+  `npm` / `npx` installs, `git -c` exec keys and cron / launchd writes. Denied
+  in every permission mode except Claude Code's `auto`.
+
+The trade-off for those detectors: in `auto`, a command guard cannot read
+(`X=rm; $X -rf /`) goes to Claude Code's classifier, which sees the whole
+command and the conversation, instead of being denied by guard.
 
 In `auto` (and not under `guard mode lockdown`) a STEER match returns no
 decision, so Claude Code's own auto-mode classifier decides, and guard logs a
@@ -117,9 +124,6 @@ json,sys; print(json.load(sys.stdin))'`) and a non-interpreter (`curl ... | jq
 | `bash.gem_remote_install` | supply chain: installs code from an arbitrary remote source |
 | `bash.go_remote_install` | supply chain: installs code from an arbitrary remote source |
 | `bash.helm_remote_install` | supply chain: installs charts from an arbitrary remote source |
-| `bash.npm_url_install` | supply chain: installs code from an arbitrary remote source |
-| `bash.npx_remote` | supply chain: runs an arbitrary remote package |
-| `bash.pip_install_url` | supply chain: runs setup code from an arbitrary remote source |
 | `bash.registry_config` | supply chain: repoints every later install at another registry |
 | `bash.chmod_dangerous` | recursive 777 on a system root |
 | `bash.chmod_setuid` | setuid / setgid bit is a privilege-escalation primitive |
@@ -130,15 +134,12 @@ json,sys; print(json.load(sys.stdin))'`) and a non-interpreter (`curl ... | jq
 | `bash.secret_value` | literal secret on the command line |
 | `bash.secret_egress` | uploads a credential file |
 | `bash.dns_exfil` | DNS-tunnel exfiltration shape |
-| `bash.dangerous_env_sink` | exec / loader hijack env (`GIT_SSH_COMMAND`, `LD_PRELOAD`, ...) |
 | `bash.dangerous_interpreter` | inline interpreter code |
 | `bash.eval_builtin` | `eval` runs an arbitrary string as code |
 | `bash.dangerous_construct:executed` | output run as code (`bash -c "$(curl ...)"`, `source <(...)`, a shell fed by `<<<`), or awk / osascript running a command built at run time |
 | `bash.dangerous_construct:sensitive_target` | `>` / `>>` / `>|` into `~/.ssh`, a shell rc file, `/etc`, a launch agent, git config or a git hook |
 | `bash.shell_wrapper:opaque` | `-c` string that is empty, a `{}` placeholder or runs a command named by an expansion |
 | `bash.admin_default_deny` | cloud CLI verb off the read-only catalog: secret reads, IAM grants, public access, key minting |
-| `bash.var_expanded_head` | variable-named command (`$R`, `$SHELL`, `$1`, `$@`); what runs is unknowable |
-| `bash.glob_head` | glob in the command name (`/bin/r?`) hides which binary runs |
 | `bash.env_split_string` | `env -S` rebuilds argv guard cannot see |
 | `bash.wrapper_stacking` | nesting past the unwrap limit hides the inner command |
 | `bash.dangerous_rm` | recursive rm of `/`, `~`, `$HOME` or cwd |
@@ -154,14 +155,12 @@ json,sys; print(json.load(sys.stdin))'`) and a non-interpreter (`curl ... | jq
 | `bash.gpg_secret_delete` | destroys private key material |
 | `bash.git_force_push` | rewrites shared remote history |
 | `bash.git_force_refspec` | `+refspec` force-push rewrites shared remote history |
-| `bash.git_config_injection` | git config exec sink (`core.hooksPath`, `alias.x=!cmd`, ...) |
 | `bash.git_read_exec` | read-only git verb coerced into exec or an arbitrary file write |
 | `bash.escalation_shell` | `su` / `doas` / `pkexec` shell outside guard's view |
 | `bash.sudo_escalation` | root shell or env transfer outside guard's view |
 | `bash.host_control` | reboot / shutdown kills the session and the host |
 | `bash.kernel_module_load` | loads code into the kernel |
 | `bash.network_policy_wipe` | firewall wipe can lock the operator out |
-| `bash.persistence` | schedules code that outlives the session (cron, launchd, systemd) |
 | `bash.process_attach` | reads another process's memory |
 | `bash.process_tree_kill` | kills every process the user owns |
 | `bash.sensitive_write` | writes to `~/.ssh`, shell rc files, `/etc` or launch agents |
@@ -178,6 +177,14 @@ json,sys; print(json.load(sys.stdin))'`) and a non-interpreter (`curl ... | jq
 
 | Rule key | Why |
 |---|---|
+| `bash.var_expanded_head` | variable-named command (`$R`, `$1`, `$@`); the auto classifier sees what the variable holds |
+| `bash.glob_head` | glob in the command name (`/bin/r?`); the auto classifier sees the whole command |
+| `bash.dangerous_env_sink` | exec / loader env (`GIT_SSH_COMMAND`, `LD_PRELOAD`, ...); the auto classifier judges the value |
+| `bash.git_config_injection` | git config exec key (`core.hooksPath`, `alias.x=!cmd`, ...); the auto classifier judges the value |
+| `bash.npm_url_install` | install from a URL or git source; the auto classifier judges the source |
+| `bash.npx_remote` | runs a remote package; the auto classifier judges the package |
+| `bash.pip_install_url` | install from a URL or VCS source; the auto classifier judges the source |
+| `bash.persistence` | schedules code past the session (cron, launchd, systemd); the classifier judges the job |
 | `bash.admin_unknown_flag_strict` | lockdown-only unknown-flag escalation |
 | `bash.conditional_denied_flag` | `find -exec` / `-delete`, `yq -i` on a project path |
 | `bash.dangerous_construct` | command / process substitution, here-string, file redirect; bodies are still floor-checked |
@@ -195,7 +202,7 @@ json,sys; print(json.load(sys.stdin))'`) and a non-interpreter (`curl ... | jq
 | `bash.use_corpus_harness` | guard-checkout workflow nudge |
 | `bash.strict_default_deny` | lockdown-only default deny |
 | `bash.strict_feedback` | lockdown-only feedback deny |
-| `guard.git_c_validator:config_write` | `git -C` config write; exec-sink keys are FLOOR under `bash.git_config_injection` |
+| `guard.git_c_validator:config_write` | `git -C` config write; exec-sink keys are matched by `bash.git_config_injection` |
 | `guard.git_c_validator:commit_reuse` | `git commit -C` / `--reuse-message` |
 | `guard.git_c_validator:destructive` | `reset` / `clean` under `-C`, which guard does not block without `-C` |
 | `guard.git_c_validator:stash` | `stash pop` / `drop` / `clear` |
