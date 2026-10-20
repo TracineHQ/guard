@@ -476,6 +476,20 @@ def test_trace_unknown_session_returns_zero(populated_log: Path) -> None:
     assert payload["records"] == []
 
 
+def test_trace_names_the_hook_on_crash_lines(decision_log_env: Path) -> None:
+    from guard._utils import log_internal_error
+    from guard.cli import cmd_trace
+
+    try:
+        msg = "boom"
+        raise RuntimeError(msg)  # noqa: TRY301 -- intentional: synthesise an exc to log
+    except RuntimeError as exc:
+        log_internal_error(exc, session_id="sess-C", hook_id="guard.credential_check")
+
+    _, pretty = cmd_trace("sess-C")
+    assert "ERROR  guard.credential_check  RuntimeError  boom" in pretty
+
+
 # === guard test ===
 
 
