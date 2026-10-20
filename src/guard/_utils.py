@@ -394,7 +394,7 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def log_internal_error(exc: BaseException, *, session_id: str = "") -> None:
+def log_internal_error(exc: BaseException, *, session_id: str = "", hook_id: str = "") -> None:
     """Append a structured ``internal_error`` JSONL record.
 
     Called from ``safe_main`` before fail-open so a silent crash becomes an
@@ -419,6 +419,7 @@ def log_internal_error(exc: BaseException, *, session_id: str = "") -> None:
             "exc_class": type(exc).__name__,
             "exc_msg": redacted_msg,
             "traceback_hash": tb_hash,
+            "hook_id": hook_id,
             "session_id": session_id,
             "timestamp": _utc_now_iso(),
         },
@@ -654,8 +655,12 @@ def safe_main(hook_fn: Callable[[dict[str, Any]], None]) -> None:
             sid = payload.get("session_id")
             if isinstance(sid, str):
                 session_id = sid
+        # Name the hook from the file its function lives in, so a crash record
+        # says which check went silent.
+        code = getattr(hook_fn, "__code__", None)
+        hook_id = f"guard.{Path(code.co_filename).stem}" if code else ""
         with contextlib.suppress(Exception):
-            log_internal_error(exc, session_id=session_id)
+            log_internal_error(exc, session_id=session_id, hook_id=hook_id)
         if os.environ.get("GUARD_DEBUG") == "1":
             import traceback  # noqa: PLC0415 -- deferred import, only loaded on debug path
 

@@ -66,6 +66,16 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- `credential_check` no longer passes a command it crashed on. A token shaped
+  like `~user/path` whose user doesn't exist (`~128GB/s`) made `expanduser`
+  raise, and a crashing hook passes silently, so
+  `echo "~128GB/s"; cat ~/.aws/credentials` went through. Such a token now
+  stays as written, and any other crash in `credential_check` denies with an
+  "internal error" reason instead of passing. The deny goes through the normal
+  decision path, so `off` mode and a disabled rule still pass. Other hooks
+  still fail open.
+- `internal_error` records name the hook that crashed (`hook_id`), and
+  `guard trace` shows it on crash lines.
 - A project allowlist (`.claude/guard/allowlist.json`) that git tracks can
   no longer loosen guard. Any repo could ship one with `"mode": "off"` or
   disabled rules and switch guard off for every agent working in it. The

@@ -803,10 +803,12 @@ def test_safe_main_in_process_passthrough_on_exception(
     # Must not raise.
     _utils.safe_main(crashing_hook)
 
-    # And it must have written an internal_error record with the session_id.
+    # And it must have written an internal_error record with the session_id,
+    # naming the hook from the file the crashing function lives in.
     record = json.loads(guard_decisions_jsonl.read_text().splitlines()[-1])
     assert record["type"] == "internal_error"
     assert record["session_id"] == "abc"
+    assert record["hook_id"] == "guard.test_utils"
 
 
 def test_safe_main_debug_branch_emits_traceback(

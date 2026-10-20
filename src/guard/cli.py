@@ -753,7 +753,8 @@ def cmd_trace(
             if rec_type == "internal_error":
                 exc_class = rec.get("exc_class", "?")
                 exc_msg = str(rec.get("exc_msg", ""))[:_REASON_DISPLAY_TRUNC]
-                lines.append(f"  {ts}  ERROR  {exc_class}  {exc_msg}")
+                hook_id = rec.get("hook_id") or "?"
+                lines.append(f"  {ts}  ERROR  {hook_id}  {exc_class}  {exc_msg}")
             else:
                 decision = rec.get("decision", "?")
                 hook_id = rec.get("hook_id", "?")

@@ -148,6 +148,7 @@ carry a different shape:
 | `exc_class` | string | yes | exception class name (e.g. `"ValueError"`) |
 | `exc_msg` | string | yes | exception message, secret-shape-redacted, ≤ 1024 chars |
 | `traceback_hash` | string | yes | `sha256:<hex>` of the traceback. Same crash collapses to the same hash so consumers can group recurrences without storing full tracebacks. |
+| `hook_id` | string | optional | the hook that crashed, `guard.<hook_module>`. Empty or absent in records written before it was added. |
 | `session_id` | string \| null | yes | from Claude Code stdin if available |
 
 Consumers tallying decisions MUST filter on `type == "decision"` (or absent)
