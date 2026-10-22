@@ -14,6 +14,7 @@ import pytest
 
 from guard.hooks.bash_command_validator import (
     _get_alternative_feedback,
+    _mark_quoted_newlines,
     decide,
     get_credential_leak_deny,
     has_dangerous_constructs,
@@ -94,6 +95,41 @@ class TestSplitPipeline:
 
     def test_strips_comments(self):
         assert split_pipeline("# comment\nls") == ["ls"]
+
+
+class TestMarkQuotedNewlines:
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            pytest.param("awk '\n{ print $4 }' f", "awk '\ue000{ print $4 }' f", id="single"),
+            pytest.param('git commit -m "a\n\nb"', 'git commit -m "a\ue000\ue000b"', id="double"),
+            pytest.param('echo "a \\"b\nc\\" d"', 'echo "a \\"b\ue000c\\" d"', id="escaped-quote"),
+            pytest.param('echo "${HOME}\n"', 'echo "${HOME}\ue000"', id="plain-param"),
+            pytest.param("x=$(jq '\n.a' f)\nls", "x=$(jq '\ue000.a' f)\nls", id="substitution"),
+        ],
+    )
+    def test_marks_newlines_inside_quotes(self, command, expected):
+        assert _mark_quoted_newlines(command) == expected
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param("ls\ncat foo", id="none-quoted"),
+            pytest.param("echo 'a\\'\nrm -rf /\necho '", id="backslash-in-single-quotes"),
+            pytest.param("echo a\\'b\nrm -rf /\necho '", id="escaped-quote-outside"),
+            pytest.param("cat <<EOF\nit's\nEOF\nrm -rf /\necho 'x", id="heredoc"),
+            pytest.param("echo hi # it's\nrm -rf /\necho '", id="comment"),
+            pytest.param("ls (#i)'\n'\nrm -rf /\necho '", id="hash-after-paren"),
+            pytest.param("echo $'\\''\nrm -rf /\necho '", id="ansi-c"),
+            pytest.param("echo \"$(echo ')')\n\"", id="substitution-in-double-quotes"),
+            pytest.param('echo "`date`\n"', id="backtick"),
+            pytest.param("echo \"${x:-'}'}\n\"", id="param-operator"),
+            pytest.param("alias q=\"'\"\nq echo '\nrm -rf /\n'", id="alias"),
+            pytest.param("echo 'open\n", id="unterminated"),
+        ],
+    )
+    def test_leaves_unmarked_or_unreadable_commands_alone(self, command):
+        assert _mark_quoted_newlines(command) is None
 
 
 class TestStripComments:

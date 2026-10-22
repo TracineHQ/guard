@@ -1218,6 +1218,75 @@ def _canonicalize(command: str) -> str:
     return _expand_braces(command)
 
 
+# A newline inside quotes is part of an argument (a multi-line awk, jq or
+# ``python -c`` program), not a command boundary. ``_mark_quoted_newlines``
+# swaps each one for this private-use character so the line split keeps the
+# argument whole, and ``_decide_inner`` puts the newline back in each segment.
+_QUOTED_NEWLINE = ""
+_PLAIN_PARAM_RE = re.compile(r"\$\{[#!]?(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#?$!-])\}")
+# Characters after which a ``#`` starts a word, so the shell may read a comment.
+_WORD_START_CHARS = frozenset(" \t\n;&|()<>")
+_ALIAS_RE = re.compile(r"\balias\b")
+
+
+def _mark_quoted_newlines(command: str) -> str | None:
+    """``command`` with each newline inside quotes swapped for ``_QUOTED_NEWLINE``.
+
+    Reads the raw command the way the shell does: single quotes, double quotes
+    with backslash escapes, and backslash escapes outside quotes. Returns
+    ``None`` when no newline is quoted, and also whenever the quoting can't be
+    read exactly here, so the caller keeps splitting on every newline: a
+    heredoc (its body is raw text), a comment, a backtick, ``$'...'``, a
+    ``$(...)`` inside double quotes, a ``${...}`` other than a plain name, an
+    ``alias`` (it can change how later lines are quoted), or a quote still
+    open at the end.
+    """
+    if "\n" not in command or _QUOTED_NEWLINE in command or _ALIAS_RE.search(command):
+        return None
+    out: list[str] = []
+    quote = ""
+    marked = False
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if quote == "'":
+            if c == "'":
+                quote = ""
+        elif c == "\\" and i + 1 < n and command[i + 1] != "\n":
+            out.append(command[i : i + 2])
+            i += 2
+            continue
+        elif c == "`" or (not quote and command.startswith("$'", i)):
+            return None
+        elif command.startswith("${", i):
+            param = _PLAIN_PARAM_RE.match(command, i)
+            if param is None:
+                return None
+            out.append(param.group())
+            i = param.end()
+            continue
+        elif quote == '"':
+            if command.startswith("$(", i):
+                return None
+            if c == '"':
+                quote = ""
+        elif command.startswith("<<", i) or (
+            c == "#" and (i == 0 or command[i - 1] in _WORD_START_CHARS)
+        ):
+            return None
+        elif c in "'\"":
+            quote = c
+        if c == "\n" and quote:
+            out.append(_QUOTED_NEWLINE)
+            marked = True
+        else:
+            out.append(c)
+        i += 1
+    if quote or not marked:
+        return None
+    return "".join(out)
+
+
 # Regex matching a shell variable assignment of the form ``KEY=VALUE``.
 _SEG_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
@@ -7014,6 +7083,9 @@ def _decide_inner(
             return bypass
         _log_local(command, "deny", "command-too-long")
         return deny
+    # Read the quoting before canonicalizing: decoding ``$'...'`` and expanding
+    # braces don't respect quotes.
+    marked = _mark_quoted_newlines(command)
     # Fold POSIX line continuations and unicode whitespace before any other
     # processing so downstream pipeline split / normalization sees a canonical
     # ASCII form.
@@ -7063,10 +7135,19 @@ def _decide_inner(
         return secret
 
     cleaned = strip_comments(command)
-    # Heredoc bodies that are data (a file being written, input to a filter)
-    # are not commands: take them out before the line split.
-    skeleton, dynamic_heredocs = _heredoc_skeleton(cleaned)
-    seg_pairs = split_pipeline_with_ops(skeleton) if skeleton else []
+    if marked is None:
+        # Heredoc bodies that are data (a file being written, input to a filter)
+        # are not commands: take them out before the line split.
+        skeleton, dynamic_heredocs = _heredoc_skeleton(cleaned)
+        seg_pairs = split_pipeline_with_ops(skeleton) if skeleton else []
+    else:
+        # The quote walk found no heredoc, and each quoted newline stays in
+        # the segment that holds its argument.
+        skeleton, dynamic_heredocs = cleaned, frozenset()
+        seg_pairs = [
+            (op, seg.replace(_QUOTED_NEWLINE, "\n"))
+            for op, seg in split_pipeline_with_ops(strip_comments(_canonicalize(marked)))
+        ]
     if not seg_pairs:
         return None
     segments = [seg for _op, seg in seg_pairs]

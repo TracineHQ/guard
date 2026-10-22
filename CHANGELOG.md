@@ -99,6 +99,11 @@ adheres to [Semantic Versioning](https://semver.org/).
   would loosen something and caches the answer in
   `~/.claude/guard/project-trust-cache.json`, keyed on the file and the
   repo's git index (an unverifiable answer for about a minute).
+- A command after a multi-line quoted argument is checked again. Guard split
+  on every newline, so the line after a quoted newline began inside the
+  quote and the `;`, `&&` or `|` after its closing quote read as quoted:
+  `echo 'a<newline>b' ; rm -rf /` passed in every mode. A `system()` call in
+  a multi-line awk program missed the awk floor the same way.
 
 ### Fixed
 
@@ -116,6 +121,13 @@ adheres to [Semantic Versioning](https://semver.org/).
   - An awk command that starts with a literal (`cmd = "wc -l " $1`) is
     checked by that literal; only a command built entirely at run time
     (`system($0)`) is denied.
+  - A newline inside quotes no longer splits the command, so a multi-line
+    awk, jq or `-c` program is one argument rather than one command per
+    line. A program line such as `$4 <= 102800 {` is no longer denied as a
+    command named by an expansion. When the quoting can't be read exactly
+    (a heredoc, a comment, a backtick, `$'...'`, `$(...)` inside double
+    quotes, a `${...}` other than a plain name, `alias`), guard still splits
+    on every newline.
 
 - Read-only guard CLI calls (`guard status`, `guard allowlist list`,
   `guard mode --help`, `guard allowlist --help`) no longer trip
