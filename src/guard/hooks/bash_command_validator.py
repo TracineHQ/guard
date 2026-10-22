@@ -1223,6 +1223,8 @@ def _canonicalize(command: str) -> str:
 # swaps each one for this private-use character so the line split keeps the
 # argument whole, and ``_decide_inner`` puts the newline back in each segment.
 _QUOTED_NEWLINE = "\ue000"
+# ``${name}``, ``${#name}``, ``${!name}`` and the special parameters: no
+# operator whose word could hold quotes.
 _PLAIN_PARAM_RE = re.compile(r"\$\{[#!]?(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#?$!-])\}")
 # Characters after which a ``#`` starts a word, so the shell may read a comment.
 _WORD_START_CHARS = frozenset(" \t\n;&|()<>")
@@ -1239,8 +1241,8 @@ def _mark_quoted_newlines(command: str) -> str | None:
     heredoc (its body is raw text), a ``#`` that may start a comment, a
     backtick, ``$'...'`` anywhere (``_canonicalize`` decodes it without
     regard to quotes), a ``$(...)`` inside double quotes, a ``${...}`` other
-    than a plain name, an ``alias`` (it can change how later lines are
-    quoted), or a quote still open at the end. A backslash-newline inside
+    than a plain name, the word ``alias`` anywhere (an alias can change how
+    later lines are quoted), or a quote still open at the end. A backslash-newline inside
     double quotes is dropped, as the shell drops it.
     """
     if (
@@ -5627,6 +5629,7 @@ def _expand_runner_payload_segments(seg: str) -> list[str]:
         return []
     head = _basename(tokens[0])
     if head == "watch":
+        # An exec wrapper: its command follows the flags, with no ``-c``.
         inner = _strip_exec_wrapper(_shlex_tokens(seg))
     elif head in DANGEROUS_SHELL_WRAPPERS or head in _SHELL_RUN_EXECUTORS:
         inner = _strip_runner_prefix(seg)
