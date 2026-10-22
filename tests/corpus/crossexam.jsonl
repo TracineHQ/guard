@@ -54,14 +54,3 @@
 {"command": "function echo 'has { brace in arg'", "expected": "allow", "mode": "default", "source": "crossexam", "note": "anti-FP R-F/F5: { inside a quoted arg is not a function body opener"}
 {"command": "function foo", "expected": "allow", "mode": "default", "source": "crossexam", "note": "anti-FP R-F/F5: function NAME with no body opener is not a definition"}
 {"command": "function foo bar baz {qux}", "expected": "allow", "mode": "default", "source": "crossexam", "note": "anti-FP R-F/F5: body opener must follow the name; intervening words mean not a def"}
-{"command": "echo 'a\nb' ; rm -rf /", "expected": "deny", "mode": "default", "source": "adversarial", "note": "the line after a quoted newline still starts inside the quote, so the `;` after it splits"}
-{"command": "echo 'a\nb' ; rm -rf /", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: rm -rf / after a multi-line quote stays on the floor"}
-{"command": "echo \"a\nb\" && rm -rf /", "expected": "deny", "mode": "default", "source": "adversarial", "note": "double-quoted newline, then a command after &&"}
-{"command": "awk '\nBEGIN {\nsystem(\"rm -rf ~\")\n}'", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "awk system() call inside a multi-line program reaches the awk floor"}
-{"command": "echo hi # it's\nrm -rf /\necho '", "expected": "deny", "mode": "default", "source": "adversarial", "note": "an apostrophe in a comment opens no quote"}
-{"command": "cat <<EOF\nit's\nEOF\nrm -rf /\necho 'x", "expected": "deny", "mode": "default", "source": "adversarial", "note": "an apostrophe in a heredoc body opens no quote"}
-{"command": "echo $'\\''\nrm -rf /\necho '", "expected": "deny", "mode": "default", "source": "adversarial", "note": "an escaped quote inside $'...' does not close it"}
-{"command": "ls (#i)'\n'\nrm -rf /\necho '", "expected": "deny", "mode": "default", "source": "adversarial", "note": "zsh glob flag: `#` after `(` is not read as a comment"}
-{"command": "echo a\\'b\nrm -rf /\necho '", "expected": "deny", "mode": "default", "source": "adversarial", "note": "an escaped quote outside quotes opens no quote"}
-{"command": "echo 'a\\'\nrm -rf /\necho '", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a backslash does not escape the closing single quote"}
-{"command": "alias q=\"'\"\nq echo '\nrm -rf /\n'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "an alias defined in the command can change how later lines are quoted"}

@@ -177,3 +177,18 @@
 {"command": "python -m timeit 'code'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "timeit runs its arguments as statements, same primitive as -c"}
 {"command": "uv run python tools/dev.py frog-run g1", "expected": "deny", "mode": "lockdown", "source": "curated", "note": "lockdown default-denies script runs (not on the safe-prefix allowlist)"}
 {"command": "python -m http.server", "expected": "deny", "mode": "lockdown", "source": "curated", "note": "lockdown default-denies module runs outside the safe-module set"}
+{"command": "echo 'a\nb' ; rm -rf /", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a `;` after a multi-line quoted argument still separates commands"}
+{"command": "echo 'a\nb' ; rm -rf /", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: the command after a multi-line quote stays on the floor"}
+{"command": "echo \"a\nb\" && rm -rf /", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a double-quoted newline, then a command after &&"}
+{"command": "awk '\nBEGIN {\nsystem(\"rm -rf ~\")\n}'", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "a system() call inside a multi-line awk program reaches the awk floor"}
+{"command": "echo hi # it's\nrm -rf /\necho '", "expected": "deny", "mode": "default", "source": "adversarial", "note": "an apostrophe in a comment opens no quote"}
+{"command": "cat <<EOF\nit's\nEOF\nrm -rf /\necho 'x", "expected": "deny", "mode": "default", "source": "adversarial", "note": "an apostrophe in a heredoc body opens no quote"}
+{"command": "echo $'\\''\nrm -rf /\necho '", "expected": "deny", "mode": "default", "source": "adversarial", "note": "an escaped quote inside $'...' does not close it"}
+{"command": "ls (#i)'\n'\nrm -rf /\necho '", "expected": "deny", "mode": "default", "source": "adversarial", "note": "zsh glob flag: a `#` after `(` may not start a comment"}
+{"command": "echo a\\'b\nrm -rf /\necho '", "expected": "deny", "mode": "default", "source": "adversarial", "note": "an escaped quote outside quotes opens no quote"}
+{"command": "echo 'a\\'\nrm -rf /\necho '", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a backslash does not escape the closing single quote"}
+{"command": "alias q=\"'\"\nq echo '\nrm -rf /\n'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "an alias defined in the command can change how later lines are quoted"}
+{"command": "watch -n1 'echo a; rm -rf /'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "watch runs its command through sh, so a `;` in it separates commands"}
+{"command": "watch -n1 'echo a\nrm -rf /'", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "a watch command over several lines"}
+{"command": "script -q -c 'echo a; rm -rf /' /dev/null", "expected": "deny", "mode": "default", "source": "adversarial", "note": "script -c runs its command through a shell"}
+{"command": "parallel 'echo a\nrm -rf /' ::: x", "expected": "deny", "mode": "default", "source": "adversarial", "note": "parallel runs its command through a shell"}

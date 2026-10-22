@@ -106,6 +106,10 @@ class TestMarkQuotedNewlines:
             pytest.param('echo "a \\"b\nc\\" d"', 'echo "a \\"b\ue000c\\" d"', id="escaped-quote"),
             pytest.param('echo "${HOME}\n"', 'echo "${HOME}\ue000"', id="plain-param"),
             pytest.param("x=$(jq '\n.a' f)\nls", "x=$(jq '\ue000.a' f)\nls", id="substitution"),
+            pytest.param("echo 'a\r\nb'", "echo 'a\r\ue000b'", id="carriage-return"),
+            pytest.param(
+                "echo \"a\\\nb\" 'c\nd'", "echo \"ab\" 'c\ue000d'", id="continuation-in-double"
+            ),
         ],
     )
     def test_marks_newlines_inside_quotes(self, command, expected):
@@ -121,6 +125,8 @@ class TestMarkQuotedNewlines:
             pytest.param("echo hi # it's\nrm -rf /\necho '", id="comment"),
             pytest.param("ls (#i)'\n'\nrm -rf /\necho '", id="hash-after-paren"),
             pytest.param("echo $'\\''\nrm -rf /\necho '", id="ansi-c"),
+            pytest.param("echo \"$'\" 'a\nb' ; rm -rf /", id="ansi-c-in-double-quotes"),
+            pytest.param("echo '\ue000a\nb'", id="sentinel-in-input"),
             pytest.param("echo \"$(echo ')')\n\"", id="substitution-in-double-quotes"),
             pytest.param('echo "`date`\n"', id="backtick"),
             pytest.param("echo \"${x:-'}'}\n\"", id="param-operator"),

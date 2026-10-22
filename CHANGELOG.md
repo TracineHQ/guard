@@ -104,6 +104,9 @@ adheres to [Semantic Versioning](https://semver.org/).
   quote and the `;`, `&&` or `|` after its closing quote read as quoted:
   `echo 'a<newline>b' ; rm -rf /` passed in every mode. A `system()` call in
   a multi-line awk program missed the awk floor the same way.
+- `watch`, `script -c` and `parallel` run their command through a shell, and
+  that command is now split like a `bash -c` string. A second command in it
+  (`watch -n1 'echo a; rm -rf /'`) passed before.
 
 ### Fixed
 
@@ -125,9 +128,9 @@ adheres to [Semantic Versioning](https://semver.org/).
     awk, jq or `-c` program is one argument rather than one command per
     line. A program line such as `$4 <= 102800 {` is no longer denied as a
     command named by an expansion. When the quoting can't be read exactly
-    (a heredoc, a comment, a backtick, `$'...'`, `$(...)` inside double
-    quotes, a `${...}` other than a plain name, `alias`), guard still splits
-    on every newline.
+    (a heredoc, a `#` that may start a comment, a backtick, `$'...'`,
+    `$(...)` inside double quotes, a `${...}` other than a plain name,
+    `alias`, an unterminated quote), guard still splits on every newline.
 
 - Read-only guard CLI calls (`guard status`, `guard allowlist list`,
   `guard mode --help`, `guard allowlist --help`) no longer trip

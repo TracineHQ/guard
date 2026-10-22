@@ -1222,7 +1222,7 @@ def _canonicalize(command: str) -> str:
 # ``python -c`` program), not a command boundary. ``_mark_quoted_newlines``
 # swaps each one for this private-use character so the line split keeps the
 # argument whole, and ``_decide_inner`` puts the newline back in each segment.
-_QUOTED_NEWLINE = ""
+_QUOTED_NEWLINE = "\ue000"
 _PLAIN_PARAM_RE = re.compile(r"\$\{[#!]?(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#?$!-])\}")
 # Characters after which a ``#`` starts a word, so the shell may read a comment.
 _WORD_START_CHARS = frozenset(" \t\n;&|()<>")
@@ -1236,12 +1236,19 @@ def _mark_quoted_newlines(command: str) -> str | None:
     with backslash escapes, and backslash escapes outside quotes. Returns
     ``None`` when no newline is quoted, and also whenever the quoting can't be
     read exactly here, so the caller keeps splitting on every newline: a
-    heredoc (its body is raw text), a comment, a backtick, ``$'...'``, a
-    ``$(...)`` inside double quotes, a ``${...}`` other than a plain name, an
-    ``alias`` (it can change how later lines are quoted), or a quote still
-    open at the end.
+    heredoc (its body is raw text), a ``#`` that may start a comment, a
+    backtick, ``$'...'`` anywhere (``_canonicalize`` decodes it without
+    regard to quotes), a ``$(...)`` inside double quotes, a ``${...}`` other
+    than a plain name, an ``alias`` (it can change how later lines are
+    quoted), or a quote still open at the end. A backslash-newline inside
+    double quotes is dropped, as the shell drops it.
     """
-    if "\n" not in command or _QUOTED_NEWLINE in command or _ALIAS_RE.search(command):
+    if (
+        "\n" not in command
+        or _QUOTED_NEWLINE in command
+        or "$'" in command
+        or _ALIAS_RE.search(command)
+    ):
         return None
     out: list[str] = []
     quote = ""
@@ -1252,11 +1259,14 @@ def _mark_quoted_newlines(command: str) -> str | None:
         if quote == "'":
             if c == "'":
                 quote = ""
+        elif quote == '"' and command.startswith("\\\n", i):
+            i += 2
+            continue
         elif c == "\\" and i + 1 < n and command[i + 1] != "\n":
             out.append(command[i : i + 2])
             i += 2
             continue
-        elif c == "`" or (not quote and command.startswith("$'", i)):
+        elif c == "`":
             return None
         elif command.startswith("${", i):
             param = _PLAIN_PARAM_RE.match(command, i)
@@ -5597,24 +5607,37 @@ def _match_synthetic_deny(
     return None
 
 
+# Commands that hand their command argument to a shell, as ``bash -c`` does.
+_SHELL_RUN_EXECUTORS = frozenset({"watch", "script", "parallel"})
+
+
 def _expand_runner_payload_segments(seg: str) -> list[str]:
     """Expand a shell-wrapper invocation's inner payload into pipeline segments.
 
     ``bash -c "rm -rf /; other"`` has operators inside the payload that the
     outer split missed. Re-split the inner payload as a fresh pipeline so the
-    matchers see each inner sub-segment.
+    matchers see each inner sub-segment. ``watch``, ``script -c`` and
+    ``parallel`` run their command through a shell too, so theirs is re-split
+    the same way. A newline inside quotes in the payload stays in its segment.
 
-    Returns the empty list when ``seg`` doesn't start with a shell wrapper.
+    Returns the empty list when ``seg`` doesn't start with one of these.
     """
     tokens = seg.split()
-    if not tokens or _basename(tokens[0]) not in DANGEROUS_SHELL_WRAPPERS:
+    if not tokens:
         return []
-    inner = _strip_runner_prefix(seg)
+    head = _basename(tokens[0])
+    if head == "watch":
+        inner = _strip_exec_wrapper(_shlex_tokens(seg))
+    elif head in DANGEROUS_SHELL_WRAPPERS or head in _SHELL_RUN_EXECUTORS:
+        inner = _strip_runner_prefix(seg)
+    else:
+        return []
     if inner is None:
         return []
-    # Re-canonicalize and re-split the inner payload as a fresh pipeline.
-    inner_canon = _canonicalize(inner)
-    return split_pipeline(inner_canon)
+    marked = _mark_quoted_newlines(inner)
+    if marked is None:
+        return split_pipeline(_canonicalize(inner))
+    return [s.replace(_QUOTED_NEWLINE, "\n") for s in split_pipeline(_canonicalize(marked))]
 
 
 # Inline programs that are STEER in auto mode when written out literally:
