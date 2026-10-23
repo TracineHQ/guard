@@ -19,6 +19,16 @@ adheres to [Semantic Versioning](https://semver.org/).
   `ssh` / `docker exec` command, a `find -exec` command) are still checked
   against the floor. Other permission modes, `lockdown` and allowlist
   overrides behave exactly as before.
+- Eight shape detectors move from FLOOR to STEER: `bash.var_expanded_head`,
+  `bash.glob_head`, `bash.dangerous_env_sink`, `bash.git_config_injection`,
+  `bash.npm_url_install`, `bash.npx_remote`, `bash.pip_install_url` and
+  `bash.persistence`. In real sessions under `auto` nearly every deny they
+  made was a harmless command (a variable set in the same command, a glob
+  inside quoted code, `PYTHONPATH`, a local install, `crontab -l`). In `auto`
+  Claude Code's classifier now judges those calls; every other mode and
+  `lockdown` still deny them. The trade-off: in `auto`, a destructive command
+  hidden behind one of these shapes (`R=rm; $R -rf ~`) is caught by the
+  classifier, not by guard.
 - `agent_output_guard` is FLOOR: a subagent transcript read denies in `auto`
   too, while background command output passes in every mode.
 - The floor holds against the wrappers that used to hide a command from it.

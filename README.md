@@ -101,11 +101,13 @@ Every hook honors the mode:
   `guard mode lockdown` turns it on; Claude Code's `permission_mode` never does.
 
 Under Claude Code's `auto` permission mode (and outside `lockdown`) guard
-keeps only its hard floor: destructive, code-injection, guard-evasion,
-supply-chain and credential rules still deny, while style and shape nudges
-(redirects, `bash -c`, `git add -A`, ...) pass to Claude Code's own
-classifier and are logged as `pass`. Payloads those shapes hide are still
-checked against the floor. The FLOOR / STEER list is in
+keeps only its hard floor: destructive, code-injection, guard-evasion and
+credential rules still deny, along with edits to guard's own files and AI
+attribution in commits. Shape rules (redirects, `bash -c`,
+`git add -A`, a variable or glob as the command name, exec env vars, `pip` /
+`npm` / `npx` installs, ...) pass to Claude Code's own classifier, which sees
+the whole conversation, and are logged as `pass`. Payloads those shapes hide
+are still checked against the floor. The FLOOR / STEER list is in
 [docs/dangerous-commands.md](docs/dangerous-commands.md#auto-mode-hard-floor-vs-steering).
 
 | Variable | Purpose |
