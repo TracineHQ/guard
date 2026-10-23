@@ -18,6 +18,7 @@ from guard.hooks.protected_files import (
     _extra_patterns,
     is_protected,
 )
+from tests._helpers import LIVE_GUARD
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -132,7 +133,7 @@ def test_effective_patterns_appends_extras_after_builtins(
     # Last two entries are our extras; built-ins precede.
     assert pats[-2:] == ("bin", "standards")
     # Built-in still present.
-    assert "guard/_utils.py" in pats
+    assert str(LIVE_GUARD / "_utils.py") in pats
 
 
 def test_is_protected_honors_env_extension(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -169,7 +170,8 @@ def test_existing_builtin_still_matches_with_extras(
     monkeypatch.setenv("GUARD_PROTECTED_EXTRA", "bin")
     monkeypatch.chdir(tmp_path)
     # The trust root is built in; it should still match.
-    assert is_protected("/Users/me/proj/src/guard/_utils.py") == "guard/_utils.py"
+    live = str(LIVE_GUARD / "_utils.py")
+    assert is_protected(live) == live
 
 
 def test_extras_can_add_custom_filename_pattern(

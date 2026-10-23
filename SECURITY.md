@@ -59,19 +59,13 @@ The validators are written with that in mind:
   replaces the previous `describe-*`/`list-*`/`get-*` prefix shortcut with
   an explicit `(service, verb)` catalog for `aws` (see
   [AWS allow/deny policy](#aws-allowdeny-policy) below). Override paths:
-  `allow_commands`, `disable_rules`, `GUARD_ADMIN_ALLOW_VERBS=<cli>:<verb.path>`.
-- A repo is attacker-influenceable too, so a project allowlist
-  (`.claude/guard/allowlist.json`) that git tracks can only tighten guard:
-  its `disable_rules` and `allow_commands` are ignored and its mode counts
-  only when stricter. Only an untracked or gitignored regular file at a git
-  work-tree root can loosen (see [Project trust](SKILL.md#project-trust)),
-  and "untracked" means no tracked path is the same file (device and
-  inode), since APFS case and Unicode folding, or code points HFS+ ignores
-  in names, let an index entry spelled differently land on it. The check
-  is the one subprocess on the hook path: a fixed-argv `git ls-files` (no shell,
-  `core.fsmonitor` off, inherited `GIT_*` overrides dropped, C locale, 2 s
-  timeout) that fails closed and runs only when a project file would
-  loosen something.
+  `disable_rules`, `GUARD_ADMIN_ALLOW_VERBS=<cli>:<verb.path>`.
+- A repo is attacker-influenceable too, so guard reads no config from it:
+  mode and `disable_rules` live only in `~/.claude/guard/allowlist.json`.
+  A per-repo `.claude/guard/allowlist.json` is ignored, whatever it holds.
+- protected_files keys guard's own policy code on the real path of the
+  install that is running, so the copy that enforces policy can't be
+  edited by the agent it polices; other copies of the source can.
 
 ## AWS allow/deny policy
 
@@ -307,21 +301,10 @@ known and explicitly deferred:
   hides the credential path behind an fd. Bind-mounts have the same shape.
 - **Archive reverse-form.** `tar c -C ~/.aws .` may not surface the
   credential path as a token in the argv.
-- **Project allowlist trust rests on local git state.** It stops a cloned
-  repo from shipping an allowlist that turns guard off. It does not stop an
-  agent that already has a shell from changing that state, for example
-  `git rm --cached .claude/guard/allowlist.json` or an edit to the trust
-  cache (`~/.claude/guard/project-trust-cache.json`), either of which can
-  make a tracked file trusted. It also can't tell a repo you made from one
-  you unpacked: a downloaded archive that contains its own `.git` is a work
-  tree of its own, so an untracked allowlist at its root is trusted when
-  you work there.
-- **NTFS name stripping isn't covered.** Windows drops trailing dots and
-  spaces from file names, so `.claude./guard/allowlist.json` can land on
-  the project file there. Guard is unsupported and untested on Windows: its
-  git query lists such spellings, but nothing verifies the identity check
-  on NTFS.
-- **Laundering after an allowed copy.** Once the user allowlists or runs
+- **A hardlink to guard's live code isn't the live path.** protected_files
+  compares real paths, so an edit through a hardlink to a running hook file
+  is not flagged. Creating the link is the step to watch.
+- **Laundering after an allowed copy.** Once the user runs
   `cp creds /tmp/x`, subsequent reads of `/tmp/x` are unguarded. The
   destination is not a credential path. This is inherent to path matching,
   not a fixable matcher gap.

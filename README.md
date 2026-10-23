@@ -23,7 +23,7 @@ Guardrails not walls: guard catches the obvious foot-guns at the Claude Code hoo
 | credential_check | hardcoded credentials in tool inputs |
 | commit_message_validator | AI-attribution trailers (`Co-Authored-By: Claude…`) and missing/file-backed commit messages |
 | agent_output_guard | reads of subagent transcript files (`/tmp/claude-<uid>/.../tasks/*.output`); background command output stays readable |
-| protected_files | edits to guard's own code, allowlist, and subagent scope, plus your own patterns (lockdown adds agent-instruction, git-hook and MCP config files) |
+| protected_files | edits to the guard install that's running, its allowlist, and subagent scope, plus your own patterns (lockdown adds agent-instruction, git-hook and MCP config files) |
 | subagent_scope | file edits outside the declared `.claude/subagent-scope.json` allowlist |
 | permission_request_logger | observation-only: logs every Claude Code permission prompt as a `permission_request` JSONL row (no enforcement) |
 
@@ -65,7 +65,7 @@ The marketplace install above wires up the safety hooks. To query the decision l
 pipx install tracine-guard
 ```
 
-Then `guard status` shows the log location and last record, `guard noisy --since 24h` ranks rules by hit count, `guard trace <session_id>` dumps a chronological view, and `guard silent` lists rules that fired historically but not recently. Query subcommands are read-only against `~/.claude/guard-decisions.jsonl`; `guard allowlist *` writes to your allowlist file (project or `--global`). The two install paths complement each other; they aren't alternatives.
+Then `guard status` shows the log location and last record, `guard noisy --since 24h` ranks rules by hit count, `guard trace <session_id>` dumps a chronological view, and `guard silent` lists rules that fired historically but not recently. Query subcommands are read-only against `~/.claude/guard-decisions.jsonl`; `guard allowlist disable-rule` / `enable-rule` and `guard mode <mode>` write `~/.claude/guard/allowlist.json`. The two install paths complement each other; they aren't alternatives.
 
 ## Configuration
 
@@ -79,21 +79,18 @@ confirm dialog without it.
 **Healthcheck:** `guard healthcheck` exits 0 on healthy, non-zero on
 failure. Suitable for CI gates and cron-based monitors.
 
-**Mode (enforce / shadow / off / lockdown):** the effective mode lives in
-`.claude/guard/allowlist.json` as a top-level `"mode"` field (project),
-with `~/.claude/guard/allowlist.json` (global) as fallback. Default is
-`"enforce"`. The project file counts only when it sits at the repository
-root and git doesn't track it (untracked or gitignored); a tracked one, like
-a file shipped in a repo you cloned, can only tighten. See
-[Project trust](SKILL.md#project-trust).
+**Mode (enforce / shadow / off / lockdown):** a top-level `"mode"` field in
+`~/.claude/guard/allowlist.json`, set with `guard mode <mode>`. Default is
+`"enforce"`. One file, one place to look: there are no per-repo overrides,
+so a repo you clone can't switch guard off.
 Every hook honors the mode:
 
 - `enforce` -- deny what matches; everything else goes to Claude Code's
   normal permission flow.
 - `shadow` -- log what would have been denied (`mode: "shadow"`) but exit 0;
-  only the trust-root denies below still block. Try a new rule against real sessions with `guard mode shadow --project`,
-  then `guard mode enforce --project`.
-- `off` -- hooks go quiet, except edits to guard's own code and allowlist.
+  only the trust-root denies below still block. Try a new rule against real sessions with `guard mode shadow`,
+  then `guard mode enforce`.
+- `off` -- hooks go quiet, except edits to the running guard's code and allowlist.
   Those stay blocked so a session can't rewrite guard while it's off.
 - `lockdown` -- opt-in strict default-deny for driven or unattended agents.
   Bash commands off the read-only safe list are denied, and protected_files
@@ -118,6 +115,15 @@ are still checked against the floor. The FLOOR / STEER list is in
 | `GUARD_DATA_DIR` | Override guard's data directory |
 | `GUARD_PROTECTED_EXTRA` | Comma-separated extra protected glob patterns (fallback when `.claude/guard-protected.txt`, rooted at cwd, is absent) |
 | `GUARD_ADMIN_ALLOW_VERBS` | Per-verb allow for `bash.admin_default_deny`; format `<cli>:<verb.path>,<cli>:<verb.path>` (e.g. `aws:ec2.run-instances,gcloud:functions.deploy`) |
+
+**Turning a rule off:** `guard allowlist disable-rule <rule_id>` mutes one
+rule everywhere; every deny names its rule_id. There is no per-command
+exemption. A false positive is a bug in the rule:
+[report it](https://github.com/TracineHQ/guard/issues/new?template=false-positive.yml).
+
+**Working on guard itself:** protected_files guards the copy of guard that's
+running (by real path), not every file named `guard/hooks/*.py`. Edit a clone
+or worktree freely; the live install stays off limits.
 
 **Catalog model (AWS):** the admin matcher uses an explicit `(service, verb)` allowlist for `aws`. Verbs not in the catalog deny by default. To rescue a long-tail verb without a code change, set `GUARD_ADMIN_ALLOW_VERBS="aws:<service>.<verb>"` (see [SECURITY.md](SECURITY.md) for the decision tree and the list of deliberately-excluded verbs).
 
@@ -149,7 +155,7 @@ guard silent --since 30d   # rules that haven't fired in 30 days
 guard trace <session-id>   # all records for a single session
 guard test "<command>"     # what would each hook decide?
 guard diff                 # effective merged config (stub)
-guard allowlist list       # show effective allowlist (list/rules/disable-rule/...)
+guard allowlist list       # show disabled rules (list/rules/disable-rule/enable-rule)
 guard migrate-log          # one-shot rewrite of the JSONL log to schema v1
 ```
 

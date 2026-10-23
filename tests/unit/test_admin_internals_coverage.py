@@ -4,13 +4,12 @@
 
 These tests target specific untested branches surfaced in the v1.3.0
 backlog review: empty-CLI entry in env-var parsing, unknown-flag
-passthrough in cloud-flag stripping, non-AWS branches in
-summary_for, and the non-dict-item skip in allow_commands.
+passthrough in cloud-flag stripping, and non-AWS branches in
+summary_for.
 """
 
 from __future__ import annotations
 
-from guard.allowlist import _validate_allow_commands
 from guard.hooks._admin_specs import ADMIN_CLI_SPECS, summary_for
 from guard.hooks.bash_command_validator import _strip_cloud_global_flags
 
@@ -35,21 +34,6 @@ class TestStripCloudGlobalFlagsUnknownFlag:
 
     def test_empty_tokens(self) -> None:
         assert _strip_cloud_global_flags([], frozenset(), frozenset()) == []
-
-
-class TestValidateAllowCommandsNonDictSkip:
-    def test_non_dict_item_skipped(self) -> None:
-        # Mixed list: valid entry, a bare string (skipped), another valid.
-        raw = [
-            {"rule": "bash.x", "command": "ls", "reason": "ok"},
-            "not-a-dict",
-            42,
-            {"rule": "bash.y", "command": "pwd", "reason": "ok"},
-        ]
-        out = _validate_allow_commands(raw, source="<test>")
-        assert len(out) == 2
-        assert out[0].rule == "bash.x"
-        assert out[1].rule == "bash.y"
 
 
 class TestSummaryForNonAws:

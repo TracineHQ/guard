@@ -277,9 +277,12 @@ to read by its exact path.
 
 ### What it checks
 
-Denies writes to guard's trust root: the validator modules, `registry.py`,
-`_utils.py`, `.claude/guard/allowlist.json` and `.claude/subagent-scope.json`.
-Backwards-compat patterns also cover the original `hooks/` layout for forks.
+Denies writes to guard's trust root: the validator modules, `registry.py`
+and `_utils.py` of the guard install that is running,
+`.claude/guard/allowlist.json` and `.claude/subagent-scope.json`. Guard's
+code is matched by real path, not by name, so a clone or worktree of guard's
+source is ordinary code. Backwards-compat patterns also cover hook scripts
+installed under `.claude/hooks/` by older setups.
 The trust root stays protected in every guard mode, `off` included. Under
 `guard mode lockdown` the list grows to git hooks and config, agent
 instruction files (`CLAUDE.md`, `.cursorrules`, ...), MCP registrations and
@@ -301,11 +304,11 @@ tool passes (`Read`, `Grep`, `Glob`, `WebFetch`, `Agent`, `AskUserQuestion`,
 ### Example deny
 
 ```
-Protected file: guard/registry.py. guard blocks agent edits to its own code
-and subagent scope so a session can't rewrite its own guardrails. Don't retry
-or route around it. Tell the user what you want to change and why; they can
-make the edit, or allow it with `guard allowlist allow-command --rule
-guard.protected_files --command '<path or exact command>' --reason '...'`.
+Protected file: /home/me/.claude/plugins/cache/tracine/guard/1.5.0/src/guard/registry.py.
+guard blocks agent edits to the code it is running from and to the subagent
+scope file, so a session can't rewrite its own guardrails. Don't retry or
+route around it. Tell the user what you want to change and why; they can
+make the edit.
 ```
 
 ---

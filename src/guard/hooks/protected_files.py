@@ -8,8 +8,10 @@ patterns. ``guard allowlist`` / ``guard mode`` writes
 count as allowlist writes. A match is denied with a reason that tells the
 agent to take the change to the user. Other tools never match.
 
-The default list is guard's own trust root: its hook code, registry,
-allowlist and subagent scope file. ``guard mode lockdown`` adds git-exec,
+The default list is guard's own trust root: the hook code and registry it
+is running from, its allowlist and the subagent scope file. Code is matched
+by real path, so a clone or worktree of guard's source is ordinary code an
+agent may edit; only the copy that runs is protected. ``guard mode lockdown`` adds git-exec,
 agent-instruction, MCP and cloud-profile files. Projects add patterns via
 ``GUARD_PROTECTED_EXTRA`` or ``.claude/guard-protected.txt``. ``guard mode
 off`` keeps only the trust root; ``shadow`` logs other matches without
@@ -56,34 +58,47 @@ def _normcase(s: str) -> str:
 # user-overridable through the normal allowlist mechanisms.
 _UN_OVERRIDABLE_PATTERNS: frozenset[str] = frozenset({".claude/guard/allowlist.json"})
 
+# The guard package these hooks are running from. Its policy code is keyed on
+# this real path, not on a suffix, so only the running copy is protected: a
+# clone or worktree of guard's source does nothing until someone runs it.
+_LIVE_PACKAGE = Path(__file__).resolve().parents[1]
+_LIVE_CODE_FILES: tuple[str, ...] = (
+    "hooks/bash_command_validator.py",
+    "hooks/git_c_validator.py",
+    "hooks/credential_check.py",
+    "hooks/protected_files.py",
+    "hooks/commit_message_validator.py",
+    "hooks/agent_output_guard.py",
+    "hooks/subagent_scope.py",
+    "registry.py",
+    "_utils.py",
+)
+# Absolute live path -> the package-relative name (``guard/_utils.py``) an
+# interpreter eval body would spell it with.
+_LIVE_CODE: dict[str, str] = {
+    str(_LIVE_PACKAGE / rel): f"{_LIVE_PACKAGE.name}/{rel}" for rel in _LIVE_CODE_FILES
+}
+
 # Guard's own trust root: the code that enforces policy, the allowlist that
 # configures it, and the subagent scope file it enforces. Protected in every
 # guard mode, ``off`` included: a session that rewrites these while guard is
 # off changes what runs when the user turns guard back on.
 PROTECTED_PATTERNS: list[str] = [
-    "guard/hooks/bash_command_validator.py",
-    "guard/hooks/git_c_validator.py",
-    "guard/hooks/credential_check.py",
-    "guard/hooks/protected_files.py",
-    "guard/hooks/commit_message_validator.py",
-    "guard/hooks/agent_output_guard.py",
-    "guard/hooks/subagent_scope.py",
-    "guard/registry.py",
-    "guard/_utils.py",
+    *_LIVE_CODE,
     # Subagent scope file: a subagent rewriting its own scope is a TOCTOU
     # bypass of subagent_scope.py.
     ".claude/subagent-scope.json",
     # Compatibility patterns for users who installed earlier hook scripts
     # under ``~/.claude/hooks/`` rather than via the plugin layout.
-    "hooks/command_registry.py",
-    "hooks/bash_command_validator.py",
-    "hooks/git_c_validator.py",
-    "hooks/credential_check.py",
-    "hooks/generate_settings.py",
-    "hooks/_hook_utils.py",
-    "hooks/protected_files.py",
-    "hooks/commit_message_validator.py",
-    "hooks/agent_output_guard.py",
+    ".claude/hooks/command_registry.py",
+    ".claude/hooks/bash_command_validator.py",
+    ".claude/hooks/git_c_validator.py",
+    ".claude/hooks/credential_check.py",
+    ".claude/hooks/generate_settings.py",
+    ".claude/hooks/_hook_utils.py",
+    ".claude/hooks/protected_files.py",
+    ".claude/hooks/commit_message_validator.py",
+    ".claude/hooks/agent_output_guard.py",
     # Guard's own allowlist file: an agent that can write here grants itself
     # overrides.
     ".claude/guard/allowlist.json",
@@ -227,6 +242,7 @@ def is_protected(file_path: str, patterns: Sequence[str] | None = None) -> str |
     """Return the matched protected pattern for ``file_path``, else ``None``.
 
     A pattern matches if ``file_path`` either:
+    - is the pattern, for guard's live code (an absolute real path)
     - ends with the pattern (file-pattern match: ``.git/config`` matches
       ``/repo/.git/config``)
     - is contained as a path SEGMENT (directory-pattern match: ``.git/hooks``
@@ -249,6 +265,10 @@ def is_protected(file_path: str, patterns: Sequence[str] | None = None) -> str |
     resolved_lc = _normcase(str(resolved))
     for pattern in patterns if patterns is not None else _effective_patterns():
         pat_lc = _normcase(pattern)
+        if pattern in _LIVE_CODE:
+            if resolved_lc == pat_lc:
+                return pattern
+            continue
         # Exact-suffix match (file pattern).
         if (
             resolved_lc.endswith(pat_lc)
@@ -281,6 +301,11 @@ def is_protected_parent_dir(dir_path: str, patterns: Sequence[str] | None = None
 
     resolved_lc = _normcase(str(resolved).rstrip("/"))
     for pattern in patterns if patterns is not None else _effective_patterns():
+        if pattern in _LIVE_CODE:
+            # Live code: an extraction anywhere above the file can overwrite it.
+            if _normcase(pattern).startswith(resolved_lc + "/"):
+                return pattern
+            continue
         # ``pattern`` is the suffix path of a protected file. An extraction
         # into ``resolved_str`` could write to ``<resolved_str>/<tail>`` for
         # some suffix ``tail``. We consider the dir risky if it sits anywhere
@@ -718,9 +743,9 @@ _INTERPRETER_EVAL_FLAG_MAP: tuple[tuple[frozenset[str], frozenset[str]], ...] = 
 # truncating and missing a literal pattern past the cap. 1 MiB covers any
 # realistic inline script; an attacker padding past it gets a deny.
 _EVAL_BODY_SCAN_MAX_BYTES = 1024 * 1024
-# Sentinel target emitted on overflow. Has to literally end with a
-# trust-root pattern so ``is_protected`` fires in every guard mode.
-_EVAL_BODY_OVERFLOW_SENTINEL = "guard/_utils.py"
+# Sentinel target emitted on overflow. Has to be a trust-root path so
+# ``is_protected`` fires in every guard mode.
+_EVAL_BODY_OVERFLOW_SENTINEL = str(_LIVE_PACKAGE / "_utils.py")
 
 # An eval body that only reads (``print(open('CLAUDE.md').read())``) is not a
 # write. A protected path in the body counts only next to something that could
@@ -741,7 +766,10 @@ def _interpreter_eval_targets(
     Best-effort static scan. When the body shows write intent
     (``_EVAL_WRITE_INTENT_RE``), every protected pattern appearing as a
     substring is emitted as a candidate target, so
-    ``open('/.git/config','w')`` yields ``.git/config``. A read-only body
+    ``open('/.git/config','w')`` yields ``.git/config``. Guard's live code
+    counts when the body names its package-relative path
+    (``guard/_utils.py``): the body's own path can't be resolved, so here a
+    copy of guard's source is treated as the live one. A read-only body
     yields nothing. ``shutil.copy(src, dst)`` where ``dst`` is a runtime
     variable yields nothing either (the static matcher cannot solve that;
     the Edit/Write tool gate is the right defense).
@@ -771,14 +799,15 @@ def _interpreter_eval_targets(
                     if len(body) > _EVAL_BODY_SCAN_MAX_BYTES:
                         out.append(_EVAL_BODY_OVERFLOW_SENTINEL)
                     elif _EVAL_WRITE_INTENT_RE.search(body):
-                        out.extend(pat for pat in active if pat in body)
+                        out.extend(pat for pat in active if _LIVE_CODE.get(pat, pat) in body)
                     break
             break
     return out
 
 
 # ``guard allowlist <verb>`` and ``guard mode <mode>`` rewrite the allowlist
-# through guard's own CLI, so they count as a write to it.
+# through guard's own CLI, so they count as a write to it. ``allow-command``
+# and ``remove-command`` are retired, but an older guard on PATH still has them.
 _GUARD_ALLOWLIST_FILE = ".claude/guard/allowlist.json"
 _GUARD_ALLOWLIST_WRITES: frozenset[str] = frozenset(
     {"disable-rule", "enable-rule", "allow-command", "remove-command"}
@@ -896,11 +925,9 @@ def deny_reason(matched: str) -> str:
         )
     if matched in PROTECTED_PATTERNS:
         return (
-            f"Protected file: {matched}. guard blocks agent edits to its own code "
-            "and subagent scope so a session can't rewrite its own guardrails. "
-            f"{_TELL_THE_USER}; they can make the edit, or allow it with "
-            f"`guard allowlist allow-command --rule {_HOOK_ID} "
-            "--command '<path or exact command>' --reason '...'`."
+            f"Protected file: {matched}. guard blocks agent edits to the code it is "
+            "running from and to the subagent scope file, so a session can't rewrite "
+            f"its own guardrails. {_TELL_THE_USER}; they can make the edit."
         )
     if matched in LOCKDOWN_PATTERNS:
         return (

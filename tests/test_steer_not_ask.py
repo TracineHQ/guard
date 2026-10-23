@@ -34,6 +34,7 @@ from guard.hooks import (
     protected_files,
     subagent_scope,
 )
+from tests._helpers import LIVE_GUARD
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -118,9 +119,10 @@ def test_no_source_emits_an_ask() -> None:
 @pytest.mark.parametrize(
     "rel",
     [
-        "src/guard/hooks/bash_command_validator.py",
-        "src/guard/registry.py",
-        "src/guard/_utils.py",
+        # Guard's live code is absolute, so ``tmp_path / rel`` keeps it as is.
+        str(LIVE_GUARD / "hooks" / "bash_command_validator.py"),
+        str(LIVE_GUARD / "registry.py"),
+        str(LIVE_GUARD / "_utils.py"),
         ".claude/guard/allowlist.json",
         ".claude/subagent-scope.json",
     ],
@@ -194,7 +196,7 @@ def test_oversized_eval_body_still_denies() -> None:
     _assert_steer(protected_files.decide("Bash", {"command": f"python3 -c '{body}'"}))
 
 
-@pytest.mark.parametrize("rel", ["src/guard/_utils.py", ".claude/guard/allowlist.json"])
+@pytest.mark.parametrize("rel", [str(LIVE_GUARD / "_utils.py"), ".claude/guard/allowlist.json"])
 @pytest.mark.parametrize("mode", ["off", "shadow"])
 def test_trust_root_holds_in_off_and_shadow(
     tmp_path: Path, mode: str, rel: str, capsys: pytest.CaptureFixture[str]
@@ -381,19 +383,17 @@ def test_subagent_scope_honors_mode(
     [
         # Thunks, not calls: a decide() at collection time runs before the
         # per-test isolation fixture and would log to the default path.
-        lambda: protected_files.decide("Edit", {"file_path": "/repo/src/guard/registry.py"}),
-        lambda: protected_files.decide(
-            "Bash", {"command": "cp /tmp/x /repo/src/guard/registry.py"}
-        ),
+        lambda: protected_files.decide("Edit", {"file_path": "/repo/CLAUDE.md"}, lockdown=True),
         lambda: bash_command_validator.decide("rm -rf /"),
         lambda: bash_command_validator.decide("flarbnoz --gronk", lockdown=True),
     ],
 )
 def test_override_hints_parse(make_envelope: Callable[[], dict[str, Any] | None]) -> None:
-    """Every ``guard allowlist ...`` a deny suggests must parse with the real CLI."""
+    """Every ``guard allowlist ...`` / ``guard mode ...`` a deny suggests must parse."""
     from guard import cli
 
-    hints = re.findall(r"`(guard allowlist [^`]+)`", _reason(_require(make_envelope())))
+    reason = _reason(_require(make_envelope()))
+    hints = re.findall(r"`(guard (?:allowlist|mode) [^`]+)`", reason)
     assert hints
     parser = cli._build_parser()  # noqa: SLF001 -- the CLI's own parser
     for hint in hints:
@@ -430,5 +430,5 @@ def test_inplace_editor_operands_stop_at_control_operators(cmd: str) -> None:
 
 
 def test_inplace_edit_after_control_operator_still_denies() -> None:
-    cmd = "cat notes.txt && sed -i 's/a/b/' src/guard/_utils.py"
+    cmd = f"cat notes.txt && sed -i 's/a/b/' {LIVE_GUARD}/_utils.py"
     _assert_steer(protected_files.decide("Bash", {"command": cmd}))

@@ -133,7 +133,7 @@ _HOOK_CASES: list[tuple[str, dict[str, Any]]] = [
         {
             "session_id": "sess-1",
             "tool_name": "Edit",
-            "tool_input": {"file_path": "/repo/src/guard/hooks/bash_command_validator.py"},
+            "tool_input": {"file_path": str(HOOKS_DIR / "bash_command_validator.py")},
             "hook_event_name": "PreToolUse",
             "cwd": "/tmp/work",
         },

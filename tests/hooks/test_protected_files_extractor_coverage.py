@@ -16,6 +16,7 @@ from guard.hooks.protected_files import (
     _effective_patterns,
     bash_write_targets,
 )
+from tests._helpers import LIVE_GUARD
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -264,7 +265,7 @@ def test_eval_body_over_cap_emits_overflow_sentinel() -> None:
     pad = "x" * (1024 * 1024 + 1024)
     cmd = f"python -c \"{pad};open('/repo/.git/config','w')\""
     targets = bash_write_targets(cmd, _LOCKDOWN)
-    assert "guard/_utils.py" in targets
+    assert str(LIVE_GUARD / "_utils.py") in targets
 
 
 def test_eval_body_over_cap_protected_match_is_forced() -> None:

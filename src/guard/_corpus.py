@@ -183,11 +183,11 @@ def classify(result: dict[str, str] | None) -> str:
 def _builtin_policy() -> Iterator[None]:
     """Adjudicate against guard's shipped policy alone, writing nothing.
 
-    A fixture states what guard ships, so neither the developer's global or
-    project allowlist (``disable_rules``, ``allow_commands``, ``mode``) may
-    change the answer, and a corpus run must not append its rows to the real
-    decision log or strict-deny queue. Patches the bindings ``decide()``
-    reads at call time and restores them on exit.
+    A fixture states what guard ships, so the developer's allowlist
+    (``disable_rules``, ``mode``) may not change the answer, and a corpus
+    run must not append its rows to the real decision log or strict-deny
+    queue. Patches the bindings ``decide()`` reads at call time and
+    restores them on exit.
     """
     targets = (
         (_bcv, "load_allowlist", lambda _cwd=None: Allowlist()),
