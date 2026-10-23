@@ -1152,9 +1152,93 @@ def _expand_braces_once(token: str) -> list[str] | None:
 
 _BRACE_EXPANSION_TOKEN_CAP = 4096
 
+# Bash leaves a brace inside quotes (``grep -E 'a{1,2}'``) or after a backslash
+# alone, and a quoted space doesn't end the word. ``_brace_words`` swaps each
+# quoted body and escaped pair for ``_LITERAL_OPEN`` + its index in a side list
+# + ``_LITERAL_CLOSE``, so the expansion can't read into it, and
+# ``_restore_literals`` puts the text back.
+_LITERAL_OPEN = ""
+_LITERAL_CLOSE = ""
+_LITERAL_RE = re.compile(f"{_LITERAL_OPEN}([0-9]+){_LITERAL_CLOSE}")
+
+
+def _closing_quote(line: str, start: int) -> int:
+    """Index of the quote that closes the one at ``start``, or ``-1``."""
+    if line[start] == "'":
+        return line.find("'", start + 1)
+    i = start + 1
+    while i < len(line):
+        if line[i] == "\\":
+            i += 2
+        elif line[i] == '"':
+            return i
+        else:
+            i += 1
+    return -1
+
+
+def _brace_words(line: str) -> tuple[list[str], list[str]] | None:
+    """Split ``line`` into words for brace expansion, setting literal text aside.
+
+    Returns the words, with each quoted body and each backslash-escaped pair
+    replaced by a marker, and the list of text the markers stand for. Returns
+    ``None`` when the quoting can't be read exactly -- an unterminated quote, a
+    backtick, ``$(...)`` or a ``${...}`` other than a plain name inside double
+    quotes, or a marker character already in the line -- and the caller
+    expands every brace as it did before quotes were read.
+    """
+    if not any(ch in line for ch in "'\"\\"):
+        return line.split(), []
+    if _LITERAL_OPEN in line or _LITERAL_CLOSE in line or "`" in line:
+        return None
+    words: list[str] = []
+    literals: list[str] = []
+    word: list[str] = []
+
+    def set_aside(text: str) -> str:
+        literals.append(text)
+        return f"{_LITERAL_OPEN}{len(literals) - 1}{_LITERAL_CLOSE}"
+
+    i, n = 0, len(line)
+    while i < n:
+        c = line[i]
+        if c.isspace():
+            if word:
+                words.append("".join(word))
+                word = []
+            i += 1
+        elif c == "\\" and i + 1 < n and not line[i + 1].isspace():
+            word.append(set_aside(line[i : i + 2]))
+            i += 2
+        elif c in "'\"":
+            end = _closing_quote(line, i)
+            if end < 0:
+                return None
+            body = line[i + 1 : end]
+            if c == '"' and ("$(" in body or "${" in _PLAIN_PARAM_RE.sub("", body)):
+                return None
+            word.append(c + (set_aside(body) if body else "") + c)
+            i = end + 1
+        else:
+            word.append(c)
+            i += 1
+    if word:
+        words.append("".join(word))
+    return words, literals
+
+
+def _restore_literals(text: str, literals: list[str]) -> str:
+    """Put back the text ``_brace_words`` set aside."""
+    if not literals:
+        return text
+    return _LITERAL_RE.sub(lambda m: literals[int(m.group(1))], text)
+
 
 def _expand_braces_in_line(line: str) -> str:
     """Apply brace expansion to a single newline-free line.
+
+    Braces inside quotes or after a backslash are left alone, as bash leaves
+    them; see ``_brace_words``.
 
     Bails out of the fixpoint loop once the accumulated token count exceeds
     ``_BRACE_EXPANSION_TOKEN_CAP``. The per-group 32-alternative cap in
@@ -1168,7 +1252,8 @@ def _expand_braces_in_line(line: str) -> str:
     """
     if "{" not in line:
         return line
-    tokens = line.split()
+    split = _brace_words(line)
+    tokens, literals = split if split is not None else (line.split(), [])
     for _ in range(4):
         out: list[str] = []
         changed = False
@@ -1180,11 +1265,11 @@ def _expand_braces_in_line(line: str) -> str:
                 out.extend(expanded)
                 changed = True
             if len(out) > _BRACE_EXPANSION_TOKEN_CAP:
-                return " ".join(out)
+                return _restore_literals(" ".join(out), literals)
         tokens = out
         if not changed:
             break
-    return " ".join(tokens)
+    return _restore_literals(" ".join(tokens), literals)
 
 
 def _expand_braces(command: str) -> str:

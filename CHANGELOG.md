@@ -132,6 +132,16 @@ adheres to [Semantic Versioning](https://semver.org/).
     `$(...)` inside double quotes, a `${...}` other than a plain name,
     `alias`, an unterminated quote), guard still splits on every newline.
 
+- A brace inside quotes or after a backslash is left alone, as bash leaves it.
+  Brace expansion split the line on whitespace and ignored quotes, so a
+  quantifier such as `{1,2}` or `{3,}` in `grep -E "[0-9]{1,2} x|y"` became
+  extra words, the quote broke, a later `|` split the command, and a
+  fragment like `[Tt]ask` was denied as a glob command head. A quoted space
+  no longer ends a word either. An unquoted `{a,b}` still expands and is
+  checked as before. When the quoting can't be read exactly (an unterminated
+  quote, a backtick, `$(...)` or a `${...}` other than a plain name inside
+  double quotes), every brace is expanded as before.
+
 - Read-only guard CLI calls (`guard status`, `guard allowlist list`,
   `guard mode --help`, `guard allowlist --help`) no longer trip
   `protected_files`.

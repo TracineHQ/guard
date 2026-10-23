@@ -192,3 +192,9 @@
 {"command": "watch -n1 'echo a\nrm -rf /'", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "a watch command over several lines"}
 {"command": "script -q -c 'echo a; rm -rf /' /dev/null", "expected": "deny", "mode": "default", "source": "adversarial", "note": "script -c runs its command through a shell"}
 {"command": "parallel 'echo a\nrm -rf /' ::: x", "expected": "deny", "mode": "default", "source": "adversarial", "note": "parallel runs its command through a shell"}
+{"command": "git -C /tmp/repo log --format=%s -n 300 | grep -nE \\b[A-Z][0-9]{1,2}[a-z]?\\b|[Tt]ask [0-9]", "expected": "deny", "mode": "default", "source": "adversarial", "note": "unquoted twin of the quoted-regex case: the `|` is a real pipe and `[Tt]ask` a real glob command head"}
+{"command": "grep -E x{3,}|[Tt]ask f", "expected": "deny", "mode": "default", "source": "adversarial", "note": "an unquoted brace group still expands, and the glob head after the pipe is still checked"}
+{"command": "echo '{a,b}' ; {r,r}m -rf /", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a quoted brace group before a real brace-expanded command head"}
+{"command": "echo '{a,b}' ; {r,r}m -rf /", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: the brace-expanded rm stays on the floor"}
+{"command": "rm -rf '/tmp/x{1,2}' /{etc,usr}", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a quoted brace group before an unquoted brace operand"}
+{"command": "rm -rf \"/tmp/x{1,2} y\" /{etc,usr}", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: a quoted group with a space before an unquoted brace operand"}

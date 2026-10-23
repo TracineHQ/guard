@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from guard.hooks.bash_command_validator import (
+    _canonicalize,
     _get_alternative_feedback,
     _mark_quoted_newlines,
     decide,
@@ -136,6 +137,95 @@ class TestMarkQuotedNewlines:
     )
     def test_leaves_unmarked_or_unreadable_commands_alone(self, command):
         assert _mark_quoted_newlines(command) is None
+
+
+class TestQuotedBraces:
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            pytest.param("grep -E 'a{1,2}' f", "grep -E 'a{1,2}' f", id="single"),
+            pytest.param('grep -E "a{1,2}" f', 'grep -E "a{1,2}" f', id="double"),
+            pytest.param("echo '{a,b}' {c,d}", "echo '{a,b}' c d", id="quoted-then-bare"),
+            pytest.param('echo {c,d} "{a,b}"', 'echo c d "{a,b}"', id="bare-then-quoted"),
+            pytest.param("echo {a,'b c'} x", "echo a 'b c' x", id="quoted-alternative"),
+            pytest.param("echo 'a  b' {c,d}", "echo 'a  b' c d", id="quoted-spaces-kept"),
+            pytest.param("echo 'x{1,2}'{c,d}", "echo 'x{1,2}'c 'x{1,2}'d", id="quote-before-group"),
+            pytest.param("echo 'it'\\''s {a,b}'", "echo 'it'\\''s {a,b}'", id="apostrophe-idiom"),
+            pytest.param('echo \\{a,b\\} \\"{c,d}', 'echo \\{a,b\\} \\"c \\"d', id="escaped"),
+            pytest.param(
+                'echo "${name}[0-9]{1,2} x" {c,d}',
+                'echo "${name}[0-9]{1,2} x" c d',
+                id="plain-parameter-in-double",
+            ),
+            pytest.param('echo "$HOME/{a,b}"', 'echo "$HOME/{a,b}"', id="expansion-in-double"),
+            pytest.param("echo '' {c,d}", "echo '' c d", id="empty-quotes"),
+        ],
+    )
+    def test_quoted_braces_stay_literal(self, command, expected):
+        assert _canonicalize(command) == expected
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            pytest.param("echo '{a,b} {c,d}", "echo 'a 'b c d", id="unterminated-single"),
+            pytest.param('echo "{a,b} {c,d}', 'echo "a "b c d', id="unterminated-double"),
+            pytest.param('echo "$(echo {a,b})" x', 'echo "$(echo a)" b)" x', id="substitution"),
+            pytest.param(
+                "echo \"${x:-a}\" '{a,b}'", "echo \"${x:-a}\" 'a' 'b'", id="parameter-word"
+            ),
+            pytest.param("echo `echo '{a,b}'`", "echo `echo 'a'` 'b'`", id="backtick"),
+            pytest.param("echo '' '{a,b}'", "echo '' 'a' 'b'", id="marker-in-input"),
+        ],
+    )
+    def test_unreadable_quoting_is_expanded_as_before(self, command, expected):
+        assert _canonicalize(command) == expected
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param(
+                "grep -c -E -e '^\\[ft\\] f(3[4-9][0-9][0-9]|[4-9][0-9]{3}) guest' build/out.txt",
+                id="repeat-count",
+            ),
+            pytest.param(
+                "grep -c -E -e '^\\[ft\\] f(3[4-9][0-9][0-9]|[4-9][0-9]{3}) guest +([2-9][0-9]"
+                "|[0-9]{3,})\\.' build/out.txt",
+                id="open-ended-count",
+            ),
+            pytest.param(
+                "git -C /tmp/repo log --format='%s' -n 300 "
+                '| grep -nE "\\b[A-Z][0-9]{1,2}[a-z]?\\b|[Tt]ask [0-9]"',
+                id="range-then-alternation",
+            ),
+            pytest.param("grep -E 'x{1,2}|[Tt]ask' f", id="single-quotes"),
+            pytest.param("grep -E 'x{1,2}|[Tt]ask' f | wc -l", id="piped"),
+        ],
+    )
+    @pytest.mark.parametrize("mode", ["default", "auto"])
+    def test_braces_in_quoted_regex_do_not_split_the_command(self, command, mode):
+        result = decide(command, permission_mode=mode)
+        assert not _is_deny(result), f"quoted braces split the command: {command!r}"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param(
+                "git -C /tmp/repo log --format=%s -n 300 "
+                "| grep -nE \\b[A-Z][0-9]{1,2}[a-z]?\\b|[Tt]ask [0-9]",
+                id="unquoted-alternation",
+            ),
+            pytest.param("grep -E x{1,2}|[Tt]ask f", id="unquoted-range"),
+            pytest.param("grep -E x{3,}|[Tt]ask f", id="unquoted-open-ended"),
+            pytest.param("grep -E 'x{1,2}' f; [Tt]ask {1,2}", id="glob-head-after-quoted-group"),
+            pytest.param("echo ok | {r,r}m -rf /", id="brace-head"),
+            pytest.param("echo '{a,b}' ; {r,r}m -rf /", id="brace-head-after-quoted-group"),
+            pytest.param('echo "{a,b}" && {r,r}m -rf /', id="brace-head-after-double"),
+            pytest.param("rm -rf /{etc,usr}", id="brace-operand"),
+            pytest.param("rm -rf '/tmp/x{1,2}' /{etc,usr}", id="brace-operand-after-quoted-group"),
+        ],
+    )
+    def test_unquoted_braces_still_expand_and_deny(self, command):
+        assert _is_deny(decide(command)), f"unquoted brace shape not denied: {command!r}"
 
 
 class TestStripComments:
