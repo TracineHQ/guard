@@ -4,7 +4,7 @@ Two override knobs:
 - ``GUARD_PROTECTED_EXTRA`` env var (comma-separated)
 - ``.claude/guard-protected.txt`` file (one per line, ``#`` comments)
 
-File takes precedence over env when both are present.
+Both apply when both are present: a repo's file can't drop the user's env patterns.
 """
 
 # SPDX-License-Identifier: Apache-2.0
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from guard.hooks import protected_files as pf
 from guard.hooks.protected_files import (
     _effective_patterns,
     _extra_patterns,
@@ -91,16 +92,23 @@ def test_file_handles_blank_lines_and_whitespace(
     assert _extra_patterns() == ["bin", "standards"]
 
 
-def test_file_unreadable_falls_back_to_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Existing file but not readable -> the read returns [] and we still hit env."""
+def test_corrupt_file_keeps_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A corrupt file adds nothing and leaves the env patterns in force."""
     monkeypatch.setenv("GUARD_PROTECTED_EXTRA", "from-env")
     monkeypatch.chdir(tmp_path)
     target = tmp_path / ".claude" / "guard-protected.txt"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(b"\xff\xfe\xfd not utf8")  # invalid UTF-8 -> read returns []
-    # File EXISTS so we go down the file path; corrupt content yields [].
-    # Env is NOT consulted (file precedence is path-existence, not content).
-    assert _extra_patterns() == []
+    assert _extra_patterns() == ["from-env"]
+
+
+def test_empty_file_keeps_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cloned repo's empty file can't drop the user's env patterns."""
+    monkeypatch.setenv("GUARD_PROTECTED_EXTRA", "secrets.txt")
+    monkeypatch.chdir(tmp_path)
+    _write_file(tmp_path, "")
+    assert _extra_patterns() == ["secrets.txt"]
+    assert is_protected(str(tmp_path / "secrets.txt")) == "secrets.txt"
 
 
 def test_file_absent_falls_back_to_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -109,16 +117,14 @@ def test_file_absent_falls_back_to_env(tmp_path: Path, monkeypatch: pytest.Monke
     assert _extra_patterns() == ["from-env"]
 
 
-# === Precedence: file wins over env when file exists ===
+# === Both sources apply when both are present ===
 
 
-def test_file_wins_over_env_when_both_present(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("GUARD_PROTECTED_EXTRA", "from-env-only")
+def test_file_and_env_both_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GUARD_PROTECTED_EXTRA", "from-env-only,shared")
     monkeypatch.chdir(tmp_path)
-    _write_file(tmp_path, "from-file-only\n")
-    assert _extra_patterns() == ["from-file-only"]
+    _write_file(tmp_path, "from-file-only\nshared\n")
+    assert _extra_patterns() == ["from-file-only", "shared", "from-env-only"]
 
 
 # === _effective_patterns + is_protected integration ===
@@ -133,7 +139,7 @@ def test_effective_patterns_appends_extras_after_builtins(
     # Last two entries are our extras; built-ins precede.
     assert pats[-2:] == ("bin", "standards")
     # Built-in still present.
-    assert str(LIVE_GUARD / "_utils.py") in pats
+    assert pf._LIVE_TREE[0] in pats  # noqa: SLF001 -- module-private live tree
 
 
 def test_is_protected_honors_env_extension(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -170,8 +176,7 @@ def test_existing_builtin_still_matches_with_extras(
     monkeypatch.setenv("GUARD_PROTECTED_EXTRA", "bin")
     monkeypatch.chdir(tmp_path)
     # The trust root is built in; it should still match.
-    live = str(LIVE_GUARD / "_utils.py")
-    assert is_protected(live) == live
+    assert is_protected(str(LIVE_GUARD / "_utils.py")) == pf._LIVE_TREE[0]  # noqa: SLF001 -- module-private live tree
 
 
 def test_extras_can_add_custom_filename_pattern(

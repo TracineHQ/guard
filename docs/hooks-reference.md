@@ -277,17 +277,21 @@ to read by its exact path.
 
 ### What it checks
 
-Denies writes to guard's trust root: the validator modules, `registry.py`
-and `_utils.py` of the guard install that is running,
+Denies writes to guard's trust root: the guard install that is running
+(everything under its `src/`, `bin/run-hook` and `hooks/hooks.json` for a
+source checkout, the package directory for a wheel),
 `.claude/guard/allowlist.json` and `.claude/subagent-scope.json`. Guard's
-code is matched by real path, not by name, so a clone or worktree of guard's
-source is ordinary code. Backwards-compat patterns also cover hook scripts
-installed under `.claude/hooks/` by older setups.
+install is matched by real path and inode, not by name, so a clone or
+worktree of guard's source is ordinary code, while a hard link or a spelling
+the volume folds is not. Removing, moving, hard-linking or copying into a
+directory that holds the install counts as a write. Backwards-compat
+patterns also cover hook scripts installed under `.claude/hooks/` by older
+setups.
 The trust root stays protected in every guard mode, `off` included. Under
 `guard mode lockdown` the list grows to git hooks and config, agent
 instruction files (`CLAUDE.md`, `.cursorrules`, ...), MCP registrations and
-`~/.aws/config`. Project patterns from `.claude/guard-protected.txt` or
-`GUARD_PROTECTED_EXTRA` apply in every mode but `off`.
+`~/.aws/config`. Project patterns from `.claude/guard-protected.txt` and
+`GUARD_PROTECTED_EXTRA` (both apply) count in every mode but `off`.
 
 Bash writes are matched too: `_match_for_tool` routes `Bash` payloads through
 `bash_write_targets`, which extracts redirect / `tee` / `cp` / `dd of=` /
@@ -304,11 +308,11 @@ tool passes (`Read`, `Grep`, `Glob`, `WebFetch`, `Agent`, `AskUserQuestion`,
 ### Example deny
 
 ```
-Protected file: /home/me/.claude/plugins/cache/tracine/guard/1.5.0/src/guard/registry.py.
-guard blocks agent edits to the code it is running from and to the subagent
-scope file, so a session can't rewrite its own guardrails. Don't retry or
-route around it. Tell the user what you want to change and why; they can
-make the edit.
+Protected path: /home/me/.claude/plugins/cache/tracine/guard/1.5.0/src.
+guard blocks agent writes to the install it is running from and to the
+subagent scope file, so a session can't rewrite its own guardrails. Don't
+retry or route around it. Tell the user what you want to change and why;
+they can make the edit.
 ```
 
 ---

@@ -8,23 +8,32 @@ patterns. ``guard allowlist`` / ``guard mode`` writes
 count as allowlist writes. A match is denied with a reason that tells the
 agent to take the change to the user. Other tools never match.
 
-The default list is guard's own trust root: the hook code and registry it
-is running from, its allowlist and the subagent scope file. Code is matched
-by real path, so a clone or worktree of guard's source is ordinary code an
-agent may edit; only the copy that runs is protected. ``guard mode lockdown`` adds git-exec,
-agent-instruction, MCP and cloud-profile files. Projects add patterns via
-``GUARD_PROTECTED_EXTRA`` or ``.claude/guard-protected.txt``. ``guard mode
-off`` keeps only the trust root; ``shadow`` logs other matches without
-blocking.
+The default list is guard's own trust root: the install these hooks run
+from, its allowlist and the subagent scope file. The install is matched by
+real path and inode: everything under the ``src/`` directory ``run-hook``
+puts first on ``sys.path`` (the package alone for a wheel install), plus
+``bin/run-hook`` and ``hooks/hooks.json``. A clone or worktree of guard's
+source is ordinary code an agent may edit. ``guard mode lockdown`` adds
+git-exec, agent-instruction, MCP and cloud-profile files. Projects add
+patterns via ``GUARD_PROTECTED_EXTRA`` and ``.claude/guard-protected.txt``.
+``guard mode off`` keeps only the trust root; ``shadow`` logs other matches
+without blocking.
 """
 
 from __future__ import annotations
 
+import contextlib
+import functools
+import glob
+import itertools
 import os
 import re
 import shlex
+import stat
 import sys
-from pathlib import Path
+import unicodedata
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from guard._safe_io import safe_read_text_capped
@@ -32,7 +41,7 @@ from guard._utils import emit_pretooluse_decision, safe_main
 from guard.allowlist import apply_decision, load_allowlist
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Iterator, Sequence
 
 _HOOK_ID = "guard.protected_files"
 
@@ -48,7 +57,15 @@ _CASE_INSENSITIVE_FS = sys.platform in ("darwin", "win32")
 
 
 def _normcase(s: str) -> str:
-    return s.lower() if _CASE_INSENSITIVE_FS else s
+    """Fold ``s`` the way a case-insensitive volume compares names.
+
+    ``casefold`` covers what ``lower`` misses (long s is ``s``, the ``st``
+    ligature is ``st``) and NFD matches composed and decomposed accents. Live code is
+    compared by inode as well, so this only has to be close for it.
+    """
+    if not _CASE_INSENSITIVE_FS:
+        return s
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", s).casefold())
 
 
 # Trust-root patterns whose protection MUST NOT be allowlist-bypassable.
@@ -58,33 +75,50 @@ def _normcase(s: str) -> str:
 # user-overridable through the normal allowlist mechanisms.
 _UN_OVERRIDABLE_PATTERNS: frozenset[str] = frozenset({".claude/guard/allowlist.json"})
 
-# The guard package these hooks are running from. Its policy code is keyed on
-# this real path, not on a suffix, so only the running copy is protected: a
-# clone or worktree of guard's source does nothing until someone runs it.
+# The guard install these hooks are running from, keyed on its real path so
+# only the running copy is protected: a clone or worktree of guard's source
+# does nothing until someone runs it. ``bin/run-hook`` puts ``<root>/src``
+# first on ``sys.path``, so a module dropped anywhere in it can shadow one
+# guard imports: the whole directory is live, with the launcher and the
+# plugin's hook registrations. A wheel install keys on the package alone.
 _LIVE_PACKAGE = Path(__file__).resolve().parents[1]
-_LIVE_CODE_FILES: tuple[str, ...] = (
-    "hooks/bash_command_validator.py",
-    "hooks/git_c_validator.py",
-    "hooks/credential_check.py",
-    "hooks/protected_files.py",
-    "hooks/commit_message_validator.py",
-    "hooks/agent_output_guard.py",
-    "hooks/subagent_scope.py",
-    "registry.py",
-    "_utils.py",
+_SOURCE_LAYOUT = _LIVE_PACKAGE.parent.name == "src"
+_LIVE_TREE: tuple[str, ...] = (
+    (
+        str(_LIVE_PACKAGE.parent),
+        str(_LIVE_PACKAGE.parents[1] / "bin" / "run-hook"),
+        str(_LIVE_PACKAGE.parents[1] / "hooks" / "hooks.json"),
+    )
+    if _SOURCE_LAYOUT
+    else (str(_LIVE_PACKAGE),)
 )
-# Absolute live path -> the package-relative name (``guard/_utils.py``) an
-# interpreter eval body would spell it with.
-_LIVE_CODE: dict[str, str] = {
-    str(_LIVE_PACKAGE / rel): f"{_LIVE_PACKAGE.name}/{rel}" for rel in _LIVE_CODE_FILES
-}
+# Directories the unknown part of a path could stand for (``$DIR/_utils.py``).
+_LIVE_DIRS: tuple[Path, ...] = (
+    (_LIVE_PACKAGE.parent, _LIVE_PACKAGE) if _SOURCE_LAYOUT else (_LIVE_PACKAGE,)
+)
+# Spellings that name the live tree from inside a path guard can't resolve
+# or a script body: ``guard/<an existing child>``, ``src/guard``,
+# ``bin/run-hook``, ``hooks/hooks.json``.
+_PKG_CHILD_RE = re.compile(rf"(?<![\w.-]){re.escape(_LIVE_PACKAGE.name)}/([\w.-]+)")
+_LIVE_ANCHORS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    tuple(
+        (entry, re.compile(rf"(?<![\w.-]){re.escape(rel)}(?![\w.-])"))
+        for entry, rel in zip(
+            _LIVE_TREE,
+            (f"src/{_LIVE_PACKAGE.name}", "bin/run-hook", "hooks/hooks.json"),
+            strict=True,
+        )
+    )
+    if _SOURCE_LAYOUT
+    else ()
+)
 
-# Guard's own trust root: the code that enforces policy, the allowlist that
+# Guard's own trust root: the install that enforces policy, the allowlist that
 # configures it, and the subagent scope file it enforces. Protected in every
 # guard mode, ``off`` included: a session that rewrites these while guard is
 # off changes what runs when the user turns guard back on.
 PROTECTED_PATTERNS: list[str] = [
-    *_LIVE_CODE,
+    *_LIVE_TREE,
     # Subagent scope file: a subagent rewriting its own scope is a TOCTOU
     # bypass of subagent_scope.py.
     ".claude/subagent-scope.json",
@@ -153,8 +187,8 @@ LOCKDOWN_PATTERNS: list[str] = [
 # 2. ``.claude/guard-protected.txt`` file (rooted at cwd) — one pattern
 #    per line; ``#`` starts a comment to end of line; blank lines OK.
 #
-# When both are present the FILE wins (it is the more deliberate
-# artifact; env can be set system-wide for unrelated reasons). Patterns
+# Both apply when both are present: a repo's file can add to the user's
+# env patterns but never drop them. Patterns
 # use the same syntax ``is_protected()`` already understands — suffix
 # match for file patterns (any segment containing ``.``), segment match
 # for directory patterns (last segment with no ``.``). No new grammar.
@@ -208,19 +242,15 @@ def _read_extra_patterns_from_file(cwd: Path | None = None) -> list[str]:
 
 
 def _extra_patterns(cwd: Path | None = None) -> list[str]:
-    """Return the file-then-env extension patterns (file precedence).
+    """Return the extension patterns: the project file's, then the env var's.
 
-    Resolves at call time. If a ``.claude/guard-protected.txt`` file is
-    readable, returns the patterns parsed from it (empty list if the
-    file exists but is empty after comment-stripping). Otherwise falls
-    back to the ``GUARD_PROTECTED_EXTRA`` env var. Returns ``[]`` when
-    both are absent.
+    Resolves at call time. Duplicates are dropped; an empty, corrupt or
+    missing ``.claude/guard-protected.txt`` adds nothing and leaves
+    ``GUARD_PROTECTED_EXTRA`` in force.
     """
     base = cwd if cwd is not None else Path.cwd()
-    file_path = base / _GUARD_PROTECTED_FILE_RELPATH
-    if file_path.exists():
-        return _read_extra_patterns_from_file(base)
-    return _read_extra_patterns_from_env()
+    found = [*_read_extra_patterns_from_file(base), *_read_extra_patterns_from_env()]
+    return list(dict.fromkeys(found))
 
 
 def _effective_patterns(cwd: Path | None = None, *, mode: str = "enforce") -> tuple[str, ...]:
@@ -238,37 +268,103 @@ def _effective_patterns(cwd: Path | None = None, *, mode: str = "enforce") -> tu
     return (*PROTECTED_PATTERNS, *lockdown, *_extra_patterns(cwd))
 
 
-def is_protected(file_path: str, patterns: Sequence[str] | None = None) -> str | None:
-    """Return the matched protected pattern for ``file_path``, else ``None``.
-
-    A pattern matches if ``file_path`` either:
-    - is the pattern, for guard's live code (an absolute real path)
-    - ends with the pattern (file-pattern match: ``.git/config`` matches
-      ``/repo/.git/config``)
-    - is contained as a path SEGMENT (directory-pattern match: ``.git/hooks``
-      matches ``/repo/.git/hooks/pre-commit``)
-
-    Directory-pattern matching is restricted to patterns whose last segment
-    contains no ``.`` — file patterns (``.git/config``, ``.gitattributes``)
-    only fire on the suffix form, so a path like ``/tmp/x/.git/config/extra``
-    or ``tools/.gitattributes/templates/foo`` does NOT trigger.
-
-    ``patterns`` defaults to the ``enforce`` set (trust root + extras).
-    """
-    if not file_path:
-        return None
+def _stat(path: Path) -> os.stat_result | None:
     try:
-        resolved = Path(file_path).resolve()
-    except (ValueError, OSError):
+        return path.stat()
+    except (OSError, ValueError):
         return None
 
-    resolved_lc = _normcase(str(resolved))
-    for pattern in patterns if patterns is not None else _effective_patterns():
-        pat_lc = _normcase(pattern)
-        if pattern in _LIVE_CODE:
-            if resolved_lc == pat_lc:
-                return pattern
+
+def _resolve(path: Path) -> Path | None:
+    try:
+        return path.resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _exists(path: Path) -> bool:
+    return _stat(path) is not None
+
+
+def _is_file(path: Path) -> bool:
+    found = _stat(path)
+    return found is not None and stat.S_ISREG(found.st_mode)
+
+
+def _walk(root: Path) -> list[Path]:
+    try:
+        return [root, *root.rglob("*")] if root.is_dir() else [root]
+    except OSError:
+        return [root]
+
+
+@functools.cache
+def _inode_map(entries: tuple[str, ...], scope: str) -> dict[tuple[int, int], str]:
+    """Map ``(st_dev, st_ino)`` to the live entry it belongs to.
+
+    ``scope`` is ``"entries"`` (each entry itself), ``"files"`` (everything
+    under each entry, to spot a hard link to a live file) or ``"ancestors"``
+    (each directory holding an entry).
+    """
+    ids: dict[tuple[int, int], str] = {}
+    for entry in entries:
+        root = Path(entry)
+        paths: Iterable[Path]
+        if scope == "entries":
+            paths = (root,)
+        elif scope == "ancestors":
+            paths = root.parents
+        else:
+            paths = _walk(root)
+        for path in paths:
+            found = _stat(path)
+            if found is not None:
+                ids.setdefault((found.st_dev, found.st_ino), entry)
+    return ids
+
+
+def _live_entry(path: Path, *, ancestors: bool = False) -> str | None:
+    """Return the live-tree entry a resolved ``path`` is in, else ``None``.
+
+    Names are compared folded, then inodes: a spelling the volume folds
+    (a long s in ``src``) passes through a live directory on the way up, and
+    a hard link to a live file shares its inode. With ``ancestors``, a
+    directory that holds the live tree matches too (``rm -r``, ``mv``).
+    """
+    folded = _normcase(str(path))
+    for entry in _LIVE_TREE:
+        live = _normcase(entry)
+        if folded == live or folded.startswith(live + "/"):
+            return entry
+        if ancestors and live.startswith(folded.rstrip("/") + "/"):
+            return entry
+    found = _stat(path)
+    if found is not None:
+        key = (found.st_dev, found.st_ino)
+        if ancestors and key in _inode_map(_LIVE_TREE, "ancestors"):
+            return _inode_map(_LIVE_TREE, "ancestors")[key]
+        if stat.S_ISREG(found.st_mode) and found.st_nlink > 1:
+            linked = _inode_map(_LIVE_TREE, "files").get(key)
+            if linked is not None:
+                return linked
+    entries = _inode_map(_LIVE_TREE, "entries")
+    for parent in (path, *path.parents):
+        found = _stat(parent)
+        if found is not None and (found.st_dev, found.st_ino) in entries:
+            return entries[found.st_dev, found.st_ino]
+    return None
+
+
+def _has_live(patterns: Sequence[str]) -> bool:
+    return any(pattern in _LIVE_TREE for pattern in patterns)
+
+
+def _pattern_match(resolved_lc: str, patterns: Sequence[str]) -> str | None:
+    """Return the first suffix or segment pattern ``resolved_lc`` matches."""
+    for pattern in patterns:
+        if pattern in _LIVE_TREE:
             continue
+        pat_lc = _normcase(pattern)
         # Exact-suffix match (file pattern).
         if (
             resolved_lc.endswith(pat_lc)
@@ -284,6 +380,36 @@ def is_protected(file_path: str, patterns: Sequence[str] | None = None) -> str |
     return None
 
 
+def is_protected(file_path: str, patterns: Sequence[str] | None = None) -> str | None:
+    """Return the matched protected pattern for ``file_path``, else ``None``.
+
+    A pattern matches if ``file_path`` either:
+    - is in guard's live tree (an absolute real path; see ``_live_entry``)
+    - ends with the pattern (file-pattern match: ``.git/config`` matches
+      ``/repo/.git/config``)
+    - is contained as a path SEGMENT (directory-pattern match: ``.git/hooks``
+      matches ``/repo/.git/hooks/pre-commit``)
+
+    Directory-pattern matching is restricted to patterns whose last segment
+    contains no ``.`` — file patterns (``.git/config``, ``.gitattributes``)
+    only fire on the suffix form, so a path like ``/tmp/x/.git/config/extra``
+    or ``tools/.gitattributes/templates/foo`` does NOT trigger.
+
+    ``patterns`` defaults to the ``enforce`` set (trust root + extras).
+    """
+    if not file_path:
+        return None
+    resolved = _resolve(Path(file_path))
+    if resolved is None:
+        return None
+    active = patterns if patterns is not None else _effective_patterns()
+    if _has_live(active):
+        live = _live_entry(resolved)
+        if live is not None:
+            return live
+    return _pattern_match(_normcase(str(resolved)), active)
+
+
 def is_protected_parent_dir(dir_path: str, patterns: Sequence[str] | None = None) -> str | None:
     """Return the matched protected pattern when ``dir_path`` is an ancestor.
 
@@ -294,17 +420,19 @@ def is_protected_parent_dir(dir_path: str, patterns: Sequence[str] | None = None
     """
     if not dir_path:
         return None
-    try:
-        resolved = Path(dir_path).resolve()
-    except (ValueError, OSError):
+    resolved = _resolve(Path(dir_path))
+    if resolved is None:
         return None
+    active = patterns if patterns is not None else _effective_patterns()
+    if _has_live(active):
+        # Live tree: an extraction into it, or anywhere above it, can overwrite it.
+        live = _live_entry(resolved, ancestors=True)
+        if live is not None:
+            return live
 
     resolved_lc = _normcase(str(resolved).rstrip("/"))
-    for pattern in patterns if patterns is not None else _effective_patterns():
-        if pattern in _LIVE_CODE:
-            # Live code: an extraction anywhere above the file can overwrite it.
-            if _normcase(pattern).startswith(resolved_lc + "/"):
-                return pattern
+    for pattern in active:
+        if pattern in _LIVE_TREE:
             continue
         # ``pattern`` is the suffix path of a protected file. An extraction
         # into ``resolved_str`` could write to ``<resolved_str>/<tail>`` for
@@ -329,48 +457,156 @@ _BASH_REDIRECT_RE = re.compile(r"(?:^|[\s&\d])>>?\|?\s*(\S+)")
 _BASH_DD_OF_RE = re.compile(r"(?:^|\s)of=(\S+)")
 
 
-def _split_commands(command: str) -> list[list[str]]:
-    r"""Tokenize ``command`` one command at a time, splitting at unquoted ``; | & newline``.
+# Characters that end a word, and those a comment's ``#`` can follow. After
+# ``)`` or a redirect bash may still be in a word (``$(x)#``), so those
+# leave the ``#`` as text: reading too much can't hide a command.
+_WORD_BREAKS = frozenset(" \t\n;&|()<>")
+_COMMENT_AFTER = frozenset(" \t\n;&|(")
+
+
+def _escaped(text: str, i: int) -> bool:
+    """Return whether a backslash escapes ``text[i]`` (an odd run of them before it)."""
+    j = i
+    while j > 0 and text[j - 1] == "\\":
+        j -= 1
+    return (i - j) % 2 == 1
+
+
+def _starts_comment(text: str, i: int) -> bool:
+    return text[i] == "#" and (
+        i == 0 or (text[i - 1] in _COMMENT_AFTER and not _escaped(text, i - 1))
+    )
+
+
+def _step(text: str, i: int, quote: str) -> tuple[int, str]:
+    """Move past ``text[i]`` as bash reads it: return the next index and quote state.
+
+    ``quote`` is ``""``, ``"'"``, ``'"'`` or ``"$'"`` (where a backslash
+    escapes, unlike in ``'...'``). A backslash takes the character after it,
+    ``$$`` is one word part, and an unquoted comment runs to its newline.
+    """
+    ch = text[i]
+    if quote == "'":
+        return i + 1, "" if ch == "'" else quote
+    if ch == "\\":
+        return i + 2, quote
+    if quote:
+        return i + 1, "" if ch == quote[-1] else quote
+    if _starts_comment(text, i):
+        end = text.find("\n", i)
+        return (len(text) if end < 0 else end), ""
+    nxt = text[i + 1 : i + 2]
+    if ch == "$" and nxt in {"'", "$"}:
+        return i + 2, "$'" if nxt == "'" else ""
+    return i + 1, ch if ch in "'\"" else ""
+
+
+def _in_redirect(command: str, i: int) -> bool:
+    """Return whether the ``|`` or ``&`` at ``i`` belongs to ``>|``, ``>&``, ``<&`` or ``&>``."""
+    after_op = i > 0 and command[i - 1] in "<>" and not _escaped(command, i - 1)
+    if command[i] == "|":
+        return after_op and command[i - 1] == ">"
+    return after_op or command[i + 1 : i + 2] == ">"
+
+
+def _split_segments(command: str) -> list[str]:
+    r"""Split ``command`` into raw command strings at unquoted ``; | & newline``.
 
     Splitting the raw string (not shlex tokens) keeps a quoted ``';'`` or an
     escaped ``\;`` as an operand and still splits an unspaced ``a;b``. The
     ``&`` and ``|`` in ``&>``, ``>&`` and ``>|`` are redirects, not operators.
-    Raises ``ValueError`` on unbalanced quotes, like ``shlex.split``.
+    A ``#`` that starts a word comments out the rest of its line.
     """
     segments: list[str] = []
-    start = 0
+    start = i = 0
     quote = ""
-    i = 0
     while i < len(command):
         ch = command[i]
-        prev = command[i - 1] if i else ""
-        nxt = command[i + 1 : i + 2]
-        if ch == "\\" and quote != "'":
-            i += 2
-            continue
-        if quote:
-            quote = "" if ch == quote else quote
-        elif ch in "'\"":
-            quote = ch
-        elif (
-            ch in ";\n"
-            or (ch == "|" and prev != ">")
-            or (ch == "&" and prev not in "<>" and nxt != ">")
-        ):
+        if not quote and _starts_comment(command, i):
+            segments.append(command[start:i])
+            start = len(command) if (end := command.find("\n", i)) < 0 else end
+        elif not quote and (ch in ";\n" or (ch in "|&" and not _in_redirect(command, i))):
             segments.append(command[start:i])
             start = i + 1
-        i += 1
+        i, quote = _step(command, i, quote)
     segments.append(command[start:])
-    return [tokens for seg in segments if (tokens := shlex.split(seg))]
+    return segments
+
+
+_OPEN_BRACKETS_RE = re.compile(r"^(?:\$?\()+")
+
+
+def _unbracket(word: str) -> str:
+    """Drop an unbalanced bracket glued to a word: ``(cd``, ``$(cp``, ``x)``, a lone backtick."""
+    if ")" not in word:
+        word = _OPEN_BRACKETS_RE.sub("", word)
+    if "(" not in word:
+        word = word.rstrip(")")
+    if word.count("`") == 1:
+        word = word.strip("`")
+    return word
+
+
+def _tokens(segment: str) -> list[str]:
+    """Return one command's words, with glued subshell brackets dropped.
+
+    Raises ``ValueError`` on unbalanced quotes, like ``shlex.split``.
+    """
+    words = (_unbracket(word) for word in shlex.split(segment))
+    return [word for word in words if word]
+
+
+def _split_commands(command: str) -> list[list[str]]:
+    """Tokenize ``command`` one command at a time. Raises ``ValueError`` on bad quotes."""
+    return [tokens for seg in _split_segments(command) if (tokens := _tokens(seg))]
+
+
+# A redirect word: the operator, then the target when it's glued on.
+_REDIRECT_OP_RE = re.compile(r"^\d*(&>>?|>>?\|?|<<<|<<-?|<>|<&|<)(.*)$")
+_FD_DUP_RE = re.compile(r"^&?(?:\d+|-)$")
+
+
+def _split_redirects(tokens: list[str]) -> tuple[list[str], list[str]]:
+    """Split redirect words off ``tokens``: ``(arguments, output targets)``.
+
+    ``cp a b 2>/dev/null`` copies to ``b``, and ``> "x"`` writes ``x``.
+    """
+    args: list[str] = []
+    outs: list[str] = []
+    pending = ""
+    for tok in tokens:
+        if pending:
+            if pending == "out" and not _FD_DUP_RE.match(tok):
+                outs.append(tok)
+            pending = ""
+            continue
+        match = _REDIRECT_OP_RE.match(tok)
+        if match is None:
+            args.append(tok)
+            continue
+        operator, target = match.groups()
+        writes = ">" in operator
+        if not target:
+            pending = "out" if writes else "in"
+        elif writes and not _FD_DUP_RE.match(target):
+            outs.append(target.removeprefix("&"))
+    return args, outs
+
+
+def _regex_write_targets(text: str) -> list[str]:
+    """Redirect and ``dd of=`` targets found in raw text (``x>/path``, ``of=/path``)."""
+    found = [*_BASH_REDIRECT_RE.findall(text), *_BASH_DD_OF_RE.findall(text)]
+    return [target.strip("'\"") for target in found]
 
 
 def bash_write_targets(command: str, patterns: Sequence[str] | None = None) -> list[str]:
     """Return likely write-target paths from a bash command.
 
     Best-effort: scans for output redirects (``>``, ``>>``, ``>|``, ``&>``),
-    ``tee``, ``cp``, ``mv``, ``ln -sf``, ``install``, and ``dd of=`` targets,
-    plus in-place editor flags (``sed -i``, ``perl -i``, ``awk -i inplace``).
-    Each command between control operators is scanned on its own.
+    ``tee``, ``touch``, ``cp``, ``mv``, ``ln -sf``, ``install``, and ``dd
+    of=`` targets, plus in-place editor flags (``sed -i``, ``perl -i``,
+    ``awk -i inplace``). Each command between control operators is scanned
+    on its own.
 
     ``patterns`` is the protected list the interpreter-eval scan looks for
     (defaults to the ``enforce`` set).
@@ -378,40 +614,46 @@ def bash_write_targets(command: str, patterns: Sequence[str] | None = None) -> l
     Public so other hooks (notably ``subagent_scope``) can reuse the same
     write-target enumerator instead of duplicating the bash-shape parsing.
     """
-    targets: list[str] = []
-    targets.extend(_BASH_REDIRECT_RE.findall(command))
-    targets.extend(_BASH_DD_OF_RE.findall(command))
     try:
-        commands = _split_commands(command)
+        commands = [(seg, _tokens(seg)) for seg in _split_segments(command)]
     except ValueError:
-        return targets
-    for cmd_tokens in commands:
-        targets.extend(_command_write_targets(cmd_tokens, command, patterns))
+        return _regex_write_targets(command)
+    targets: list[str] = []
+    for segment, tokens in commands:
+        targets.extend(_regex_write_targets(segment))
+        targets.extend(_command_write_targets(tokens, segment, patterns))
     return targets
 
 
 def _command_write_targets(
-    tokens: list[str], command: str, patterns: Sequence[str] | None
+    tokens: list[str],
+    command: str,
+    patterns: Sequence[str] | None,
+    dirs: Sequence[Path] | None = None,
 ) -> list[str]:
-    """Write targets for one command's tokens (no control operators inside)."""
-    targets: list[str] = []
+    """Write targets for one command's tokens (no control operators inside).
+
+    ``dirs`` are the directories the command may run in, for relative paths
+    in an interpreter body (defaults to the working directory).
+    """
+    tokens, targets = _split_redirects(tokens)
 
     # Look for ``tee``, ``cp``, ``mv``, ``ln``, ``install`` anywhere in the
     # command: wrappers like ``sudo tee /path`` mean the head token isn't
     # the writer. We don't try to be exhaustive about flags;
     # just skip past any ``-x``-shaped argument right after the verb.
-    write_verbs = {"tee", "cp", "mv", "install", "ln"}
+    write_verbs = {"tee", "touch", "cp", "mv", "install", "ln"}
     for i, tok in enumerate(tokens):
         head = tok.rsplit("/", 1)[-1]
         if head not in write_verbs:
             continue
         rest = tokens[i + 1 :]
-        if head == "tee":
+        if head in {"tee", "touch"}:
             targets.extend(t for t in rest if not t.startswith("-"))
         elif head in {"cp", "mv", "install"}:
-            non_flag = [t for t in rest if not t.startswith("-")]
-            if len(non_flag) >= _CP_MV_INSTALL_MIN_OPERANDS:
-                targets.append(non_flag[-1])
+            dest, _ = _dest_and_sources(rest)
+            if dest is not None:
+                targets.append(dest)
         elif head == "ln":
             non_flag = [t for t in rest if not t.startswith("-")]
             if non_flag:
@@ -447,7 +689,7 @@ def _command_write_targets(
     # etc. Scan a write-shaped eval-string body for literal protected-pattern
     # substrings (best-effort; dynamically-constructed paths cannot be
     # resolved statically and fall through to the Edit/Write tool guard).
-    targets.extend(_interpreter_eval_targets(tokens, patterns))
+    targets.extend(_interpreter_eval_targets(tokens, patterns, dirs))
     return targets
 
 
@@ -685,6 +927,14 @@ def _patch_diff_targets(tokens: list[str], command: str) -> list[str]:
 
 
 _FIND_WRITE_FLAGS: frozenset[str] = frozenset({"-fprint", "-fprint0", "-fprintf", "-fls"})
+_FIND_EXEC_FLAGS: frozenset[str] = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+# Programs that only read the files find hands them.
+_FIND_READ_ONLY: frozenset[str] = frozenset(
+    {"basename", "cat", "cmp", "diff", "dirname", "du", "echo", "egrep", "false", "fgrep"}
+    | {"file", "grep", "head", "hexdump", "jq", "ls", "md5", "md5sum", "od", "printf"}
+    | {"readlink", "realpath", "rg", "sha1sum", "sha256sum", "shasum", "sort", "stat"}
+    | {"strings", "tail", "test", "true", "uniq", "wc", "xxd"}
+)
 
 
 def _find_exec_targets(tokens: list[str]) -> list[str]:
@@ -692,10 +942,11 @@ def _find_exec_targets(tokens: list[str]) -> list[str]:
 
     Two write surfaces:
 
-    - ``-exec`` / ``-execdir``: the doctrine path appears at runtime via
-      ``{}`` substitution, not literal text in argv. Conservative rule:
-      emit the search root so ``is_protected(<root>)`` decides. ``find
-      <root>`` without ``-exec`` is read-only.
+    - ``-exec`` / ``-execdir`` / ``-ok`` / ``-okdir`` / ``-delete``: the
+      doctrine path appears at runtime via ``{}`` substitution, not literal
+      text in argv. Conservative rule: emit the search root so
+      ``is_protected(<root>)`` decides. ``find <root>`` without them, or
+      with only read-only programs after ``-exec``, is read-only.
     - ``-fprint <file>`` / ``-fprintf <file> <fmt>`` / ``-fls <file>`` /
       ``-fprint0 <file>``: ``find`` writes its own output to ``<file>``,
       truncating it. Emit ``<file>`` directly — the write target is in
@@ -713,7 +964,10 @@ def _find_exec_targets(tokens: list[str]) -> list[str]:
         for j, flag in enumerate(rest):
             if flag in _FIND_WRITE_FLAGS and j + 1 < len(rest):
                 out.append(rest[j + 1])
-        if any(t in {"-exec", "-execdir"} for t in rest):
+        runs = [
+            rest[j + 1].rsplit("/", 1)[-1] for j, t in enumerate(rest[:-1]) if t in _FIND_EXEC_FLAGS
+        ]
+        if "-delete" in rest or any(r not in _FIND_READ_ONLY for r in runs):
             # Search root: the first non-flag, non-expression token after
             # ``find``. ``find . -name ...`` → ``.``;
             # ``find /etc -exec ...`` → ``/etc``.
@@ -758,21 +1012,35 @@ _EVAL_WRITE_INTENT_RE = re.compile(
 )
 
 
+def _eval_body_targets(body: str, active: Sequence[str], dirs: Sequence[Path]) -> list[str]:
+    """Protected patterns a write-shaped interpreter body names."""
+    if len(body) > _EVAL_BODY_SCAN_MAX_BYTES:
+        return [_EVAL_BODY_OVERFLOW_SENTINEL]
+    if not _EVAL_WRITE_INTENT_RE.search(body):
+        return []
+    out = [pat for pat in active if pat not in _LIVE_TREE and pat in body]
+    live = _text_names_live(body, dirs) if _has_live(active) else None
+    return out if live is None else [*out, live]
+
+
 def _interpreter_eval_targets(
-    tokens: list[str], patterns: Sequence[str] | None = None
+    tokens: list[str],
+    patterns: Sequence[str] | None = None,
+    dirs: Sequence[Path] | None = None,
 ) -> list[str]:
     """Scan an interpreter's ``-c`` / ``-e`` / ``-r`` eval body for literal protected paths.
 
     Best-effort static scan. When the body shows write intent
     (``_EVAL_WRITE_INTENT_RE``), every protected pattern appearing as a
     substring is emitted as a candidate target, so
-    ``open('/.git/config','w')`` yields ``.git/config``. Guard's live code
-    counts when the body names its package-relative path
-    (``guard/_utils.py``): the body's own path can't be resolved, so here a
-    copy of guard's source is treated as the live one. A read-only body
-    yields nothing. ``shutil.copy(src, dst)`` where ``dst`` is a runtime
-    variable yields nothing either (the static matcher cannot solve that;
-    the Edit/Write tool gate is the right defense).
+    ``open('/.git/config','w')`` yields ``.git/config``. Guard's live tree
+    counts when a path in the body resolves into it, or when a fragment
+    code could join onto anything (``'/guard/_utils.py'``) names a live
+    file or spells the tree package-relative. A read-only body yields
+    nothing. ``shutil.copy(src, dst)``
+    where ``dst`` is a runtime variable yields nothing either (the static
+    matcher cannot solve that; the Edit/Write tool gate is the right
+    defense).
 
     Bodies up to ``_EVAL_BODY_SCAN_MAX_BYTES`` (1 MiB) are scanned
     end-to-end; over that we emit ``_EVAL_BODY_OVERFLOW_SENTINEL`` so
@@ -781,6 +1049,7 @@ def _interpreter_eval_targets(
     """
     out: list[str] = []
     active = patterns if patterns is not None else _effective_patterns()
+    where = list(dirs) if dirs else [Path.cwd()]
     for i, tok in enumerate(tokens):
         head = tok.rsplit("/", 1)[-1]
         # Strip a trailing version suffix to the base interpreter name:
@@ -795,11 +1064,7 @@ def _interpreter_eval_targets(
             rest = tokens[i + 1 :]
             for j, flag in enumerate(rest):
                 if flag in flagset and j + 1 < len(rest):
-                    body = rest[j + 1]
-                    if len(body) > _EVAL_BODY_SCAN_MAX_BYTES:
-                        out.append(_EVAL_BODY_OVERFLOW_SENTINEL)
-                    elif _EVAL_WRITE_INTENT_RE.search(body):
-                        out.extend(pat for pat in active if _LIVE_CODE.get(pat, pat) in body)
+                    out.extend(_eval_body_targets(rest[j + 1], active, where))
                     break
             break
     return out
@@ -856,46 +1121,778 @@ def _guard_cli_writes_allowlist(tokens: list[str]) -> bool:
     return False
 
 
-def _bash_first_protected_match(command: str, patterns: Sequence[str]) -> str | None:
-    """Return the first protected pattern matched by a bash write target."""
-    for target in bash_write_targets(command, patterns):
-        matched = is_protected(target, patterns)
+# === Resolving a bash word to the paths it can name ===
+#
+# ``~`` and set environment variables expand; brace lists and globs expand
+# against the filesystem. A word with a part guard can't know (an unset
+# ``$VAR``, ``$(...)``, a backtick) keeps only its tail, the parts after the
+# last unknown one, and so does a relative word after a ``cd`` guard can't
+# follow. A tail is matched as if the unknown part could be any directory.
+
+_UNKNOWN_PART_RE = re.compile(r"\$\([^()]*\)|`[^`]*`|\$\{[^}]*\}")
+_BRACE_RE = re.compile(r"\{([^{}]*,[^{}]*)\}")
+_GLOB_CHARS_RE = re.compile(r"[*?[]")
+_EXPANSION_LIMIT = 64
+
+
+def _expand_word(word: str) -> str:
+    word = word.strip("'\"")
+    if word.startswith("~"):
+        # ``~nosuchuser`` stays literal, as in bash.
+        with contextlib.suppress(RuntimeError):
+            word = str(Path(word).expanduser())
+    word = os.path.expandvars(word)
+    while (collapsed := _UNKNOWN_PART_RE.sub("$", word)) != word:
+        word = collapsed
+    return word
+
+
+def _expand_braces(word: str) -> list[str]:
+    """Expand ``{a,b}`` lists the way bash does before it globs (capped)."""
+    words = [word]
+    while any(_BRACE_RE.search(w) for w in words) and len(words) < _EXPANSION_LIMIT:
+        expanded: list[str] = []
+        for w in words:
+            match = _BRACE_RE.search(w)
+            if match is None:
+                expanded.append(w)
+                continue
+            head, tail = w[: match.start()], w[match.end() :]
+            expanded.extend(head + alt + tail for alt in match.group(1).split(","))
+        words = expanded
+    return words[:_EXPANSION_LIMIT]
+
+
+def _glob_matches(paths: Sequence[Path]) -> list[Path]:
+    """Return what glob characters in ``paths`` match on disk (capped)."""
+    found: list[Path] = []
+    for path in paths:
+        if _GLOB_CHARS_RE.search(str(path)):
+            matches = glob.iglob(str(path))  # noqa: PTH207 -- an absolute shell word, not a Path pattern
+            found.extend(Path(m) for m in itertools.islice(matches, _EXPANSION_LIMIT))
+    return found
+
+
+def _target_paths(
+    target: str, dirs: Sequence[Path], *, cd_unknown: bool
+) -> tuple[list[Path], list[list[str]]]:
+    """Return the absolute paths ``target`` can name, and the tails guard can't place."""
+    paths: list[Path] = []
+    tails: list[list[str]] = []
+    for word in _expand_braces(_expand_word(target)):
+        parts = word.split("/")
+        unknown = [i for i, part in enumerate(parts) if "$" in part or "`" in part]
+        if unknown:
+            tails.append(parts[unknown[-1] + 1 :])
+            continue
+        if not word:
+            continue
+        found = [Path(word)] if word.startswith("/") else [d / word for d in dirs]
+        if cd_unknown and not word.startswith("/"):
+            tails.append(parts)
+        paths.extend([*found, *_glob_matches(found)])
+    return paths, tails
+
+
+def _normalize_tail(tail: Sequence[str]) -> list[str]:
+    """Drop ``.`` and empty parts; a leading ``..`` folds into the unknown part."""
+    parts: list[str] = []
+    for part in tail:
+        if part == "..":
+            if parts:
+                parts.pop()
+        elif part not in {"", "."}:
+            parts.append(part)
+    return parts
+
+
+def _anchor_names_live(text: str) -> str | None:
+    """Return the live entry ``text`` spells package-relative, else ``None``."""
+    folded = _normcase(text)
+    for match in _PKG_CHILD_RE.finditer(folded):
+        child = match.group(1)
+        if child not in {".", ".."} and _exists(_LIVE_PACKAGE / child):
+            return _LIVE_TREE[0]
+    return next((entry for entry, anchor in _LIVE_ANCHORS if anchor.search(folded)), None)
+
+
+def _tail_names_live(tail: Sequence[str]) -> str | None:
+    """Return the live entry a tail could be in, whatever its unknown part is.
+
+    It counts when it is a file right under a live directory (the unknown
+    part could be that directory) or spells the tree package-relative.
+    Generic names (``__init__.py``, ``__pycache__``, a directory) don't
+    count on their own: every Python package has them.
+    """
+    parts = _normalize_tail(tail)
+    if not parts:
+        return None
+    if not parts[-1].startswith("__") and any(
+        _is_file(root.joinpath(*parts)) for root in _LIVE_DIRS
+    ):
+        return _LIVE_TREE[0]
+    return _anchor_names_live("/" + "/".join(parts))
+
+
+def _tail_match(tail: Sequence[str], patterns: Sequence[str], *, live_only: bool) -> str | None:
+    """Match a tail against the live tree, then (unless ``live_only``) the patterns.
+
+    A trust-root pattern also matches when the tail is its end
+    (``$DIR/allowlist.json``), since the unknown part could supply the rest.
+    """
+    parts = _normalize_tail(tail)
+    if not parts:
+        return None
+    if _has_live(patterns):
+        live = _tail_names_live(parts)
+        if live is not None:
+            return live
+    if live_only:
+        return None
+    joined = _normcase("/" + "/".join(parts))
+    matched = _pattern_match(joined, patterns)
+    if matched is not None:
+        return matched
+    folded = joined.split("/")[1:]
+    return next(
+        (
+            p
+            for p in patterns
+            if p in PROTECTED_PATTERNS
+            and p not in _LIVE_TREE
+            and _normcase(p).split("/")[-len(folded) :] == folded
+        ),
+        None,
+    )
+
+
+_WORD_RE = re.compile(r"[^\s'\"`;&|()<>,=]+")
+
+
+# Calls in a script body that write a whole directory, not just a file.
+_TREE_WRITE_RE = re.compile(
+    r"rmtree|copytree|rmdir|removedirs|rename|move|rmSync|cpSync|rm_r|cp_r|\bmv\b|\brm\s+-"
+)
+
+
+def _word_names_live(word: str, dirs: Sequence[Path], *, whole_dirs: bool) -> str | None:
+    """Return the live entry one script word can name.
+
+    A word that resolves is checked as a path; one naming a live directory
+    counts only with ``whole_dirs`` (``sys.path.insert(0, '<src>')`` is a
+    read). A word with an unknown part, or an absolute-looking fragment
+    such as ``/guard/_utils.py`` (code can join it onto anything), is
+    checked as a tail.
+    """
+    paths, tails = _target_paths(word, dirs, cd_unknown=False)
+    for path in paths:
+        resolved = _resolve(path)
+        if resolved is None:
+            continue
+        live = _live_entry(resolved)
+        if live is not None and (whole_dirs or not resolved.is_dir()):
+            return live
+    expanded = _expand_word(word)
+    if expanded.startswith("/") and not _exists(Path("/", expanded.split("/")[1])):
+        tails.append(expanded.split("/")[1:])
+    return next((live for tail in tails if (live := _tail_names_live(tail)) is not None), None)
+
+
+def _text_names_live(text: str, dirs: Sequence[Path], *, strict: bool = False) -> str | None:
+    """Return the live entry a script body or unparsed text names, else ``None``.
+
+    Every path-like word is checked (``_word_names_live``); bare words only
+    from inside the live tree, where they resolve into it. A live directory
+    counts when the text could write a whole tree, or when ``strict``.
+    """
+    inside = any(
+        resolved is not None and _live_entry(resolved) is not None
+        for resolved in map(_resolve, dirs)
+    )
+    whole_dirs = strict or bool(_TREE_WRITE_RE.search(text))
+    for word in dict.fromkeys(_WORD_RE.findall(text)):
+        if inside or "/" in word or word.startswith("~"):
+            live = _word_names_live(word, dirs, whole_dirs=whole_dirs)
+            if live is not None:
+                return live
+    return None
+
+
+def _text_match(text: str, patterns: Sequence[str], dirs: Sequence[Path]) -> str | None:
+    """Return a trust-root pattern ``text`` names anywhere (fail closed)."""
+    if _has_live(patterns):
+        live = _text_names_live(text, dirs, strict=True)
+        if live is not None:
+            return live
+    folded = _normcase(text)
+    return next(
+        (
+            p
+            for p in patterns
+            if p in PROTECTED_PATTERNS and p not in _LIVE_TREE and _normcase(p) in folded
+        ),
+        None,
+    )
+
+
+# === Commands a bash command moves to, removes or hands on ===
+
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "su"})
+_REMOVERS = frozenset({"rm", "rmdir", "unlink", "shred", "srm", "mv", "link"})
+# Words that run the next word as a command (``sudo rm``, ``git mv``), with
+# the flags of each that take a value (``sudo -u root rm``).
+_PREFIX_WORDS: dict[str, frozenset[str]] = {
+    "sudo": frozenset({"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T"}),
+    "doas": frozenset({"-u", "-C"}),
+    "env": frozenset({"-u", "-C", "--chdir", "--unset"}),
+    "nice": frozenset({"-n"}),
+    "timeout": frozenset({"-s", "-k", "--signal", "--kill-after"}),
+    "xargs": frozenset({"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a"}),
+    "stdbuf": frozenset({"-i", "-o", "-e"}),
+    "git": frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"}),
+    **dict.fromkeys(
+        ("command", "builtin", "exec", "nohup", "time", "caffeinate"), frozenset[str]()
+    ),
+}
+# Flags that run a command from another directory (``git -C``, ``env -C``).
+_CHDIR_FLAGS = frozenset({"-C", "--chdir"})
+_LEAD_WORDS = frozenset({"{", "!", "if", "then", "else", "elif", "do", "while", "until"})
+_ASSIGN_RE = re.compile(r"^[A-Za-z_]\w*=")
+_MAX_PAYLOAD_DEPTH = 4
+
+
+def _short_flag_has(token: str, letter: str) -> bool:
+    return token.startswith("-") and not token.startswith("--") and letter in token[1:]
+
+
+def _cd_moves(tokens: list[str], dirs: Sequence[Path]) -> tuple[list[Path], bool]:
+    """Return where a ``cd``/``pushd`` in ``tokens`` can move, and whether one is unknown.
+
+    ``git -C <dir>`` and ``env -C <dir>`` count too: the command they run
+    resolves relative paths there.
+    """
+    moved: list[Path] = []
+    lost = False
+    for i, tok in enumerate(tokens):
+        lost = lost or tok == "popd"
+        arg: str | None
+        if tok.startswith("--chdir="):
+            arg = tok.partition("=")[2]
+        elif tok in _CHDIR_FLAGS:
+            arg = tokens[i + 1] if i + 1 < len(tokens) else ""
+        elif tok in {"cd", "pushd"}:
+            arg = next((t for t in tokens[i + 1 :] if t == "-" or not t.startswith("-")), None)
+        else:
+            continue
+        if arg is None:
+            moved.append(Path.home())
+            continue
+        paths, tails = _target_paths(arg, dirs, cd_unknown=False)
+        moved.extend(paths)
+        lost = lost or bool(tails) or arg == "-" or arg.startswith("+")
+    return moved, lost
+
+
+_ANSI_C_ESCAPE_RE = re.compile(
+    r"\\(?:([abeEfnrtv\\'\"?])|([0-7]{1,3})|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})"
+    r"|U([0-9A-Fa-f]{1,8})|c(.))",
+    re.DOTALL,
+)
+_ANSI_C_CHARS = dict(zip("abeEfnrtv\\'\"?", "\a\b\x1b\x1b\f\n\r\t\v\\'\"?", strict=True))
+
+
+def _ansi_c(body: str) -> str:
+    """Decode the inside of a ``$'...'`` word with bash's escapes."""
+
+    def one(match: re.Match[str]) -> str:
+        char, octal, byte, short, long, ctrl = match.groups()
+        if char is not None:
+            return _ANSI_C_CHARS[char]
+        if ctrl is not None:
+            return chr(ord(ctrl) & 0x1F)
+        code = int(octal, 8) & 0xFF if octal else int(byte or short or long, 16)
+        return chr(code) if code <= sys.maxunicode else ""
+
+    return _ANSI_C_ESCAPE_RE.sub(one, body)
+
+
+def _heredoc_word(text: str, i: int) -> tuple[int, str, bool] | None:
+    """Read the heredoc delimiter at ``text[i]``: ``(end, delimiter, quoted)``.
+
+    ``None`` when there is none or guard can't be sure what bash makes of
+    it. Any quoting in the word means the body doesn't expand.
+    """
+    while i < len(text) and text[i] in " \t":
+        i += 1
+    start, quote = i, ""
+    while i < len(text) and (quote or text[i] not in _WORD_BREAKS):
+        i, quote = _step(text, i, quote)
+    word = text[start:i]
+    if quote or not word or "$" in word or "`" in word:
+        return None
+    try:
+        parts = shlex.split(word)
+    except ValueError:
+        return None
+    if len(parts) != 1:
+        return None
+    return i, parts[0], any(c in word for c in "'\"\\")
+
+
+@dataclass
+class _Heredoc:
+    body: str
+    quoted: bool  # a quoted delimiter: nothing in the body expands
+    line: str  # the line whose command reads it
+
+
+@dataclass
+class _Lexed:
+    """One level of a command, read the way bash reads it.
+
+    ``flat`` is the command with each substitution replaced by ``${}`` (a
+    word part guard can't know), heredoc bodies, comments and line
+    continuations cut, and each ``$'...'`` decoded into plain single quotes.
+    ``bodies`` are the substitutions' commands, ``end`` where a substitution
+    closes. ``unknown`` is set when guard can't be sure it read the command
+    as bash will: an unterminated quote, substitution or heredoc, a
+    delimiter it can't read, or nesting past ``_MAX_NESTING``.
+    """
+
+    flat: str = ""
+    bodies: list[str] = field(default_factory=list)
+    heredocs: list[_Heredoc] = field(default_factory=list)
+    end: int = 0
+    unknown: bool = False
+
+
+_MAX_NESTING = 8
+
+
+def _heredoc_bodies(text: str, i: int, pending: list[tuple[str, bool, bool]], lexed: _Lexed) -> int:
+    """Cut the bodies of ``pending`` heredocs from ``text[i]``; return where code resumes."""
+    line = text[text.rfind("\n", 0, i - 1) + 1 : i - 1]
+    for delimiter, strip_tabs, quoted in pending:
+        start = i
+        while i < len(text):
+            end = text.find("\n", i)
+            end = len(text) if end < 0 else end
+            candidate = text[i:end]
+            if (candidate.lstrip("\t") if strip_tabs else candidate) == delimiter:
+                lexed.heredocs.append(_Heredoc(text[start:i], quoted, line))
+                i = end + 1
+                break
+            i = end + 1
+        else:
+            lexed.heredocs.append(_Heredoc(text[start:], quoted, line))
+            lexed.unknown = True
+    return i
+
+
+def _substitution(text: str, i: int, level: int, lexed: _Lexed) -> int:
+    """Record the substitution opening at ``text[i]``; return the index of its close."""
+    if text[i] == "`":
+        start = i + 1
+        close = text.find("`", start)
+        close = len(text) if close < 0 else close
+    else:
+        start = i + 2
+        inner = _lex(text, start, level + 1)
+        close = inner.end
+        lexed.unknown = lexed.unknown or inner.unknown
+    lexed.bodies.append(text[start:close])
+    lexed.unknown = lexed.unknown or close >= len(text)
+    return close
+
+
+def _heredoc_op(
+    text: str, i: int, pending: list[tuple[str, bool, bool]], lexed: _Lexed
+) -> tuple[int, str]:
+    """Record the heredoc at ``text[i]`` in ``pending``; return the index past its delimiter.
+
+    A here-string (``<<<``) is not a heredoc.
+    """
+    if text.startswith("<<<", i):
+        return i + 3, "<<<"
+    strip_tabs = text.startswith("<<-", i)
+    word = _heredoc_word(text, i + 2 + strip_tabs)
+    if word is None:
+        lexed.unknown = True
+        end = i + 2 + strip_tabs
+    else:
+        pending.append((word[1], strip_tabs, word[2]))
+        end = word[0]
+    return end, text[i:end]
+
+
+def _unquoted_cut(
+    text: str, i: int, pending: list[tuple[str, bool, bool]], lexed: _Lexed
+) -> tuple[int, str] | None:
+    """Return ``(resume, replacement)`` when unquoted ``text[i]`` starts text to rewrite.
+
+    A comment goes, ``$'...'`` becomes plain quotes, a heredoc operator is
+    recorded in ``pending``, and the newline after it drops the bodies.
+    """
+    if _starts_comment(text, i):
+        end = text.find("\n", i)
+        return (len(text) if end < 0 else end), ""
+    if text.startswith("$'", i):
+        j, quote = i + 2, "$'"
+        while j < len(text) and quote:
+            j, quote = _step(text, j, quote)
+        if quote:
+            lexed.unknown = True
+            return len(text), text[i:]
+        return j, "'" + _ansi_c(text[i + 2 : j - 1]).replace("'", "'\\''") + "'"
+    if text.startswith("<<", i):
+        return _heredoc_op(text, i, pending, lexed)
+    if text[i] == "\n" and pending:
+        resume = _heredoc_bodies(text, i + 1, pending, lexed)
+        pending.clear()
+        return resume, "\n"
+    return None
+
+
+def _lex(text: str, start: int = 0, level: int = 0) -> _Lexed:
+    """Read ``text`` from ``start``; past level 0, up to the ``)`` closing a substitution.
+
+    Single quotes hide ``$(...)`` and backticks; double quotes don't, but
+    they do hide ``<(...)`` and ``>(...)``. A heredoc body
+    starts after its operator's line, as in bash.
+    """
+    lexed = _Lexed(end=len(text))
+    if level > _MAX_NESTING:
+        lexed.flat, lexed.unknown = text[start:], True
+        return lexed
+    out: list[str] = []
+    pending: list[tuple[str, bool, bool]] = []
+    quote = ""
+    depth = 1
+    i = seg = start
+    while i < len(text):
+        ch = text[i]
+        cut: tuple[int, str] | None = None
+        if (quote in {"", '"'} and (ch == "`" or text.startswith("$(", i))) or (
+            not quote and text.startswith(("<(", ">("), i)
+        ):
+            cut = (_substitution(text, i, level, lexed) + 1, "${}")
+        elif quote in {"", '"'} and text.startswith("\\\n", i):
+            cut = (i + 2, "")
+        elif not quote:
+            cut = _unquoted_cut(text, i, pending, lexed)
+            if cut is None and level and ch in "()":
+                depth += 1 if ch == "(" else -1
+                if depth == 0:
+                    out.append(text[seg:i])
+                    lexed.flat, lexed.end = "".join(out), i
+                    return lexed
+        if cut is None:
+            i, quote = _step(text, i, quote)
+        else:
+            out.extend((text[seg:i], cut[1]))
+            i = seg = cut[0]
+    out.append(text[seg:])
+    lexed.flat = "".join(out)
+    lexed.unknown = lexed.unknown or bool(quote) or bool(pending) or level > 0
+    return lexed
+
+
+def _shell_payloads(tokens: list[str]) -> list[str]:
+    """Return the command strings ``tokens`` hand to a shell (``bash -c '...'``, ``eval``)."""
+    payloads: list[str] = []
+    for i, tok in enumerate(tokens):
+        head = tok.rsplit("/", 1)[-1]
+        rest = tokens[i + 1 :]
+        if head == "eval":
+            payloads.append(" ".join(rest))
+            continue
+        if head not in _SHELLS:
+            continue
+        flag = next((j for j, t in enumerate(rest) if _short_flag_has(t, "c")), None)
+        if flag is not None:
+            payloads.extend(itertools.islice((t for t in rest[flag + 1 :] if t[:1] != "-"), 1))
+    return payloads
+
+
+def _head_indices(tokens: list[str]) -> list[int]:
+    """Return the indexes of words in command position (``rm`` in ``sudo -n rm x``)."""
+    heads: list[int] = []
+    i = 0
+    while i < len(tokens):
+        if tokens[i] in _LEAD_WORDS or _ASSIGN_RE.match(tokens[i]):
+            i += 1
+            continue
+        heads.append(i)
+        takes_value = _PREFIX_WORDS.get(tokens[i].rsplit("/", 1)[-1])
+        if takes_value is None:
+            break
+        i += 1
+        while i < len(tokens) and (tokens[i].startswith("-") or tokens[i][:1].isdigit()):
+            i += 2 if tokens[i] in takes_value else 1
+    return heads
+
+
+def _dest_and_sources(rest: list[str]) -> tuple[str | None, list[str]]:
+    """Return the destination and sources of a ``cp``/``mv``/``install``."""
+    for j, tok in enumerate(rest):
+        if tok in {"-t", "--target-directory"} and j + 1 < len(rest):
+            others = rest[:j] + rest[j + 2 :]
+            return rest[j + 1], [t for t in others if not t.startswith("-")]
+        if tok.startswith("--target-directory="):
+            return tok.partition("=")[2], [t for t in rest if not t.startswith("-")]
+    operands = [t for t in rest if not t.startswith("-")]
+    if len(operands) < _CP_MV_INSTALL_MIN_OPERANDS:
+        return None, []
+    return operands[-1], operands[:-1]
+
+
+def _copy_into_targets(tokens: list[str]) -> list[str]:
+    """Return where a ``cp``/``mv``/``install`` lands if its destination is a directory.
+
+    ``cp a b dir/`` writes ``dir/a`` and ``dir/b``; ``cp -r x/guard src/``
+    writes ``src/guard``.
+    """
+    out: list[str] = []
+    for i in _head_indices(tokens):
+        if tokens[i].rsplit("/", 1)[-1] in {"cp", "mv", "install"}:
+            dest, sources = _dest_and_sources(tokens[i + 1 :])
+            base = (dest or "").rstrip("/") or "/"
+            out.extend(f"{base}/{PurePosixPath(s.rstrip('/')).name}" for s in sources)
+    return out
+
+
+def _tree_targets(tokens: list[str]) -> list[str]:
+    """Return paths a command removes, moves away, or hard-links.
+
+    These count when they are in the live tree or hold it: ``rm -r`` or
+    ``mv`` of a directory above it removes it, and a hard link shares a live
+    file's inode.
+    """
+    out: list[str] = []
+    for i in _head_indices(tokens):
+        head = tokens[i].rsplit("/", 1)[-1]
+        rest = tokens[i + 1 :]
+        operands = [t for t in rest if not t.startswith("-")]
+        flags = [t for t in rest if t.startswith("-")]
+        symbolic = any(t == "--symbolic" or _short_flag_has(t, "s") for t in flags)
+        hard_copy = any(t == "--link" or _short_flag_has(t, "l") for t in flags)
+        if head in _REMOVERS or (head == "ln" and not symbolic) or (head == "cp" and hard_copy):
+            out.extend(operands)
+    return out
+
+
+def _tar_extract_dirs(tokens: list[str]) -> list[str]:
+    return [
+        found
+        for i, tok in enumerate(tokens)
+        if tok.rsplit("/", 1)[-1] == "tar" and (found := _tar_extract_dir(tokens[i + 1 :]))
+    ]
+
+
+@dataclass
+class _Scan:
+    """What a bash scan knows so far.
+
+    ``dirs`` are the directories the command may be in: where it started,
+    plus every directory a literal ``cd`` or ``pushd`` can move it to.
+    ``cd_unknown`` is set once a ``cd`` goes somewhere guard can't follow.
+    """
+
+    patterns: Sequence[str]
+    dirs: list[Path]
+    cd_unknown: bool = False
+    depth: int = 0
+
+    def nested(self) -> _Scan:
+        """Return the scan for a command this one hands to a shell."""
+        return _Scan(self.patterns, [*self.dirs], self.cd_unknown, self.depth + 1)
+
+
+def _target_match(target: str, scan: _Scan, kind: str) -> str | None:
+    """Match one target: ``kind`` is ``file``, ``dir`` (tar -C) or ``tree``."""
+    paths, tails = _target_paths(target, scan.dirs, cd_unknown=scan.cd_unknown)
+    for path in paths:
+        if kind == "file":
+            matched = is_protected(str(path), scan.patterns)
+        elif kind == "dir":
+            matched = is_protected_parent_dir(str(path), scan.patterns)
+        else:
+            resolved = _resolve(path)
+            matched = None if resolved is None else _live_entry(resolved, ancestors=True)
         if matched is not None:
             return matched
-    try:
-        commands = _split_commands(command)
-    except ValueError:
-        commands = []
-    for tokens in commands:
-        if _guard_cli_writes_allowlist(tokens):
-            return _GUARD_ALLOWLIST_FILE
-        # Tar extract-dir is a directory write target: an extraction anywhere
-        # on a protected file's directory chain could overwrite it.
-        for i, tok in enumerate(tokens):
-            if tok.rsplit("/", 1)[-1] != "tar":
-                continue
-            extract_dir = _tar_extract_dir(tokens[i + 1 :])
-            matched = is_protected_parent_dir(extract_dir or "", patterns)
-            if matched is not None:
-                return matched
+    for tail in tails:
+        matched = _tail_match(tail, scan.patterns, live_only=kind != "file")
+        if matched is not None:
+            return matched
     return None
+
+
+def _segment_targets(segment: str, tokens: list[str], scan: _Scan) -> Iterator[tuple[str, str]]:
+    for target in _regex_write_targets(segment):
+        yield target, "file"
+    for target in _command_write_targets(tokens, segment, scan.patterns, scan.dirs):
+        yield target, "file"
+    # An extraction anywhere on a protected file's directory chain could
+    # overwrite it.
+    for target in _tar_extract_dirs(tokens):
+        yield target, "dir"
+    args = _split_redirects(tokens)[0]
+    copied_into = _copy_into_targets(args)
+    for target in copied_into:
+        yield target, "file"
+    # Removing, moving or copying over a directory that holds the live tree
+    # reaches it too.
+    if _has_live(scan.patterns):
+        for target in (*_tree_targets(args), *copied_into):
+            yield target, "tree"
+
+
+def _segment_match(segment: str, tokens: list[str], scan: _Scan) -> str | None:
+    """Return the first protected pattern one command writes, else ``None``."""
+    if _guard_cli_writes_allowlist(tokens):
+        return _GUARD_ALLOWLIST_FILE
+    for target, kind in _segment_targets(segment, tokens, scan):
+        matched = _target_match(target, scan, kind)
+        if matched is not None:
+            return matched
+    for payload in _shell_payloads(tokens):
+        matched = _scan_command(payload, scan.nested())
+        if matched is not None:
+            return matched
+    return None
+
+
+# Readers whose heredoc is commands, and those whose heredoc is a program.
+_SHELL_READER_RE = re.compile(r"(?<![\w.-])(?:bash|zsh|dash|ksh|sh|su|ssh|source)(?![\w.-])")
+_PROGRAM_READER_RE = re.compile(
+    r"(?<![\w.-])(?:python[\d.]*|node(?:js)?|deno|bun|perl|ruby|php|osascript)(?![\w.-])"
+)
+
+
+def _expanded_substitutions(body: str) -> list[str]:
+    """Return the commands an unquoted heredoc body runs.
+
+    Quotes are plain text in a heredoc body, so only a backslash hides a
+    ``$(`` or backtick.
+    """
+    found: list[str] = []
+    i = 0
+    while i < len(body):
+        if body[i] == "\\":
+            i += 2
+        elif body.startswith("$(", i):
+            end = _lex(body, i + 2, 1).end
+            found.append(body[i + 2 : end])
+            i = end + 1
+        elif body[i] == "`":
+            end = body.find("`", i + 1)
+            end = len(body) if end < 0 else end
+            found.append(body[i + 1 : end])
+            i = end + 1
+        else:
+            i += 1
+    return found
+
+
+def _heredoc_match(heredoc: _Heredoc, scan: _Scan) -> str | None:
+    """Match a heredoc by what reads it.
+
+    A shell runs it as commands, an interpreter as a program; anything else
+    reads data, where only an unquoted body's substitutions run.
+    """
+    if _SHELL_READER_RE.search(heredoc.line):
+        return _scan_command(heredoc.body, scan.nested())
+    if _PROGRAM_READER_RE.search(heredoc.line):
+        targets = _eval_body_targets(heredoc.body, scan.patterns, scan.dirs)
+        return next((m for t in targets if (m := _target_match(t, scan, "file"))), None)
+    if heredoc.quoted:
+        return None
+    for inner in _expanded_substitutions(heredoc.body):
+        matched = _scan_command(inner, scan.nested())
+        if matched is not None:
+            return matched
+    return None
+
+
+def _loose_tokens(segment: str) -> list[str]:
+    """Words of a segment ``shlex`` can't split, quotes dropped."""
+    return [w for w in (_unbracket(x.strip("'\"")) for x in segment.split()) if w]
+
+
+def _scan_segments(flat: str, scan: _Scan) -> str | None:
+    for segment in _split_segments(flat):
+        try:
+            tokens = _tokens(segment)
+        except ValueError:
+            tokens = _loose_tokens(segment)
+        moved, lost = _cd_moves(tokens, scan.dirs)
+        scan.dirs.extend(moved)
+        scan.cd_unknown = scan.cd_unknown or lost
+        matched = _segment_match(segment, tokens, scan)
+        if matched is not None:
+            return matched
+    return None
+
+
+def _scan_command(command: str, scan: _Scan) -> str | None:
+    """Return the first protected pattern ``command`` writes, else ``None``.
+
+    Commands handed to another shell (``bash -c``, ``eval``, ``$(...)``,
+    backticks, a heredoc a shell reads) are scanned the same way, from every
+    directory the outer command can reach. When guard can't be sure it read
+    the command as bash will (``_Lexed.unknown``), or past
+    ``_MAX_PAYLOAD_DEPTH`` levels, any trust-root path the text names denies.
+    """
+    if scan.depth > _MAX_PAYLOAD_DEPTH:
+        return _text_match(command, scan.patterns, scan.dirs)
+    lexed = _lex(command)
+    if lexed.unknown:
+        matched = _text_match(command, scan.patterns, scan.dirs) or _text_match(
+            lexed.flat, scan.patterns, scan.dirs
+        )
+        if matched is not None:
+            return matched
+    matched = _scan_segments(lexed.flat, scan)
+    if matched is not None:
+        return matched
+    for body in lexed.bodies:
+        matched = _scan_command(body, scan.nested())
+        if matched is not None:
+            return matched
+    return next(
+        (m for heredoc in lexed.heredocs if (m := _heredoc_match(heredoc, scan)) is not None),
+        None,
+    )
+
+
+def _bash_first_protected_match(
+    command: str, patterns: Sequence[str], dirs: Sequence[Path] = ()
+) -> str | None:
+    """Return the first protected pattern a bash command writes, else ``None``.
+
+    ``dirs`` are the directories the command may start in (the working
+    directory by default).
+    """
+    return _scan_command(command, _Scan(patterns, [*dirs] or [Path.cwd()]))
 
 
 _FILE_PATH_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 
 
 def _match_for_tool(
-    tool_name: str, tool_input: dict[str, Any], patterns: Sequence[str]
+    tool_name: str, tool_input: dict[str, Any], patterns: Sequence[str], cwd: object = None
 ) -> tuple[str | None, str]:
     """Return ``(matched_pattern, excerpt)`` for the given Claude Code tool payload.
 
-    Pure: no I/O, no allowlist consultation. ``matched_pattern`` is ``None``
-    when nothing protected is written; ``excerpt`` is the human-readable
-    string used in audit-log records.
+    Pure: no allowlist consultation. ``matched_pattern`` is ``None`` when
+    nothing protected is written; ``excerpt`` is the human-readable string
+    used in audit-log records.
 
     * ``Write`` / ``Edit`` / ``MultiEdit`` / ``NotebookEdit``: run
       ``is_protected`` on the ``file_path`` (or ``notebook_path``).
-    * ``Bash``: extract write targets from the command.
+    * ``Bash``: extract write targets from the command. Relative ones
+      resolve against the hook's directory and the payload's ``cwd``.
     * Everything else (``Read``, ``Grep``, ``Agent``, ``AskUserQuestion``,
       ...) never writes a file itself, so naming a protected path is fine.
     """
@@ -907,7 +1904,10 @@ def _match_for_tool(
     if tool_name == "Bash":
         command = tool_input.get("command", "")
         command = command if isinstance(command, str) else ""
-        return _bash_first_protected_match(command, patterns), command
+        dirs = [Path.cwd()]
+        if isinstance(cwd, str) and cwd.startswith("/"):
+            dirs.append(Path(cwd))
+        return _bash_first_protected_match(command, patterns, dirs), command
     return None, ""
 
 
@@ -925,8 +1925,8 @@ def deny_reason(matched: str) -> str:
         )
     if matched in PROTECTED_PATTERNS:
         return (
-            f"Protected file: {matched}. guard blocks agent edits to the code it is "
-            "running from and to the subagent scope file, so a session can't rewrite "
+            f"Protected path: {matched}. guard blocks agent writes to the install it "
+            "is running from and to the subagent scope file, so a session can't rewrite "
             f"its own guardrails. {_TELL_THE_USER}; they can make the edit."
         )
     if matched in LOCKDOWN_PATTERNS:
@@ -965,7 +1965,7 @@ def hook(payload: dict[str, Any]) -> None:
     if not isinstance(tool_name, str) or not isinstance(tool_input, dict):
         return
     patterns = _effective_patterns(mode=load_allowlist().mode)
-    matched, excerpt = _match_for_tool(tool_name, tool_input, patterns)
+    matched, excerpt = _match_for_tool(tool_name, tool_input, patterns, payload.get("cwd"))
     if matched is None:
         return
     apply_decision(

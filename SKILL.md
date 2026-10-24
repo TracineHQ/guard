@@ -107,7 +107,7 @@ Grep the log for that reason.
    ```
    One pattern per line; `#` starts a comment to end of line; blank lines OK.
 
-If the file exists, it is the source of truth — the env var is ignored. If the file is absent, the env var is read. Pattern syntax matches the built-in list — segment match for directory names (last segment with no `.`), suffix match for files. No new grammar.
+Both apply: the file's patterns and the env var's add up, so a repo's file can't drop yours. Pattern syntax matches the built-in list — segment match for directory names (last segment with no `.`), suffix match for files. No new grammar.
 
 The patterns resolve at hook-call time, so live edits take effect on the next tool call without restarting Claude Code.
 
@@ -125,7 +125,7 @@ One per-user file, `~/.claude/guard/allowlist.json` (`GUARD_DATA_DIR` moves it),
 - `mode`: see [Modes](#modes).
 - `disable_rules`: rule ids that never deny. `guard allowlist rules` lists them. The bash hook uses ids like `bash.disk_destruction`; other hooks use the hook id itself (`guard.protected_files`, `guard.commit_message_validator`, etc.).
 
-There is no per-command exemption and no per-repo file. A rule that blocks legitimate work is a bug in the rule: fix the rule, or report it, instead of exempting the command.
+There is no per-command exemption, and a repo can't change `mode` or `disable_rules`. A rule that blocks legitimate work is a bug in the rule: fix the rule, or report it, instead of exempting the command.
 
 ### Retired keys
 

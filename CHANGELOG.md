@@ -73,13 +73,23 @@ adheres to [Semantic Versioning](https://semver.org/).
   denied whatever its arguments (`wget -qO- x | python3 tool.py`).
   `| python3 -m json.tool`, `| jq` and a literal `-c` / `-e` program with no
   code sink (`| python3 -c 'import json,sys; ...'`) only parse it and pass.
-- `protected_files` keys guard's own code (the hooks, `registry.py`,
-  `_utils.py`) on the real path of the install that is running, not on any
-  path ending in `guard/hooks/<name>.py`. A clone or worktree of guard's
-  source is ordinary code an agent may edit; the live install stays
-  protected in every mode. The legacy hook-script patterns match only under
-  `.claude/hooks/`. An interpreter `-c` body that names `guard/<file>.py`
-  with write intent still denies, since its path can't be resolved.
+- `protected_files` protects the install that is running, found by its real
+  path, not any path ending in `guard/hooks/<name>.py`: everything under its
+  `src/`, `bin/run-hook` and `hooks/hooks.json` for a source checkout, the
+  package directory for a wheel. A clone or worktree of guard's source is
+  ordinary code an agent may edit; the live install stays protected in every
+  mode. It matches the file, not the spelling: `~`, `$HOME`, `cd`, `pushd`
+  and `git -C` are resolved, a hard link or a spelling the volume folds is
+  the same file, and removing, moving, hard-linking or copying into a
+  directory that holds the install counts. The legacy hook-script patterns
+  match only under `.claude/hooks/`.
+- `protected_files` reads Bash the way bash does: comments, `$'...'`, line
+  continuations, heredocs (a shell or interpreter reading one runs it; for
+  anything else it is data), and `find -exec` with a read-only program. A
+  command it can't read for sure (an unterminated quote, substitution or
+  heredoc) denies when it names a protected path.
+- `GUARD_PROTECTED_EXTRA` and `.claude/guard-protected.txt` add up; a repo's
+  file no longer replaces your environment variable.
 - Deny reasons offer `guard allowlist disable-rule <rule_id>` as the only
   override. The protected-files deny for guard's code offers none.
 
@@ -100,9 +110,11 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
-- A repo can't loosen guard. Guard reads no config from the working
-  directory, so a cloned repo's `.claude/guard/allowlist.json` with
-  `"mode": "off"` or disabled rules does nothing.
+- A repo can't loosen guard. Guard reads no mode or `disable_rules` from the
+  working directory, so a cloned repo's `.claude/guard/allowlist.json` with
+  `"mode": "off"` or disabled rules does nothing. What it does read there
+  only adds limits: `.claude/guard-protected.txt` and
+  `.claude/subagent-scope.json`.
 
 ### Fixed
 

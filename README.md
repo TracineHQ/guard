@@ -113,7 +113,7 @@ are still checked against the floor. The FLOOR / STEER list is in
 | `GUARD_STRICT_DENY_QUEUE_PATH` | Override the strict-deny queue path |
 | `GUARD_DEBUG` | Emit per-hook debug to stderr |
 | `GUARD_DATA_DIR` | Override guard's data directory |
-| `GUARD_PROTECTED_EXTRA` | Comma-separated extra protected glob patterns (fallback when `.claude/guard-protected.txt`, rooted at cwd, is absent) |
+| `GUARD_PROTECTED_EXTRA` | Comma-separated extra protected glob patterns, added to any in `.claude/guard-protected.txt` (rooted at cwd) |
 | `GUARD_ADMIN_ALLOW_VERBS` | Per-verb allow for `bash.admin_default_deny`; format `<cli>:<verb.path>,<cli>:<verb.path>` (e.g. `aws:ec2.run-instances,gcloud:functions.deploy`) |
 
 **Turning a rule off:** `guard allowlist disable-rule <rule_id>` mutes one
@@ -122,7 +122,8 @@ exemption. A false positive is a bug in the rule:
 [report it](https://github.com/TracineHQ/guard/issues/new?template=false-positive.yml).
 
 **Working on guard itself:** protected_files guards the copy of guard that's
-running (by real path), not every file named `guard/hooks/*.py`. Edit a clone
+running, found by real path: its whole `src/`, `bin/run-hook` and
+`hooks/hooks.json` (the package directory for a wheel install). Edit a clone
 or worktree freely; the live install stays off limits.
 
 **Catalog model (AWS):** the admin matcher uses an explicit `(service, verb)` allowlist for `aws`. Verbs not in the catalog deny by default. To rescue a long-tail verb without a code change, set `GUARD_ADMIN_ALLOW_VERBS="aws:<service>.<verb>"` (see [SECURITY.md](SECURITY.md) for the decision tree and the list of deliberately-excluded verbs).

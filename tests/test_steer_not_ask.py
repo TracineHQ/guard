@@ -174,17 +174,17 @@ def test_extended_list_is_lockdown_only(tmp_path: Path, rel: str) -> None:
 
 
 def test_interpreter_read_of_protected_path_passes() -> None:
-    cmd = "python3 -c \"print(open('src/guard/_utils.py').read())\""
+    cmd = f"python3 -c \"print(open('{LIVE_GUARD}/_utils.py').read())\""
     assert protected_files.decide("Bash", {"command": cmd}) is None
 
 
 @pytest.mark.parametrize(
     "cmd",
     [
-        "python3 -c \"open('src/guard/_utils.py','w').write('')\"",
-        "python3 -c \"import pathlib; pathlib.Path('src/guard/registry.py').write_text('')\"",
-        "node -e \"require('fs').writeFileSync('src/guard/_utils.py','')\"",
-        "ruby -e \"File.write('src/guard/_utils.py','')\"",
+        f"python3 -c \"open('{LIVE_GUARD}/_utils.py','w').write('')\"",
+        f"python3 -c \"import pathlib; pathlib.Path('{LIVE_GUARD}/registry.py').write_text('')\"",
+        f"node -e \"require('fs').writeFileSync('{LIVE_GUARD}/_utils.py','')\"",
+        f"ruby -e \"File.write('{LIVE_GUARD}/_utils.py','')\"",
     ],
 )
 def test_interpreter_write_to_protected_path_denies(cmd: str) -> None:
@@ -425,7 +425,11 @@ def test_guard_mode_accepts_lockdown(tmp_path: Path, monkeypatch: pytest.MonkeyP
         "perl -pi -e 's/a/b/' notes.txt | head src/guard/_utils.py",
     ],
 )
-def test_inplace_editor_operands_stop_at_control_operators(cmd: str) -> None:
+def test_inplace_editor_operands_stop_at_control_operators(
+    cmd: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Run from outside guard's checkout: there ``src/`` is the live install.
+    monkeypatch.chdir(tmp_path)
     assert protected_files.decide("Bash", {"command": cmd}) is None
 
 

@@ -60,12 +60,21 @@ The validators are written with that in mind:
   an explicit `(service, verb)` catalog for `aws` (see
   [AWS allow/deny policy](#aws-allowdeny-policy) below). Override paths:
   `disable_rules`, `GUARD_ADMIN_ALLOW_VERBS=<cli>:<verb.path>`.
-- A repo is attacker-influenceable too, so guard reads no config from it:
-  mode and `disable_rules` live only in `~/.claude/guard/allowlist.json`.
-  A per-repo `.claude/guard/allowlist.json` is ignored, whatever it holds.
-- protected_files keys guard's own policy code on the real path of the
-  install that is running, so the copy that enforces policy can't be
-  edited by the agent it polices; other copies of the source can.
+- A repo is attacker-influenceable too, so it can't loosen guard: mode and
+  `disable_rules` live only in `~/.claude/guard/allowlist.json`, and a
+  per-repo `.claude/guard/allowlist.json` is ignored, whatever it holds. The
+  files guard does read from the working directory only add limits:
+  `.claude/guard-protected.txt` adds protected paths to your
+  `GUARD_PROTECTED_EXTRA`, and `.claude/subagent-scope.json` narrows where
+  subagents write.
+- protected_files protects the install that is running, found by its real
+  path: everything under its `src/` (a module dropped there would shadow an
+  import), `bin/run-hook` and `hooks/hooks.json` for a source checkout, the
+  package directory for a wheel. It matches the file, not the spelling:
+  `~`, `$HOME`, `cd` and `git -C` are resolved, a hard link or a spelling
+  the volume folds is the same inode, and removing, moving, hard-linking or
+  copying into a directory that holds the install counts. A clone or
+  worktree of the source is ordinary code.
 
 ## AWS allow/deny policy
 
@@ -301,9 +310,12 @@ known and explicitly deferred:
   hides the credential path behind an fd. Bind-mounts have the same shape.
 - **Archive reverse-form.** `tar c -C ~/.aws .` may not surface the
   credential path as a token in the argv.
-- **A hardlink to guard's live code isn't the live path.** protected_files
-  compares real paths, so an edit through a hardlink to a running hook file
-  is not flagged. Creating the link is the step to watch.
+- **Writes guard can't see.** protected_files reads the command, not what
+  it does at run time. A script file or a program on stdin that builds a
+  path into guard's install, paths fed to `xargs` from a pipe or heredoc,
+  `rsync` and `unzip` into it, and git commands run inside the live checkout
+  (`checkout`, `reset`, `stash`) are not flagged. Work on guard in a clone
+  or worktree, and keep the live checkout for `git pull --ff-only`.
 - **Laundering after an allowed copy.** Once the user runs
   `cp creds /tmp/x`, subsequent reads of `/tmp/x` are unguarded. The
   destination is not a credential path. This is inherent to path matching,
