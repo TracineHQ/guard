@@ -229,6 +229,21 @@ def test_disabled_rule_passes_and_logs_why() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("command", "rule_id"),
+    [
+        ("rm -rf /", "bash.dangerous_rm"),
+        ("bash -c 'rm -rf /'", "bash.dangerous_rm"),
+        ("git push --force origin main", "bash.git_force_push"),
+    ],
+)
+def test_disabled_rule_is_skipped_and_the_scan_continues(command: str, rule_id: str) -> None:
+    """Turning off the first rule a command meets leaves every later rule in force."""
+    _write_global_allowlist({"disable_rules": ["bash.always_deny"]})
+    reason = _reason(bcv.decide(command))
+    assert f"denied: {rule_id}." in reason
+
+
 def test_disabled_rule_does_not_hide_another_floor_rule() -> None:
     _write_global_allowlist({"disable_rules": ["bash.host_control"]})
     envelope = bcv.decide("reboot; rm -rf ~")

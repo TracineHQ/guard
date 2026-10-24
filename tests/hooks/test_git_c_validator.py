@@ -116,6 +116,7 @@ class TestReadExec:
         [
             "git -C /repo log --output=/tmp/x",
             "git -C /repo grep --open-files-in-pager=vim foo",
+            "git -C /repo stash show --output=/tmp/x",
         ],
     )
     def test_read_verb_coerced_to_exec_denies(self, command):
