@@ -22,7 +22,13 @@ adheres to [Semantic Versioning](https://semver.org/).
   still denies is in `docs/dangerous-commands.md`; where it is headed is in
   `docs/rules-design.md`. The trade-off: a destructive command hidden behind
   a variable or glob command name (`R=rm; $R -rf ~`) is left to the
-  classifier.
+  classifier. On real session commands guard decides as the old `auto` mode
+  did. One known difference: a command whose output runs as code through a
+  substitution was denied when it matched a removed rule, and now passes when
+  only that rule matched (`$(npx vitest run)`,
+  `$(echo bash -c 'rm${IFS}-rf${IFS}$HOME')`,
+  `$(git stash show & git -c core.pager=!sh log)`). The same payload run bare
+  passed already.
 - A rule turned off with `guard allowlist disable-rule` is skipped and the
   scan goes on, so any other rule the command meets still denies: with
   `bash.always_deny` off, `rm -rf /` still denies as `bash.dangerous_rm`.
