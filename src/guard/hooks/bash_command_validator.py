@@ -2877,32 +2877,45 @@ def _space_glued_redirects(segment: str) -> str:
     if "<" not in segment and ">" not in segment:
         return segment
     out: list[str] = []
+    in_word = False  # the text written so far ends in a run of non-blank characters
+    all_digits = False  # ... and that run is only digits
     quote = ""
     depth = 0
     i = 0
+
+    def emit(text: str) -> None:
+        nonlocal in_word, all_digits
+        out.append(text)
+        for ch in text:
+            if ch.isspace():
+                in_word = all_digits = False
+            else:
+                all_digits = ch.isdigit() and (all_digits or not in_word)
+                in_word = True
+
     while i < len(segment):
         c = segment[i]
         if quote:
             if c == "\\" and quote != "'":
-                out.append(segment[i : i + 2])
+                emit(segment[i : i + 2])
                 i += 2
                 continue
             if c == _GLUED_QUOTE_END[quote]:
                 quote = ""
         elif c == "\\":
-            out.append(segment[i : i + 2])
+            emit(segment[i : i + 2])
             i += 2
             continue
         elif c in "'\"`":
             quote = c
         elif segment.startswith(("$'", "${"), i):
             quote = segment[i : i + 2]
-            out.append(quote)
+            emit(quote)
             i += 2
             continue
         elif segment.startswith(("$(", "<(", ">("), i):
             depth += 1
-            out.append(segment[i : i + 2])
+            emit(segment[i : i + 2])
             i += 2
             continue
         elif depth and c in "()":
@@ -2910,13 +2923,12 @@ def _space_glued_redirects(segment: str) -> str:
         elif c in "<>&" and not depth:
             op = _GLUED_REDIRECT_OP_RE.match(segment, i)
             if op:
-                word = re.search(r"\S+$", "".join(out))
-                if word and not word.group().isdigit():
-                    out.append(" ")
-                out.append(op.group())
+                if in_word and not all_digits:
+                    emit(" ")
+                emit(op.group())
                 i = op.end()
                 continue
-        out.append(c)
+        emit(c)
         i += 1
     return "".join(out)
 

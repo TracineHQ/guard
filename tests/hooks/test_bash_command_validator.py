@@ -891,6 +891,10 @@ class TestGluedRedirects:
     def test_quoted_and_nested_text_is_left_alone(self, command):
         assert _space_glued_redirects(command) == command
 
+    def test_a_long_run_of_operators_is_split_in_one_pass(self):
+        # Re-reading the text written so far at every operator took minutes at this size.
+        assert _space_glued_redirects("x " + "a>" * 50_000) == "x a" + " >a" * 49_999 + " >"
+
     def test_candidate_forms_split_a_raw_segment_only(self):
         assert _candidate_forms("rm -rf ~>/dev/null")[0] == "rm -rf ~ >/dev/null"
         assert _candidate_forms("rm -rf '~>x'")[0] == "rm -rf ~>x"
