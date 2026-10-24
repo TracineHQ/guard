@@ -113,7 +113,7 @@ adheres to [Semantic Versioning](https://semver.org/).
   bash does. `echo 'a<newline>b' ; rm -rf / # x` passed in every mode before,
   as did the same command after a `<<'END-X'` heredoc whose body has an
   apostrophe.
-- `watch`, `script` and `parallel` run their command through a shell, and
+- `watch`, `parallel` and `script -c` run their command through a shell, and
   that command is now split like a `bash -c` string. A second command in it
   (`watch -n1 'echo a; rm -rf /'`) passed before. The command is also found
   behind the values `watch` (`-n 1`, `--interval 2`, `-q 3`) and `parallel`
@@ -124,13 +124,15 @@ adheres to [Semantic Versioning](https://semver.org/).
   its dirname, `{/}` its basename, `{.}` and `{/.}` the name without its
   extension. `parallel ::: 'rm -rf /'` runs its arguments as the commands
   they are. `script` is read through a clustered `-qc`, a leading `-c`,
-  `--command <cmd>` or `--command=<cmd>`, and, as on macOS where it has no
-  `-c`, as the words after its output file (`script -q /dev/null make test`).
+  `--command <cmd>` or `--command=<cmd>`. macOS `script` has no `-c` and runs
+  the words after its output file directly, so they are read as the command,
+  after the options `-t` (which takes a value) and `-F` (which does not)
+  (`script -q /dev/null make test`).
   `watch -n 1 'rm -rf /'`, `parallel -j 2 'rm -rf {}' ::: /`,
   `parallel 'rm -rf {//}' ::: ./build`,
   `parallel -j 2 'echo a ; rm -rf {} # x' ::: /`,
-  `script --command 'rm -rf /' /dev/null` and `script -q /dev/null rm -rf /`
-  passed before.
+  `script --command 'rm -rf /' /dev/null`, `script -q /dev/null rm -rf /` and
+  `script -F /dev/null rm -rf /` passed before.
 
 ### Fixed
 

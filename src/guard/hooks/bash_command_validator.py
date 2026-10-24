@@ -2202,21 +2202,19 @@ def _strip_parallel(tokens: list[str]) -> str | None:
     return " ; ".join(commands) or None
 
 
-# BSD/macOS ``script`` options that take the next word (``-F pipe``, ``-t time``).
-_SCRIPT_BSD_VALUE_FLAGS = frozenset({"-F", "-t"})
 # A word with one of these needs its quotes back when words are joined into a command.
 _SHELL_META_RE = re.compile(r"[\s;&|<>()$`\\'\"]")
 
 
 def _bsd_script_command(tokens: list[str]) -> str | None:
-    """The command in BSD/macOS ``script [-aeFkqrt] [file [command ...]]``, which has no ``-c``."""
+    """The command in BSD/macOS ``script [-aeFkqr] [-t time] [file [command ...]]``, which has no ``-c``.
+
+    ``-t`` is the only option with a value, and a cluster takes one only when
+    it ends in ``t`` (``-qt 0``); ``-F`` just flushes output.
+    """
     i = 1
     while i < len(tokens) and tokens[i].startswith("-") and tokens[i] != "-":
-        flag = tokens[i]
-        takes_value = flag in _SCRIPT_BSD_VALUE_FLAGS or (
-            not flag.startswith("--") and len(flag) > len("-F") and flag[-1] in "Ft"
-        )
-        i += 2 if takes_value else 1
+        i += 2 if not tokens[i].startswith("--") and tokens[i].endswith("t") else 1
     command = tokens[i + 1 :]  # tokens[i] is the output file
     if not command or command[0].startswith("-"):
         return None

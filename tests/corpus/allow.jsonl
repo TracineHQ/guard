@@ -144,5 +144,7 @@
 {"command": "parallel 'mkdir -p out/{//}' ::: a/b/c.txt", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: {//} is the dirname"}
 {"command": "script -q /dev/null make test", "expected": "allow", "mode": "default", "source": "curated", "note": "BSD script around a harmless command"}
 {"command": "script -q /dev/null make test", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: BSD script around a harmless command"}
+{"command": "script -F /dev/null make test", "expected": "allow", "mode": "default", "source": "curated", "note": "BSD script -F around a harmless command"}
+{"command": "script -F /dev/null make test", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: BSD script -F around a harmless command"}
 {"command": "script -a session.log", "expected": "allow", "mode": "default", "source": "curated", "note": "script with only an output file"}
 {"command": "script -a session.log", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: script with only an output file"}

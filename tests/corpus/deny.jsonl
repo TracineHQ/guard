@@ -309,8 +309,12 @@
 {"command": "script -q /dev/null rm -rf /", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: BSD script runs the words after the output file as the command"}
 {"command": "script /dev/null rm -rf /", "expected": "deny", "mode": "default", "source": "adversarial", "note": "BSD script with no options"}
 {"command": "script /dev/null rm -rf /", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: BSD script with no options"}
-{"command": "script -F pipe /dev/null rm -rf /", "expected": "deny", "mode": "default", "source": "adversarial", "note": "BSD script -F takes a value"}
-{"command": "script -F pipe /dev/null rm -rf /", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: BSD script -F takes a value"}
+{"command": "script -F /dev/null rm -rf /", "expected": "deny", "mode": "default", "source": "adversarial", "note": "BSD script -F only flushes output, so the file is /dev/null and the rest is the command"}
+{"command": "script -F /dev/null rm -rf /", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: BSD script -F takes no value"}
+{"command": "script -qF /dev/null rm -rf /", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a BSD script cluster ending in F takes no value"}
+{"command": "script -qF /dev/null rm -rf /", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: a BSD script cluster ending in F"}
+{"command": "script -aF out.log rm -rf ~", "expected": "deny", "mode": "default", "source": "adversarial", "note": "BSD script append and flush, then the output file and the command"}
+{"command": "script -aF out.log rm -rf ~", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: BSD script append and flush"}
 {"command": "script -t 0 /dev/null rm -rf ~", "expected": "deny", "mode": "default", "source": "adversarial", "note": "BSD script -t takes a value"}
 {"command": "script -t 0 /dev/null rm -rf ~", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: BSD script -t takes a value"}
 {"command": "script -q /dev/null sh -c 'echo a; rm -rf /'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "BSD script around sh -c"}
