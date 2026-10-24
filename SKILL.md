@@ -107,7 +107,7 @@ Grep the log for that reason.
    ```
    One pattern per line; `#` starts a comment to end of line; blank lines OK.
 
-Both apply: the file's patterns and the env var's add up, so a repo's file can't drop yours. Pattern syntax matches the built-in list — segment match for directory names (last segment with no `.`), suffix match for files. No new grammar.
+Both apply: the file's patterns and the env var's add up, so a repo's file can't drop yours. Pattern syntax matches the built-in list: segment match for directory names (last segment with no `.`), suffix match for files. No new grammar.
 
 The patterns resolve at hook-call time, so live edits take effect on the next tool call without restarting Claude Code.
 

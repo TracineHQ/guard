@@ -293,10 +293,13 @@ instruction files (`CLAUDE.md`, `.cursorrules`, ...), MCP registrations and
 `~/.aws/config`. Project patterns from `.claude/guard-protected.txt` and
 `GUARD_PROTECTED_EXTRA` (both apply) count in every mode but `off`.
 
-Bash writes are matched too: `_match_for_tool` routes `Bash` payloads through
-`bash_write_targets`, which extracts redirect / `tee` / `cp` / `dd of=` /
-in-place-editor targets per command (operands stop at `&&`, `|`, `;`) and
-runs each through `is_protected`. Operators inside quotes stay operands.
+Bash writes are matched too. The command is read the way bash reads it
+(quotes, `$'...'`, comments, line continuations, `$(...)` and backtick
+bodies, heredocs), split at `;`, `&&`, `||`, `|` and newlines, and each
+command's write targets (redirects, `tee`, `cp` / `mv` / `install`, `dd of=`,
+in-place editors, removals, hard links) are resolved and checked.
+`bash -c` and `eval` strings, substitution bodies and heredocs a shell
+reads are scanned the same way. Operators inside quotes stay operands.
 `guard allowlist <write>` and `guard mode <mode>` count as writes to the
 allowlist, so the agent can't reconfigure guard through its CLI. Reads stay
 reads: `--help` / `-h`, `guard status`, `guard allowlist list` and a bare
