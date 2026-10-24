@@ -148,3 +148,37 @@
 {"command": "script -F /dev/null make test", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: BSD script -F around a harmless command"}
 {"command": "script -a session.log", "expected": "allow", "mode": "default", "source": "curated", "note": "script with only an output file"}
 {"command": "script -a session.log", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: script with only an output file"}
+{"command": "npm run dev &", "expected": "allow", "mode": "default", "source": "curated", "note": "a backgrounded dev server"}
+{"command": "npm run dev &", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a backgrounded dev server"}
+{"command": "sleep 5 & wait", "expected": "allow", "mode": "default", "source": "curated", "note": "background then wait"}
+{"command": "sleep 5 & wait", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: background then wait"}
+{"command": "make -j8 & make docs", "expected": "allow", "mode": "default", "source": "curated", "note": "two builds"}
+{"command": "make -j8 & make docs", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: two builds"}
+{"command": "curl 'https://x/?a=1&b=2'", "expected": "allow", "mode": "default", "source": "curated", "note": "a quoted URL with a query string"}
+{"command": "curl 'https://x/?a=1&b=2'", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a quoted URL with a query string"}
+{"command": "curl \"https://x/?a=1&b=2\"", "expected": "allow", "mode": "default", "source": "curated", "note": "a double-quoted URL with a query string"}
+{"command": "curl \"https://x/?a=1&b=2\"", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a double-quoted URL with a query string"}
+{"command": "(cd x && make) &", "expected": "allow", "mode": "default", "source": "curated", "note": "a backgrounded group"}
+{"command": "(cd x && make) &", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a backgrounded group"}
+{"command": "cmd >file 2>&1 &", "expected": "allow", "mode": "auto", "source": "curated", "note": "a redirect to a file and a background & (default mode steers the redirect to the Write tool)"}
+{"command": "ls 2>&1", "expected": "allow", "mode": "default", "source": "curated", "note": "a descriptor dup"}
+{"command": "ls 2>&1", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a descriptor dup"}
+{"command": "echo x &>/dev/null", "expected": "allow", "mode": "default", "source": "curated", "note": "&> is a redirect"}
+{"command": "echo x &>/dev/null", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: &> is a redirect"}
+{"command": "cat <&3", "expected": "allow", "mode": "default", "source": "curated", "note": "<& is a redirect"}
+{"command": "cat <&3", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: <& is a redirect"}
+{"command": "echo a\\&b", "expected": "allow", "mode": "default", "source": "curated", "note": "an escaped &"}
+{"command": "echo a\\&b", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: an escaped &"}
+{"command": "echo $((1&2))", "expected": "allow", "mode": "auto", "source": "curated", "note": "bitwise and in arithmetic (default mode denies $((...)) on main too)"}
+{"command": "(( x = 1 & 2 ))", "expected": "allow", "mode": "default", "source": "curated", "note": "bitwise and in an arithmetic command"}
+{"command": "(( x = 1 & 2 ))", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: bitwise and in an arithmetic command"}
+{"command": "echo \"${x:-a&b}\"", "expected": "allow", "mode": "default", "source": "curated", "note": "an & in a parameter default"}
+{"command": "echo \"${x:-a&b}\"", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: an & in a parameter default"}
+{"command": "ls |& cat", "expected": "allow", "mode": "default", "source": "curated", "note": "|& into a reader"}
+{"command": "ls |& cat", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: |& into a reader"}
+{"command": "git status & git diff", "expected": "allow", "mode": "default", "source": "curated", "note": "two read-only commands"}
+{"command": "git status & git diff", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: two read-only commands"}
+{"command": "rm -rf build & rm -rf dist", "expected": "allow", "mode": "default", "source": "curated", "note": "two build directory removals"}
+{"command": "rm -rf build & rm -rf dist", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: two build directory removals"}
+{"command": "cd /tmp && sleep 1 &", "expected": "allow", "mode": "default", "source": "curated", "note": "a backgrounded command after cd"}
+{"command": "cd /tmp && sleep 1 &", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a backgrounded command after cd"}

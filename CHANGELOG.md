@@ -192,6 +192,13 @@ adheres to [Semantic Versioning](https://semver.org/).
   double quotes) or an ANSI-C quote decodes to a quote or backslash
   (`$'\x27'`), every brace is expanded as before. A `$` ending a quoted regex
   (`'[Tt]ask$'`) is not an ANSI-C quote.
+- A background `&` now separates commands. Guard split a command line on
+  `|`, `||`, `&&` and `;` only, so `a & b` was one segment and the deny rules
+  looked at `a` alone. A lone unquoted `&` now starts a new segment, as in
+  bash, and `|&` is a pipe. Each segment gets the same rules it gets after a
+  `;`. `&&`, `&>`, `&>>`, `>&`, `<&`, an `&` in quotes, after a backslash, in
+  `$(...)`, `${...}` or arithmetic, and a descriptor such as `2>&1` are not
+  separators.
 - Read-only guard CLI calls (`guard status`, `guard allowlist list`,
   `guard mode --help`, `guard allowlist --help`) no longer trip
   `protected_files`.
