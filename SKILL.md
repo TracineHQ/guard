@@ -1,7 +1,7 @@
 ---
 name: guard
 description: Configure guard's safety hooks and explain what each hook catches — bash command validation (rm -rf, force-push, interpreter eval, shell wrappers, pipe-to-shell), git safety (-c config injection, core.hooksPath/attributesFile, destructive flags), credential scanning, commit-message rules, protected files, agent output, subagent scope.
-when_to_use: When the user asks to enable/disable a guard hook, change the decision log path, switch guard mode (enforce / shadow / off / lockdown), troubleshoot guard's output, or asks "why did guard block X" / "what does <hook> catch".
+when_to_use: When the user asks to enable/disable a guard hook, change the decision log path, switch guard mode (enforce / shadow / off), troubleshoot guard's output, or asks "why did guard block X" / "what does <hook> catch".
 ---
 
 # Guard configuration
@@ -15,13 +15,13 @@ decisions to `~/.claude/guard-decisions.jsonl`.
 authoritative references. Quick map:
 
 - `bash_command_validator` — `rm -rf` against `/`, `/*`, `~`, `$HOME`;
-  force-push (`--force`, `-f`, `--force-with-lease`, `+refspec`); inline
-  interpreter code (`python -c`, `node -e`/`-p`, `perl -pe`, `php -r`,
-  `python - <<EOF`, `pypy`, `bun`, `deno`, plus runner wrappers
-  `uvx`/`pipx`/`uv run`; script and `-m` module runs are left to Claude
-  Code's permission flow); shell wrappers (`bash -c`, `sh -lc`); `eval`/`source`/`.`;
-  dangerous env-var sinks (`GIT_SSH_COMMAND`, `LD_PRELOAD`, etc.); pipe-to-shell
+  force-push (`--force`, `-f`, `--force-with-lease`, `+refspec`, `--mirror`);
+  inline programs guard can't read (`python3 -c "$CODE"`, a program piped
+  in or evaluating stdin; a literal `python3 -c '...'` passes); a `bash -c`
+  string guard can't read (empty, `{}`, `"$X"`); `eval`; pipe-to-shell
   (`curl ... | sh`); credential leaks (`gh auth token`, `aws sts get-session-token`);
+  payloads hidden in `$(...)`, `bash -c` strings, function bodies and `trap`
+  handlers, each checked as a command;
   **admin-CLI default-deny** for `aws`, `gcloud`, `az`, `kubectl`, `launchctl` —
   only verbs whose `(service, verb)` tuple is in the read-only catalog pass;
   everything else denies with `bash.admin_default_deny`. AWS uses the
@@ -29,10 +29,8 @@ authoritative references. Quick map:
   decision tree. Override per-rule via `disable_rules`, or per-verb via
   `GUARD_ADMIN_ALLOW_VERBS=aws:ec2.run-instances,gcloud:functions.deploy`.
 - `git_c_validator` — `git -c core.hooksPath=...` and `core.attributesFile=...`
-  denied regardless of value; `git -c alias.x='!cmd'` and other config-exec
-  sinks; `git commit -C <ref>` and `--reuse-message` (silent message reuse);
-  destructive flags under `git -C` (`branch -d/-D/-m`, `tag -d`, `remote
-  remove/rename/set-url`).
+  denied regardless of value; `git -C` read verbs that run a program or write
+  a file (`log --output=`, `fetch --upload-pack` / `--exec` / `ext::`).
 - `commit_message_validator` — AI-attribution trailers in commit messages
   (`Co-Authored-By: Claude`, `Generated with Claude Code`); also denies
   opaque message sources (`-F <stream>`, `--file=-`, paths outside cwd).
@@ -40,9 +38,8 @@ authoritative references. Quick map:
 - `protected_files` — Edit/Write (and Bash writes) to guard's own hook code,
   meaning the install that's running (matched by real path, so a clone or
   worktree of guard's source stays editable),
-  `.claude/guard/allowlist.json` and `.claude/subagent-scope.json`; lockdown
-  adds `.git/hooks`, `CLAUDE.md`, `.cursorrules`, MCP config and
-  `.aws/config` (extensible via `GUARD_PROTECTED_EXTRA` and
+  `.claude/guard/allowlist.json` and `.claude/subagent-scope.json`
+  (extensible via `GUARD_PROTECTED_EXTRA` and
   `.claude/guard-protected.txt`). Reads never trip it.
 - `agent_output_guard` — denies tool calls whose input references a Claude
   Code subagent transcript (`/tmp/claude-<uid>/.../tasks/<id>.output` that
@@ -51,41 +48,35 @@ authoritative references. Quick map:
   readable.
 - `subagent_scope` — file edits outside the declared `.claude/subagent-scope.json` allowlist.
 
-## Deny, never ask
+## Deny, never ask, never allow
 
-Guard never emits an `ask`. Every block is a deny whose reason steers the
-agent: what was blocked, why, and what to do instead (usually stop and tell
-the user, with the command or `guard allowlist` override they can run).
+Guard never emits an `ask` or an `allow`. Every block is a deny whose reason
+tells the agent what was blocked, why, and what to do instead (usually stop
+and tell the user, with the command or `guard allowlist` override they can
+run). Everything else gets no decision from guard and goes on to Claude
+Code's own permission step, auto mode's classifier included.
 
 ## Modes
 
-`guard mode <enforce|shadow|off|lockdown>` writes `~/.claude/guard/allowlist.json`.
+`guard mode <enforce|shadow|off>` writes `~/.claude/guard/allowlist.json`.
 Every hook honors it.
 
 - `enforce` (default) -- deny what matches, pass the rest through.
 - `shadow` -- log would-be denies with `mode: "shadow"`; only trust-root denies block.
 - `off` -- hooks go quiet, except edits to the running guard's code and allowlist.
-- `lockdown` -- opt-in strict default-deny for driven or unattended agents.
-  Any Bash command not on the safe-prefix allowlist is denied with a
-  `STRICT_FEEDBACK` message, and `protected_files` adds its lockdown list.
-  Claude Code's `permission_mode` (`auto`, `dontAsk`, `bypassPermissions`)
-  never turns it on.
 
-Claude Code's `auto` permission mode (outside `lockdown`) keeps only guard's
-hard floor. Every deny rule is FLOOR (irreversible, code injection, guard
-evasion, supply chain, credential exfiltration, guard's own files) or STEER
-(shape and style nudges); the list is in `docs/dangerous-commands.md`. In
-`auto` a STEER match passes to Claude Code's own classifier and is logged as
-`decision: "pass"` with reason `deferred to auto mode (steer rule <key>)`;
-FLOOR rules still deny. Asked "why did guard let X through in auto mode"?
-Grep the log for that reason.
+`lockdown` is retired: an allowlist that still names it warns once and runs
+as `enforce`.
+
+Claude Code's `permission_mode` (`default`, `auto`, `acceptEdits`, ...) is
+logged and never changes a decision. The rules are in
+`docs/dangerous-commands.md`.
 
 ## Environment variables
 
 | Variable | Purpose | Default |
 |---|---|---|
 | `GUARD_DECISIONS_PATH` | Override the JSONL decision-log path | `~/.claude/guard-decisions.jsonl` |
-| `GUARD_STRICT_DENY_QUEUE_PATH` | Override the strict-deny queue path | `~/.claude/guard-strict-deny-queue.jsonl` |
 | `GUARD_DEBUG` | Set to `1` to emit per-hook debug to stderr | unset |
 | `GUARD_DATA_DIR` | Override the directory containing guard's data files | `~/.claude/guard` |
 | `GUARD_PROTECTED_EXTRA` | Comma-separated extra patterns for `protected_files`. See below. | unset |
@@ -93,7 +84,7 @@ Grep the log for that reason.
 
 ## Extending protected_files patterns
 
-`protected_files` ships with a built-in pattern list (the running guard's code and allowlist, plus `.git/hooks`, `CLAUDE.md` and friends under lockdown). Projects with their own kill-switch / doctrine paths can extend that list two ways without forking:
+`protected_files` ships with a built-in pattern list (the running guard's code and allowlist). Projects with their own kill-switch / doctrine paths can extend that list two ways without forking:
 
 1. **Env var** `GUARD_PROTECTED_EXTRA="bin,standards,dispatch"` — comma-separated. Whitespace trimmed; blank entries skipped.
 2. **Project file** `.claude/guard-protected.txt` (rooted at the working directory):

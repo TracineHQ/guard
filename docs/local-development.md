@@ -13,12 +13,8 @@ install step, no binary.
 
 The diagnostic CLI is a separate entry point (`guard = "guard.cli:main"` in
 `pyproject.toml`). It is NOT installed by default. `uv sync` only puts it in
-`.venv/bin/guard`, which is not on `PATH` -- and its absolute path is not a
-guard-recognized invocation, so a `guard mode lockdown` session denies it.
-
-guard's bash matcher whitelists `guard corpus`, `guard status`, etc. as
-read-only subcommands, but only for the bare `guard` head (or `uv run guard` /
-`uvx guard`). For those to resolve to THIS checkout, link it as the binary:
+`.venv/bin/guard`, which is not on `PATH`. For a bare `guard` to run THIS
+checkout, link it as the binary:
 
 ```bash
 # Local-linked dev install: `guard` on PATH, editable against this source.
@@ -26,12 +22,9 @@ uv tool install --editable /Users/dev/develop/guard --force
 ```
 
 `--editable` means source edits are reflected with no reinstall. After this,
-`guard corpus` runs from the local tree and stays allowlisted even under
-lockdown. Re-run the install only after a dependency change (a new entry in
-`pyproject.toml`), not after ordinary source edits.
-
-The install itself is a privileged action that lockdown fences, so it is a
-one-time human bootstrap (run it from a normal shell, or via `!` in a session).
+`guard corpus` runs from the local tree. Re-run the install only after a
+dependency change (a new entry in `pyproject.toml`), not after ordinary source
+edits.
 
 ### Official vs local
 
@@ -56,5 +49,5 @@ just check            # lint + typecheck + test
 
 `guard corpus` is the fast behavioral fence: it runs every fixture command
 through `decide()` and asserts the classification. Add a row under
-`tests/corpus/` rather than probing ad-hoc with `guard test '<cmd>'` -- the
-latter is deliberately steered to the corpus inside a guard checkout.
+`tests/corpus/` rather than probing ad-hoc with `guard test '<cmd>'`: a row
+keeps checking the command on every run.

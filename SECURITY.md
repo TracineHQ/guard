@@ -211,9 +211,7 @@ walks tokens after the CLI binary and classifies each `--flag`:
    `--output`, `--query`, `--max-results`, paging tokens).
 3. **Unknown** — long `--*` flags on neither list. Logged to the
    JSONL audit record under `unknown_flags: [...]` (flag name only,
-   never the value; capped at 8). In lockdown (`guard mode
-   lockdown`), presence of any unknown flag escalates an otherwise-allow
-   to DENY via `bash.admin_unknown_flag_strict`.
+   never the value; capped at 8). Never denied on their own.
 
 ### Forbidden subcommands
 
@@ -249,8 +247,8 @@ command line are.)
 
 ### Unknown-flag telemetry
 
-Every admin-CLI allow logs unrecognized `--*` flags to the JSONL
-audit trail. The data informs the next hardening pass — frequent
+Every admin-CLI command guard passes logs unrecognized `--*` flags to
+the JSONL audit trail. The data informs the next hardening pass: frequent
 benign flags get promoted to known-safe; suspicious ones get
 promoted to forbidden. Flag names only; values never leak to logs
 (fused `--token=BEARER` is captured as `--token` only).

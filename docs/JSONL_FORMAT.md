@@ -55,18 +55,18 @@ section is the contract. Consumers can opt-in by reading the env var directly
 | `v` | int | yes | schema version, currently `1`. Short alias of `schema_version`. |
 | `schema_version` | int | yes | long form, kept for backward compatibility |
 | `type` | enum string | optional | record-shape discriminator. Defaults to `"decision"` when absent. Currently one of `"decision"`, `"internal_error"`, or `"permission_request"` (§3.4, §3.5). Consumers MUST filter on `type` to avoid blending non-decision records into decision tallies. |
-| `mode` | enum string | yes (decision) | one of `"enforce"`, `"shadow"`, `"off"`, `"lockdown"`. Set per-record from the global allowlist's mode (default `"enforce"`). `"shadow"` decisions are logged but not enforced; `"off"` short-circuits the hook and emits no record, except trust-root denies from `protected_files`. |
+| `mode` | enum string | yes (decision) | one of `"enforce"`, `"shadow"`, `"off"` (older logs may hold `"lockdown"`). Set per-record from the global allowlist's mode (default `"enforce"`). `"shadow"` decisions are logged but not enforced; `"off"` short-circuits the hook and emits no record, except trust-root denies from `protected_files`. |
 | `timestamp` | string (ISO-8601 UTC, microsecond precision, `Z` suffix) | yes | e.g. `"2026-04-29T14:32:11.123456Z"` |
 | `hook_id` | string | yes (decision) | namespaced: `guard.<hook_module>` (e.g. `guard.bash_command_validator`) |
 | `event` | string | yes (decision) | matches Claude Code event names (`PreToolUse`, `PostToolUse`) |
 | `tool_name` | string \| null | yes for PreToolUse/PostToolUse | `Bash`, `Edit`, etc. |
-| `decision` | enum string | yes (decision) | one of `allow`, `deny`, `defer`, `pass`. Guard no longer asks; logs written by older releases may also hold `ask`. |
-| `permission_mode` | enum string \| null | optional | Claude Code `permission_mode` at decision time (`default`, `plan`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`). Threaded from the PreToolUse payload; populated for Bash decisions and for every hook that logs through the shared allowlist path. `auto` is the only value that changes a decision (§3.6). |
+| `decision` | enum string | yes (decision) | one of `deny`, `pass`. Guard never asks or allows; logs written by older releases may also hold `ask`, `allow` or `defer`. |
+| `permission_mode` | enum string \| null | optional | Claude Code `permission_mode` at decision time (`default`, `plan`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`). Threaded from the PreToolUse payload; populated for Bash decisions and for every hook that logs through the shared allowlist path. Logged only; no value changes a decision. |
 | `reason` | string | yes (decision) | human-readable; ≤ 1024 chars. Secret-shapes are redacted at write time. |
 | `command_excerpt` | string \| null | optional | truncated to 4096 chars; only set for Bash-related decisions. Secret-shapes are redacted at write time. |
 | `session_id` | string | yes (decision) | from Claude Code stdin |
 | `cwd` | string | optional | from Claude Code stdin |
-| `unknown_flags` | array of strings | optional | long flags an admin CLI verb matcher could not classify against the spec's `known_flags`; capped at 8 entries. Populated only on `bash.admin_*` decisions and when the offending segment is for a CLI with a non-empty `known_flags` spec (currently aws, gcloud, az, kubectl; launchctl has no known-flags spec, so it never populates this field). See `ADMIN_CLI_SPECS` in `hooks/_admin_specs.py`. |
+| `unknown_flags` | array of strings | optional | long flags an admin CLI verb matcher could not classify against the spec's `known_flags`; capped at 8 entries. Populated on the `pass` record of an admin CLI command for a CLI with a non-empty `known_flags` spec (currently aws, gcloud, az, kubectl; launchctl has no known-flags spec, so it never populates this field). See `ADMIN_CLI_SPECS` in `hooks/_admin_specs.py`. |
 
 ### 3.1 Mode semantics
 
@@ -79,13 +79,10 @@ section is the contract. Consumers can opt-in by reading the env var directly
 - `"off"` — hooks are silent and write nothing, except `protected_files`
   denies on guard's trust root (its running code, allowlist and subagent scope),
   which still block and log with `mode: "off"`.
-- `"lockdown"` — enforced, plus the opt-in strict default-deny: Bash
-  commands off the safe list are denied (`bash.strict_*` rule_ids) and
-  `protected_files` widens its pattern list.
 
 As of v1.4.0, the writer emits the resolved allowlist mode on every
 decision record (default `"enforce"`). Operators flip mode with
-`guard mode <enforce|shadow|off|lockdown>`, which writes a top-level
+`guard mode <enforce|shadow|off>`, which writes a top-level
 `"mode"` field into `~/.claude/guard/allowlist.json`. A per-repo
 `.claude/guard/allowlist.json` is ignored. `"shadow"` is useful for testing a new
 rule against real sessions without blocking: the writer still logs
@@ -115,22 +112,16 @@ Top-level categories:
 | Prefix | Origin | Examples |
 |---|---|---|
 | `bash.always_deny` | literal `ALWAYS_DENY` registry hits | `git push --force`, `rm -rf /` |
-| `bash.<synth>` | synthetic-deny predicates (one rule_id per predicate) | `bash.dangerous_rm`, `bash.git_config_injection`, `bash.git_force_push`, `bash.kubectl_destructive`, `bash.gh_api_destructive`, `bash.disk_destruction`, etc. The active list lives next to the `_PER_FORM_MATCHERS` tuple in `bash_command_validator.py`. |
-| `bash.admin_*` | admin-CLI flag-spec violations (default / interactive mode) | `bash.admin_default_deny`, `bash.admin_forbidden_subcommand`, `bash.admin_forbidden_flag`, `bash.admin_sensitive_env_override` |
-| `bash.admin_unknown_flag_strict` | lockdown (`guard mode lockdown`) blocks an admin CLI invocation that carries flags outside the spec's `known_flags` set | lockdown-only |
-| `bash.strict_feedback` / `bash.strict_default_deny` | lockdown default-deny for non-admin commands not on the allowlist | lockdown-only |
+| `bash.<synth>` | synthetic-deny predicates (one rule_id per predicate) | `bash.dangerous_rm`, `bash.git_force_push`, `bash.kubectl_destructive`, `bash.gh_api_destructive`, `bash.disk_destruction`, etc. The active list lives next to the `_PER_FORM_MATCHERS` tuple in `bash_command_validator.py`. |
+| `bash.admin_*` | admin-CLI flag-spec violations | `bash.admin_default_deny`, `bash.admin_forbidden_subcommand`, `bash.admin_forbidden_flag`, `bash.admin_sensitive_env_override` |
 | `bash.command_too_long` | command exceeded `_COMMAND_LENGTH_CAP` after canonicalization | DoS guard |
 
 `git_c_validator` deny reasons do not carry a `rule_id`; they are
-self-describing (`"git -C: 'reset' is destructive and blocked"`,
+self-describing (`"git -C: 'log --output' writes a file or execs and is blocked"`,
 `"git -c <key>=<value>: command-line override of core.hooksPath / ..."`).
-Group git-C decisions on `hook_id == "guard.git_c_validator"`. Its tier keys
-(`guard.git_c_validator:<shape>`) appear only in auto-mode pass reasons
-(§3.6).
+Group git-C decisions on `hook_id == "guard.git_c_validator"`.
 
-Lockdown rule_ids (`bash.admin_unknown_flag_strict`,
-`bash.strict_default_deny`, `bash.strict_feedback`) and
-`bash.command_too_long` (every mode) can be turned off like any other rule:
+`bash.command_too_long` can be turned off like any other rule:
 `guard allowlist disable-rule <rule_id>`.
 
 ### 3.4 `internal_error` records
@@ -165,7 +156,7 @@ record is observation-only, and the prompt proceeds normally.
 |---|---|---|---|
 | `type` | string | yes | always `"permission_request"` for this record shape |
 | `v` / `schema_version` | int | yes | schema version (currently `1`) |
-| `mode` | string | yes | guard's effective mode at request time (`"enforce"` / `"shadow"` / `"off"` / `"lockdown"`); `"off"` short-circuits before logging |
+| `mode` | string | yes | guard's effective mode at request time (`"enforce"` / `"shadow"` / `"off"`); `"off"` short-circuits before logging |
 | `timestamp` | string | yes | ISO-8601 UTC with microsecond precision |
 | `session_id` | string | yes | Claude Code session id |
 | `tool_name` | string | yes | tool about to be invoked (`"Bash"`, `"Edit"`, `"mcp__server__tool"`, ...) |
@@ -179,31 +170,19 @@ synthetic bucket `(hook_id="permission_request", decision="<tool_name>")`
 so operators see prompt frequency alongside deny frequency. Pass
 `--no-prompts` to revert to decisions-only.
 
-### 3.6 Auto-mode pass records
+### 3.6 Pass records
 
-In Claude Code's `auto` permission mode (and not under `guard mode
-lockdown`) guard keeps only its hard floor. A STEER rule that matches returns
-no decision to Claude Code and is logged as a decision record with:
+Guard never approves a call. When a hook gives no decision it may still log
+one record with `decision: "pass"`. For `bash_command_validator` the reason is
+`no match`, or, when a rule you turned off was the only match,
+`allowlist: rule '<rule_id>' disabled by user config` (one record per disabled
+rule that matched). A deny found in a payload a command hides (a `$(...)`
+body, a `bash -c` string, a function body) is logged once for the whole
+command with a reason ending in `(hidden payload)`.
 
-- `decision: "pass"`
-- `permission_mode: "auto"`
-- `reason: "deferred to auto mode (steer rule <key>)"`
-
-The reason string is part of the contract; consumers can match it with the
-prefix `deferred to auto mode (steer rule ` and read `<key>` up to the final
-`)`. `<key>` is a tier key from `RULE_TIERS` in `src/guard/registry.py`:
-a rule id (`bash.shell_wrapper`), a hook id,
-`bash.always_deny:<prefix>` for a registry literal, or `<rule>:<shape>` for a
-sub-shape (`guard.git_c_validator:config_write`). The allowlist id is the
-part before the first colon.
-
-`bash_command_validator` writes one pass record per STEER rule it skipped
-for a command, and only when nothing on the floor matched; if a FLOOR rule
-denies, the log holds that deny and no pass records. A deny found in a
-payload a STEER shape was hiding (a `$(...)` body, a `bash -c` string, a
-function body) is logged once for the whole command with a reason ending in
-`(hidden payload)`. FLOOR denies log exactly as in every other mode. See
-`docs/dangerous-commands.md` for the FLOOR / STEER list.
+Logs written before guard stopped returning allow may hold `allow` records,
+`defer` records and `pass` records with the reason
+`deferred to auto mode (steer rule <key>)`.
 
 ## 4. Schema versioning rules
 
@@ -249,8 +228,8 @@ function body) is logged once for the whole command with a reason ending in
 ## 7. Examples
 
 ```json
-{"type":"decision","v":1,"schema_version":1,"mode":"enforce","timestamp":"2026-04-29T14:32:11.123456Z","hook_id":"guard.bash_command_validator","event":"PreToolUse","tool_name":"Bash","decision":"allow","reason":"Read-only command","command_excerpt":"ls -la","session_id":"abc-123","cwd":"/home/alice/project"}
-{"type":"decision","v":1,"schema_version":1,"mode":"enforce","timestamp":"2026-04-29T14:32:12.987654Z","hook_id":"guard.bash_command_validator","event":"PreToolUse","tool_name":"Bash","decision":"deny","reason":"git add -A is denied: stages all files indiscriminately","command_excerpt":"git add -A","session_id":"abc-123","cwd":"/home/alice/project"}
+{"type":"decision","v":1,"schema_version":1,"mode":"enforce","timestamp":"2026-04-29T14:32:11.123456Z","hook_id":"guard.bash_command_validator","event":"PreToolUse","tool_name":"Bash","decision":"pass","reason":"no match","command_excerpt":"ls -la","session_id":"abc-123","cwd":"/home/alice/project"}
+{"type":"decision","v":1,"schema_version":1,"mode":"enforce","timestamp":"2026-04-29T14:32:12.987654Z","hook_id":"guard.bash_command_validator","event":"PreToolUse","tool_name":"Bash","decision":"deny","reason":"always-deny (bash.always_deny)","command_excerpt":"git push --force origin main","session_id":"abc-123","cwd":"/home/alice/project"}
 {"type":"decision","v":1,"schema_version":1,"mode":"enforce","timestamp":"2026-04-29T14:32:13.456789Z","hook_id":"guard.protected_files","event":"PreToolUse","tool_name":"Edit","decision":"deny","reason":"Protected file: guard/registry.py. guard blocks agent edits to its own code and subagent scope so a session can't rewrite its own guardrails. ...","session_id":"abc-123","cwd":"/home/alice/project"}
 ```
 

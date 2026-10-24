@@ -20,22 +20,9 @@ rm -rf --no-preserve-root /
 hallucinated cleanup step can wipe a developer machine.
 
 **What guard does.** Hard deny via `bash_command_validator`. These prefixes
-are in the registry's `ALWAYS_DENY` set, so they block under `enforce` and
-`lockdown`. An `rm -rf` against a non-root path goes to Claude Code's own
-permission prompt (denied under `guard mode lockdown`).
-
-## `git commit -C <ref>`
-
-```
-git commit -C HEAD
-```
-
-**Why it's bad.** `-C <ref>` reuses an existing commit's message silently —
-no editor opens, no message is shown. An agent that picks the wrong ref will
-land a commit with the wrong message and no obvious signal.
-
-**What guard does.** `git_c_validator` denies the `commit -C` form
-explicitly. Use `-c` (lowercase, opens an editor) or `-m "message"` instead.
+are in the registry's `ALWAYS_DENY` set, so they deny in every permission
+mode. An `rm -rf` against a non-root path gets no decision from guard and
+goes on to Claude Code's own permission step.
 
 ## `cat` of multi-MiB JSONL into context
 
@@ -94,42 +81,23 @@ ask the user, who can run `guard allowlist`. Combined with `subagent_scope`,
 edits originating from a scoped subagent are blocked unless the scope file
 explicitly allows them.
 
-## `git add -A` / `git add .` / `git add --all`
+## Inline programs guard can't read
 
 ```
-git add -A
-git add --all
-git add .
-git add -a
+python3 -c "$CODE"
+node -e "$(cat x.js)"
+cat x.py | python3
 ```
 
-**Why it's bad.** Bulk-staging picks up whatever happens to be in the
-working tree — generated files, scratch notes, accidentally-checked-in
-credentials. The user's review step gets bypassed.
+**Why it's bad.** An inline program can be anything. When the code is
+written out on the command line, Claude Code's permission step can read it.
+When it comes from a variable, a substitution or a pipe, nobody sees what
+runs until it runs.
 
-**What guard does.** Hard deny in the registry (`git-deny` category).
-Stage explicit paths (`git add path/to/file.py`) instead. The deny applies
-even in interactive mode — it's not a confirmation prompt, it's a refusal.
-Under Claude Code's `auto` permission mode it is a STEER rule: the call goes
-to the auto classifier and guard logs a `pass`.
-
-## Interpreter RCE primitives
-
-```
-python -c '...'
-python3 -c '...'
-node -e '...'
-node --eval '...'
-env -i bash -c '...'
-```
-
-**Why it's bad.** These are canonical re-exec primitives. Once a `-c` /
-`-e` form is allowed, every other validator in the chain can be bypassed
-by stuffing the real command into the eval string.
-
-**What guard does.** Hard deny, along with the other inline-code shapes
-(`node -p`, `perl -pe`, `php -r`, a program on stdin like `python - <<EOF`).
+**What guard does.** A literal program (`python3 -c 'print(1)'`, `node -e
+'...'`, `python3 - <<'EOF'`) passes, like a script file. A program guard
+can't read (`python3 -c "$CODE"`, `node -e "$(cat x.js)"`, `cat x.py |
+python3`) is denied, and so is one that evaluates what it reads on stdin.
 The deny tells the agent to write the code to a script file and run that.
-Running a script or module (`python3 scripts/x.py`, `python -m pytest`) is
-not blocked; Claude Code's own permission flow decides it. `env -i` is denied
-unconditionally because clearing the environment is a common RCE wrapper.
+`env -i` is peeled like any other wrapper, so `env -i bash -c '...'` is
+judged by the command it runs.
