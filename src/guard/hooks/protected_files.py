@@ -561,7 +561,8 @@ def bash_write_targets(command: str, patterns: Sequence[str] | None = None) -> l
     for segment, tokens in commands:
         targets.extend(_regex_write_targets(segment))
         targets.extend(_command_write_targets(tokens, segment))
-        targets.extend(hit.pattern for hit in _interpreter_eval_targets(tokens, patterns))
+        args = _split_redirects(tokens)[0]
+        targets.extend(hit.pattern for hit in _interpreter_eval_targets(args, patterns))
     return targets
 
 
@@ -1454,14 +1455,14 @@ def _segment_targets(
         yield target, "file", target
     for target in _command_write_targets(tokens, segment):
         yield target, "file", target
+    args = _split_redirects(tokens)[0]
     # Interpreter bodies: ``python -c '...'``, ``php -r '...'``, etc.
-    for target, text in _interpreter_eval_targets(tokens, scan.patterns, scan.dirs):
+    for target, text in _interpreter_eval_targets(args, scan.patterns, scan.dirs):
         yield target, "file", text
     # An extraction anywhere on a protected file's directory chain could
     # overwrite it.
     for target in _tar_extract_dirs(tokens):
         yield target, "dir", target
-    args = _split_redirects(tokens)[0]
     copied_into = _copy_into_targets(args)
     for target in copied_into:
         yield target, "file", target

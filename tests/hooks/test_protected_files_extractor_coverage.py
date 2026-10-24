@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
 from guard.hooks.protected_files import (
     _bash_first_protected_match,
     _effective_patterns,
@@ -195,6 +197,15 @@ def test_python_dash_c_with_protected_path_literal_extracted() -> None:
     targets = bash_write_targets(cmd, _LOCKDOWN)
     # The pattern ``.git/config`` should appear among extracted targets.
     assert ".git/config" in targets
+
+
+@pytest.mark.parametrize("redirect", ["2>/dev/null", "> /dev/null", ">>/tmp/log"])
+def test_python_dash_c_redirect_before_body_still_scanned(redirect: str) -> None:
+    cmd = f"python3 -c {redirect} \"open('/repo/.git/config','w').write('x')\""
+    assert ".git/config" in bash_write_targets(cmd, _LOCKDOWN)
+    matched = _bash_first_protected_match(cmd, _LOCKDOWN)
+    assert matched is not None
+    assert matched.pattern == ".git/config"
 
 
 def test_python_dash_c_without_protected_literal_yields_none() -> None:
