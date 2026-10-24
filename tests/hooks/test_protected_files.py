@@ -254,7 +254,10 @@ _WRITE_SHAPES: list[tuple[str, dict[str, Any], bool]] = [
     ("Bash", {"command": f'perl -e \'open(F, "+<", "{_GUARD}/_utils.py"); print F 1\''}, True),
     ("Bash", {"command": f"python3 -c \"print(open('{_GUARD}/_utils.py').read())\""}, False),
     # A path in an eval body resolves like any other: a copy is ordinary code.
-    ("Bash", {"command": f"python3 -c \"open('{_COPY}/_utils.py', 'w')\""}, False),
+    # (One under a root that doesn't exist reads as a fragment code could
+    # join onto anything, so the copy sits under /tmp.)
+    ("Bash", {"command": "python3 -c \"open('/tmp/guard-copy/src/guard/_utils.py', 'w')\""}, False),
+    ("Bash", {"command": "python3 -c \"open('/nope/src/guard/_utils.py', 'w')\""}, True),
     # Only file-writing tools and Bash are scanned; a question or todo that
     # merely names a guard file is how the agent tells the user.
     ("AskUserQuestion", {"question": f"May I edit {_GUARD}/_utils.py?"}, False),
