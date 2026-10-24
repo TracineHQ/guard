@@ -213,6 +213,45 @@ class TestMarkQuotedNewlines:
     ):
         assert _mark_quoted_newlines(command, comments=comments) == expected
 
+    @pytest.mark.parametrize(
+        ("operator", "delimiter"),
+        [
+            pytest.param("<<EOF", "EOF", id="bare"),
+            pytest.param("<<END-X", "END-X", id="bare-hyphen"),
+            pytest.param("<<END.X", "END.X", id="bare-dot"),
+            pytest.param("<<-END.X", "END.X", id="dash-dot"),
+            pytest.param("<<'EOF'", "EOF", id="single"),
+            pytest.param('<<"EOF"', "EOF", id="double"),
+            pytest.param("<<'END-X'", "END-X", id="single-hyphen"),
+            pytest.param('<<"END-X"', "END-X", id="double-hyphen"),
+            pytest.param("<<-'END-X'", "END-X", id="dash-single-hyphen"),
+            pytest.param("<<'EOF.md'", "EOF.md", id="single-dot"),
+            pytest.param("<<'MY EOF'", "MY EOF", id="single-space"),
+            pytest.param("<< 'EOF'", "EOF", id="space-before-delimiter"),
+            pytest.param("<<\\EOF", "EOF", id="backslash"),
+        ],
+    )
+    @pytest.mark.parametrize("comments", [True, False])
+    def test_best_effort_reading_skips_a_heredoc_body_whatever_its_delimiter(
+        self, operator, delimiter, comments
+    ):
+        indent = "\t" if operator.startswith("<<-") else ""
+        head = f"cat {operator}\n{indent}it's\n{indent}{delimiter}\n"
+        assert _mark_quoted_newlines(f"{head}echo 'a\nb'", comments=comments) == (
+            f"{head}echo 'a{_QUOTED_NEWLINE}b'"
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param("echo $((1<<n)) $((x << y))\necho 'a\nb'", id="arithmetic-expansion"),
+            pytest.param("((n = 1<<k))\necho 'a\nb'", id="arithmetic-command"),
+        ],
+    )
+    def test_best_effort_reading_does_not_take_a_shift_for_a_heredoc(self, command):
+        marked = _mark_quoted_newlines(command, comments=True)
+        assert marked == command.replace("'a\nb'", f"'a{_QUOTED_NEWLINE}b'")
+
     @pytest.mark.parametrize("comments", [True, False])
     def test_best_effort_reading_still_needs_a_quoted_newline(self, comments):
         assert _mark_quoted_newlines("echo a\nls 'b' # c", comments=comments) is None
@@ -327,8 +366,44 @@ class TestQuotedBraces:
         # a real quote would set the real ``{r,r}m`` aside as quoted text.
         assert _is_deny(decide(command, permission_mode=mode)), command
 
-    def test_a_line_with_an_ansi_c_quote_expands_every_group(self):
-        assert _canonicalize("echo '{a,b}' $'x'") == "echo 'a' 'b' x"
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            pytest.param("echo '{a,b}' $'\\x27'", "echo 'a' 'b' '", id="decodes-to-single-quote"),
+            pytest.param("echo '{a,b}' $'\\x22'", "echo 'a' 'b' \"", id="decodes-to-double-quote"),
+            pytest.param("echo '{a,b}' $'\\\\'", "echo 'a' 'b' \\", id="decodes-to-backslash"),
+            pytest.param("echo '{a,b}' $'x", "echo 'a' 'b' $'x", id="unterminated"),
+            pytest.param("echo \"$'\\x27'\" '{a,b}'", "echo \"'\" 'a' 'b'", id="inside-double"),
+        ],
+    )
+    def test_an_ansi_c_quote_that_decodes_to_a_quote_expands_every_group(self, command, expected):
+        assert _canonicalize(command) == expected
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            pytest.param("echo '{a,b}' $'x'", "echo '{a,b}' x", id="plain"),
+            pytest.param("echo '{a,b}' $'a\\nb'", "echo '{a,b}' a\nb", id="newline-escape"),
+            pytest.param("echo '{a,b}$' x", "echo '{a,b}$' x", id="ending-a-single-quoted-word"),
+        ],
+    )
+    def test_other_ansi_c_quotes_leave_quoted_braces_alone(self, command, expected):
+        assert _canonicalize(command) == expected
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param("grep -nE '^[0-9]{1,2} x|[Tt]ask$' notes.md", id="grep-anchor"),
+            pytest.param("rg -n '^v[0-9]{1,3}\\.[0-9]+ |[Rr]eadme$' CHANGELOG.md", id="rg-anchor"),
+            pytest.param("sed -nE '/^[0-9]{3,} |[Tt]odo$/p' notes.md", id="sed-anchor"),
+            pytest.param(
+                "grep -nE \"[0-9]{1,2} x|[Tt]ask\" notes.md && printf $'done\\n'", id="ansi"
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("mode", ["default", "auto"])
+    def test_a_dollar_anchor_does_not_bring_the_brace_false_positive_back(self, command, mode):
+        assert not _is_deny(decide(command, permission_mode=mode)), command
 
 
 class TestQuotedNewlinesTheExactWalkCannotRead:
@@ -368,6 +443,103 @@ class TestQuotedNewlinesTheExactWalkCannotRead:
     @pytest.mark.parametrize("mode", ["default", "auto"])
     def test_command_after_the_quote_is_denied(self, command, mode):
         assert _is_deny(decide(command, permission_mode=mode)), command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param("cat <<'EOF'\nit's\nEOF\necho 'a\nb' ; rm -rf /", id="single-quoted"),
+            pytest.param("cat <<\"EOF\"\nit's\nEOF\necho 'a\nb' ; rm -rf /", id="double-quoted"),
+            pytest.param("cat <<-EOF\n\tit's\n\tEOF\necho 'a\nb' ; rm -rf /", id="dash"),
+            pytest.param("cat <<-'EOF'\n\tit's\n\tEOF\necho 'a\nb' ; rm -rf /", id="dash-quoted"),
+            pytest.param("cat <<'END-X'\nbody\nEND-X\necho 'a\nb' ; rm -rf /", id="hyphen"),
+            pytest.param(
+                "cat <<'END-X'\nit's\nEND-X\necho 'a\nb' ; rm -rf /", id="hyphen-apostrophe"
+            ),
+            pytest.param(
+                "cat <<\"END-X\"\nit's\nEND-X\necho 'a\nb' ; rm -rf /", id="hyphen-double"
+            ),
+            pytest.param("cat <<END-X\nbody\nEND-X\necho 'a\nb' ; rm -rf /", id="hyphen-bare"),
+            pytest.param("cat <<END-X\nbody\nEND-X\necho 'a\nb' ; rm -rf ~", id="hyphen-bare-home"),
+            pytest.param("cat <<END.X\nbody\nEND.X\necho 'a\nb' ; rm -rf /", id="dot-bare"),
+            pytest.param("cat <<'EOF.md'\nit's\nEOF.md\necho 'a\nb' ; rm -rf /", id="dot-quoted"),
+            pytest.param("cat <<\\EOF\nit's\nEOF\necho 'a\nb' ; rm -rf /", id="backslash"),
+            pytest.param("cat <<'MY EOF'\nit's\nMY EOF\necho 'a\nb' ; rm -rf /", id="space"),
+            pytest.param(
+                "cat <<-'END-X'\n\tit's\n\tEND-X\necho 'a\nb' ; rm -rf /", id="dash-hyphen"
+            ),
+            pytest.param(
+                "cat <<'END-X'\nit's\nEND-X\necho 'a\nb' ; {r,r}m -rf /", id="hyphen-brace"
+            ),
+            pytest.param(
+                "cat <<'END-X'\nit's\nEND-X\necho 'a\nb' ; rm -rf / # x", id="hyphen-comment"
+            ),
+            pytest.param("cat <<A <<'B-1'\nit's\nA\nx\nB-1\necho 'a\nb' ; rm -rf /", id="two"),
+            pytest.param("echo $((1<<n))\necho 'a\nb' ; rm -rf / # x", id="shift"),
+            pytest.param(
+                "bash -c \"cat <<'END-X'\nit's\nEND-X\necho 'a\nb' ; rm -rf /\"", id="in-bash-c"
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("mode", ["default", "auto"])
+    def test_command_after_a_heredoc_and_a_quote_is_denied(self, command, mode):
+        assert _is_deny(decide(command, permission_mode=mode)), command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param(
+                "cat > notes.md <<'END-NOTES'\nrm -rf / is denied; don't retry it\nEND-NOTES",
+                id="hyphen",
+            ),
+            pytest.param(
+                "cat > notes.md <<\\EOF\nrm -rf / is denied; don't retry it\nEOF", id="backslash"
+            ),
+            pytest.param(
+                'cat > notes.md <<"END-NOTES"\nNote: rm -rf / is blocked; it\'s a floor rule\n'
+                "END-NOTES",
+                id="double-quoted",
+            ),
+            pytest.param(
+                "cat > notes.md <<'EOF'\nrm -rf / is denied; don't retry it\nEOF", id="plain"
+            ),
+            pytest.param(
+                "cat > notes.md <<END.MD\nIt's a note; rm -rf / is denied\nEND.MD", id="dot"
+            ),
+            pytest.param(
+                "cat > notes.md <<-'END-NOTES'\n\trm -rf / is denied; don't retry it\n\tEND-NOTES",
+                id="dash",
+            ),
+            pytest.param(
+                "cat > notes.md <<'END-NOTES'\nrm -rf / is denied; don't retry it\nEND-NOTES\n"
+                "echo 'a\nb' # x",
+                id="then-a-quoted-newline",
+            ),
+        ],
+    )
+    def test_a_written_heredoc_body_that_names_a_dangerous_command_is_not_denied_in_auto(
+        self, command
+    ):
+        # Default mode denies the ``>`` redirect itself (bash.dangerous_construct).
+        assert not _is_deny(decide(command, permission_mode="auto")), command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param(
+                "cat <<'END-NOTES'\nrm -rf / is denied; don't retry it\nEND-NOTES", id="a"
+            ),
+            pytest.param("cat <<\\EOF\nrm -rf / is denied; don't retry it\nEOF", id="backslash"),
+            pytest.param('cat <<"END-NOTES"\nrm -rf / is denied\nEND-NOTES', id="double-quoted"),
+            pytest.param("cat <<END.MD\nIt's a note; rm -rf / is denied\nEND.MD", id="dot"),
+            pytest.param(
+                "cat <<'END-NOTES'\nrm -rf / is denied; don't retry it\nEND-NOTES\necho 'a\nb' # x",
+                id="then-a-quoted-newline",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("mode", ["default", "auto"])
+    def test_a_heredoc_body_that_names_a_dangerous_command_is_not_denied(self, command, mode):
+        assert not _is_deny(decide(command, permission_mode=mode)), command
 
     @pytest.mark.parametrize(
         "command",
@@ -431,10 +603,48 @@ class TestShellRunWrappers:
             pytest.param("script -q -c 'rm -rf /' /dev/null", "rm -rf /", id="q-then-c"),
             pytest.param("script /dev/null -c 'rm -rf /'", "rm -rf /", id="file-first"),
             pytest.param("script -c 'rm -rf /'", "rm -rf /", id="no-file"),
-            pytest.param("parallel -j 2 'rm -rf {}' ::: /", "rm -rf {} /", id="jobs-separate"),
-            pytest.param("parallel -j2 'rm -rf {}' ::: /", "rm -rf {} /", id="jobs-attached"),
+            pytest.param("script --command 'rm -rf /' /dev/null", "rm -rf /", id="long"),
             pytest.param(
-                "parallel --jobs 2 -k 'rm -rf {}' ::: /", "rm -rf {} /", id="long-and-bare"
+                "script -q --command='echo a; rm -rf /' /dev/null",
+                "echo a; rm -rf /",
+                id="long-equals",
+            ),
+            pytest.param("script --command='rm -rf /'", "rm -rf /", id="long-equals-last"),
+            pytest.param("script --comm 'rm -rf /' /dev/null", "rm -rf /", id="long-abbreviated"),
+            pytest.param("script --c='rm -rf /'", "rm -rf /", id="long-shortest"),
+            pytest.param("parallel -j 2 'rm -rf {}' ::: /", "rm -rf /", id="jobs-separate"),
+            pytest.param("parallel -j2 'rm -rf {}' ::: /", "rm -rf /", id="jobs-attached"),
+            pytest.param("parallel --jobs 2 -k 'rm -rf {}' ::: /", "rm -rf /", id="long-and-bare"),
+            pytest.param("parallel rm -rf {} ::: /", "rm -rf /", id="placeholder-word"),
+            pytest.param("parallel rm -rf ::: /", "rm -rf /", id="args-appended"),
+            pytest.param("parallel 'rm -rf {1}' ::: /", "rm -rf /", id="numbered-placeholder"),
+            pytest.param("parallel 'rm -rf {.}{/}' ::: /", "rm -rf //", id="two-placeholders"),
+            pytest.param(
+                "parallel -j 2 'echo a ; rm -rf {} # x' ::: /",
+                "echo a ; rm -rf / # x",
+                id="placeholder-before-comment",
+            ),
+            pytest.param(
+                "parallel \"bash -c 'rm -rf {}'\" ::: /", "bash -c 'rm -rf /'", id="nested-quotes"
+            ),
+            pytest.param("parallel 'rm -rf {}' ::: a /", "rm -rf a ; rm -rf /", id="every-arg"),
+            pytest.param("parallel --tmpdir /tmp 'rm -rf {}' ::: /", "rm -rf /", id="tmpdir"),
+            pytest.param("parallel --nice 10 'rm -rf {}' ::: /", "rm -rf /", id="nice"),
+            pytest.param("parallel --env FOO 'rm -rf {}' ::: /", "rm -rf /", id="env"),
+            pytest.param("parallel --tagstring x 'rm -rf {}' ::: /", "rm -rf /", id="tagstring"),
+            pytest.param("parallel -J prof 'rm -rf {}' ::: /", "rm -rf /", id="profile"),
+            pytest.param("parallel --memfree 1G 'rm -rf {}' ::: /", "rm -rf /", id="memfree"),
+            pytest.param("parallel --bar --dry-run -kq echo {} ::: a", "echo a", id="bare-flags"),
+            pytest.param("parallel -kj 2 echo {} ::: a", "echo a", id="cluster-ending-in-j"),
+            pytest.param(
+                "parallel --newflag 'rm -rf {}' ::: /",
+                "rm -rf / ; /",
+                id="unknown-flag-without-value-or-with-one",
+            ),
+            pytest.param(
+                "parallel --newflag x 'rm -rf {}' ::: /",
+                "x rm -rf / ; rm -rf /",
+                id="unknown-flag-with-a-value",
             ),
             pytest.param("parallel ::: 'rm -rf /'", "rm -rf /", id="args-are-commands"),
             pytest.param("parallel ::: 'echo a' 'rm -rf /'", "echo a ; rm -rf /", id="two-args"),
@@ -465,6 +675,23 @@ class TestShellRunWrappers:
             pytest.param("parallel -j 2 'echo a; rm -rf {}' ::: /", id="parallel-j-second"),
             pytest.param("parallel ::: 'rm -rf /'", id="parallel-args"),
             pytest.param("parallel ::: 'echo a' 'rm -rf /'", id="parallel-second-arg"),
+            pytest.param("script --command 'rm -rf /' /dev/null", id="script-command"),
+            pytest.param(
+                "script -q --command='echo a; rm -rf /' /dev/null", id="script-command-equals"
+            ),
+            pytest.param("script --comm='rm -rf /'", id="script-command-abbreviated"),
+            pytest.param("parallel --tmpdir /tmp 'rm -rf {}' ::: /", id="parallel-tmpdir"),
+            pytest.param("parallel --nice 10 'rm -rf {}' ::: /", id="parallel-nice"),
+            pytest.param("parallel --env FOO 'rm -rf {}' ::: /", id="parallel-env"),
+            pytest.param("parallel --tagstring x 'rm -rf {}' ::: /", id="parallel-tagstring"),
+            pytest.param("parallel -J prof 'rm -rf {}' ::: /", id="parallel-profile"),
+            pytest.param("parallel --memfree 1G 'rm -rf {}' ::: /", id="parallel-memfree"),
+            pytest.param("parallel --newflag 'rm -rf {}' ::: /", id="parallel-unknown-bare"),
+            pytest.param("parallel --newflag x 'rm -rf {}' ::: /", id="parallel-unknown-value"),
+            pytest.param("parallel -j 2 'echo a ; rm -rf {} # x' ::: /", id="parallel-comment"),
+            pytest.param("parallel \"bash -c 'rm -rf {}'\" ::: /", id="parallel-nested-bash-c"),
+            pytest.param("parallel 'rm -rf {}' ::: a /", id="parallel-every-arg"),
+            pytest.param("parallel 'echo \"a\nb\" ; rm -rf {} # x' ::: /", id="parallel-newline"),
         ],
     )
     @pytest.mark.parametrize("mode", ["default", "auto"])
@@ -478,11 +705,19 @@ class TestShellRunWrappers:
             "watch -d ls",
             "watch --interval=2 ls",
             "script -qc 'ls' /dev/null",
+            "script --command 'ls' /dev/null",
+            "script -q --command=ls /dev/null",
             "parallel -j 2 'echo {}' ::: a b",
+            "parallel --tmpdir /tmp 'echo {}' ::: a b",
+            "parallel --bar gzip {} ::: *.log",
+            "parallel --newflag gzip {} ::: a b",
+            "parallel -kj 2 echo {} ::: a b",
+            "parallel 'echo a ; echo {} # x' ::: b",
         ],
     )
-    def test_harmless_command_is_not_denied(self, command):
-        assert not _is_deny(decide(command)), command
+    @pytest.mark.parametrize("mode", ["default", "auto"])
+    def test_harmless_command_is_not_denied(self, command, mode):
+        assert not _is_deny(decide(command, permission_mode=mode)), command
 
 
 class TestStripComments:

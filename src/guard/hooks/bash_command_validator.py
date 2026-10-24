@@ -1289,6 +1289,44 @@ def _expand_braces(command: str, *, quote_aware: bool = True) -> str:
     )
 
 
+def _ansi_c_unsettles_quotes(command: str) -> bool:
+    r"""True when decoding an ANSI-C quote in ``command`` would leave quotes bash never saw.
+
+    ``$'\x27'`` decodes to a bare ``'``, which reading quotes after the decode
+    would take for a real one and so set the next ``{r,r}m`` aside as quoted
+    text. A ``$'...'`` outside quotes or inside double quotes (a ``bash -c``
+    payload) counts; one inside single quotes, such as the ``$'`` ending
+    ``'[Tt]ask$'``, is ordinary text. An unterminated one counts too, since
+    the quoting after it can't be read.
+    """
+    if "$'" not in command:
+        return False
+    quote = ""
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if quote == "'":
+            if c == "'":
+                quote = ""
+        elif c == "\\":
+            i += 1
+        elif command.startswith("$'", i):
+            # Outside quotes, or inside double quotes where a ``bash -c`` payload reads it.
+            literal = _ANSI_C_QUOTED_RE.match(command, i)
+            if literal is None:
+                return True
+            if any(ch in _decode_ansi_c_quoted(literal.group()) for ch in "'\"\\"):
+                return True
+            i = literal.end() - 1
+        elif quote == '"':
+            if c == '"':
+                quote = ""
+        elif c in "'\"":
+            quote = c
+        i += 1
+    return False
+
+
 def _canonicalize(command: str) -> str:
     r"""Fold POSIX line continuations and unicode whitespace to ASCII space.
 
@@ -1300,13 +1338,12 @@ def _canonicalize(command: str) -> str:
     - ``$'\\x72\\x6d' -rf /`` (ANSI-C quoting hides the head token)
     - ``{r,r}m -rf /`` (brace expansion produces ``rm rm -rf /``)
 
-    Brace expansion reads quotes (see ``_brace_words``) unless the command has
-    a ``$'``: decoding turns ``$'\\x27'`` into a bare quote that bash never
-    saw, so the quotes left are not the shell's.
+    Brace expansion reads quotes (see ``_brace_words``) unless an ANSI-C quote
+    decodes to a quote or backslash (see ``_ansi_c_unsettles_quotes``).
     """
     command = command.replace("\\\n", " ")
     command = _UNICODE_WS_RE.sub(" ", command)
-    quote_aware = "$'" not in command
+    quote_aware = not _ansi_c_unsettles_quotes(command)
     command = _decode_ansi_c_quoted(command)
     return _expand_braces(command, quote_aware=quote_aware)
 
@@ -1388,6 +1425,12 @@ def _mark_quoted_newlines(command: str, *, comments: bool | None = None) -> str 
                 return None
             if c == '"':
                 quote = ""
+        elif best_effort and _arithmetic_end(command, i) >= 0:
+            # A ``<<`` in ``$((1<<n))`` is a shift, not a heredoc.
+            end = _arithmetic_end(command, i)
+            out.append(command[i:end])
+            i = end
+            continue
         elif command.startswith("<<", i) or (
             c == "#" and (i == 0 or command[i - 1] in _WORD_START_CHARS)
         ):
@@ -1403,9 +1446,10 @@ def _mark_quoted_newlines(command: str, *, comments: bool | None = None) -> str 
                 out.append("<<<")
                 i += 3
                 continue
-            operator = _HEREDOC_OP_RE.match(command, i) if c == "<" else None
+            operator = _HEREDOC_DELIM_RE.match(command, i) if c == "<" else None
             if operator is not None:
-                heredocs.append((operator.group(3), operator.group(1) == "<<-"))
+                delimiter = next(g for g in operator.groups()[1:] if g)
+                heredocs.append((delimiter, operator.group(1) == "-"))
                 out.append(operator.group())
                 i = operator.end()
                 continue
@@ -1431,6 +1475,19 @@ def _mark_quoted_newlines(command: str, *, comments: bool | None = None) -> str 
     if not marked or (quote and not best_effort):
         return None
     return "".join(out)
+
+
+def _arithmetic_end(command: str, start: int) -> int:
+    """Index just past the ``))`` of an arithmetic ``$((...))`` / ``((...))`` at ``start``, else ``-1``."""
+    if command.startswith("$((", start):
+        end = command.find("))", start + 3)
+    elif command.startswith("((", start) and (
+        start == 0 or command[start - 1] in _WORD_START_CHARS
+    ):
+        end = command.find("))", start + 2)
+    else:
+        return -1
+    return end + 2 if end >= 0 else -1
 
 
 def _heredoc_bodies_end(command: str, start: int, heredocs: list[tuple[str, bool]]) -> int:
@@ -1784,7 +1841,6 @@ _TIMING_RUNNERS: frozenset[str] = frozenset({"timeout", "nice", "ionice"})
 _UVX_MIN_TOKENS = 2  # `uvx <interpreter>`
 _PIPX_RUN_MIN_TOKENS = 3  # `pipx run <interpreter>`
 _UV_RUN_MIN_TOKENS = 3  # `uv run <interpreter>`
-_SCRIPT_C_MIN_TOKENS = 3  # `script -c <cmd>`
 
 
 def _shlex_tokens(segment: str) -> list[str]:
@@ -1973,47 +2029,159 @@ _PARALLEL_VALUE_FLAGS = frozenset(
         "--results",
         "--load",
         "--halt",
+        "--tmpdir",
+        "--tempdir",
+        "--nice",
+        "--env",
+        "--tag-string",
+        "--tagstring",
+        "-J",
+        "--profile",
+        "--memfree",
+        "--memsuspend",
+        "--wd",
+        "--workdir",
+        "--sshloginfile",
+        "--slf",
+        "--header",
+        "--rpl",
     }
 )
+# Options that take no value, so the word after one is already the command.
+_PARALLEL_BARE_FLAGS = frozenset(
+    {
+        "--bar",
+        "--citation",
+        "--dry-run",
+        "--eta",
+        "--group",
+        "--keep-order",
+        "--line-buffer",
+        "--lb",
+        "--no-notice",
+        "--null",
+        "--pipe",
+        "--plus",
+        "--progress",
+        "--quote",
+        "--shuf",
+        "--tag",
+        "--ungroup",
+        "--verbose",
+        "--will-cite",
+        "--",
+    }
+)
+# Letters of clustered short options (``-kq``): bare ones, and the ones that
+# take the next word when they end a cluster (``-kj 2``).
+_PARALLEL_BARE_LETTERS = frozenset("gkmpqrtuvxX0")
+_PARALLEL_VALUE_LETTERS = frozenset("aCdEIjJLnNPsS")
+# Most command starts ``_parallel_command_starts`` follows, one per way of
+# reading the options it can't classify.
+_PARALLEL_MAX_STARTS = 4
+# Placeholders parallel replaces with an argument: ``{}``, ``{.}``, ``{/}``,
+# ``{//}``, ``{/.}`` and ``{2}``.
+_PARALLEL_PLACEHOLDER_RE = re.compile(r"\{(?:[0-9]+|\.|/|//|/\.)?\}")
+
+
+def _parallel_flag_takes_value(flag: str) -> bool | None:
+    """Whether ``flag`` takes the next word as its value; ``None`` when unknown."""
+    if flag in _PARALLEL_VALUE_FLAGS:
+        return True
+    if flag in _PARALLEL_BARE_FLAGS or "=" in flag:
+        return False
+    if flag.startswith("--") or len(flag) == 1:
+        return None
+    letters = flag[1:]
+    if letters[-1].isdigit():
+        return False  # fused value: ``-j2``
+    if all(letter in _PARALLEL_BARE_LETTERS for letter in letters):
+        return False
+    if len(letters) > 1 and all(letter in _PARALLEL_BARE_LETTERS for letter in letters[:-1]):
+        return letters[-1] in _PARALLEL_VALUE_LETTERS or None
+    return None
+
+
+def _parallel_command_starts(tokens: list[str]) -> list[int]:
+    """Indexes in ``tokens`` where ``parallel``'s command can start, past its options.
+
+    An option in neither list may or may not take a value, so each adds a
+    second start one word later: both readings get checked.
+    """
+    starts: list[int] = []
+    pending = [1]
+    while pending and len(starts) < _PARALLEL_MAX_STARTS:
+        i = pending.pop()
+        while i < len(tokens) and tokens[i].startswith("-"):
+            takes_value = _parallel_flag_takes_value(tokens[i])
+            if takes_value is None and len(starts) + len(pending) + 1 < _PARALLEL_MAX_STARTS:
+                pending.append(i + 2)
+            i += 2 if takes_value else 1
+        if i not in starts:
+            starts.append(i)
+    return starts
+
+
+def _fill_placeholders(word: str, arg: str) -> str:
+    """``word`` with each of ``parallel``'s placeholders replaced by ``arg``."""
+    return _PARALLEL_PLACEHOLDER_RE.sub(lambda _match: arg, word)
+
+
+def _parallel_command(tokens: list[str], start: int) -> str | None:
+    """The shell command ``parallel`` runs when its command starts at ``tokens[start]``."""
+    if start >= len(tokens):
+        return None
+    end = start
+    while end < len(tokens) and tokens[end] != ":::":
+        end += 1
+    words = tokens[start:end]
+    args = [t for t in tokens[end + 1 :] if t not in (":::", ":::+")]
+    if not words:
+        return " ; ".join(args) or None
+    if not args:
+        return " ".join(words)
+    if any(_PARALLEL_PLACEHOLDER_RE.search(w) for w in words):
+        return " ; ".join(" ".join(_fill_placeholders(w, arg) for w in words) for arg in args)
+    return " ".join([*words, *args])
 
 
 def _strip_parallel(tokens: list[str]) -> str | None:
     """Strip ``parallel [flags] <cmd> ::: <args>``.
 
-    Args after ``:::`` are the operands the command runs against, so they're
-    substituted into ``{}`` (or appended) so the deny matchers see the real
-    shape (``rm -rf /``, not ``rm -rf {}``). With no command before ``:::``,
+    Args after ``:::`` are the operands the command runs against. Each
+    replaces the placeholders (``{}``) wherever they sit in a word, and with
+    no placeholder they're appended, so the deny matchers see the real shape
+    (``rm -rf /``, not ``rm -rf {}``). With no command before ``:::``,
     parallel runs each arg as a command, so they are returned as a sequence.
+    When an option's arity is unknown, each reading of where the command
+    starts is returned, as a sequence.
     """
     if _basename(tokens[0]) != "parallel":
         return None
-    i = 1
-    while i < len(tokens) and tokens[i].startswith("-"):
-        i += 2 if tokens[i] in _PARALLEL_VALUE_FLAGS else 1
-    if i >= len(tokens):
-        return None
-    end = i
-    while end < len(tokens) and tokens[end] != ":::":
-        end += 1
-    cmd_tokens = tokens[i:end]
-    args = tokens[end + 1 :] if end < len(tokens) else []
-    if not cmd_tokens:
-        return " ; ".join(args) or None
-    if not args:
-        return " ".join(cmd_tokens)
-    substituted = [args[0] if t == "{}" else t for t in cmd_tokens]
-    if "{}" not in cmd_tokens:
-        substituted = substituted + args
-    return " ".join(substituted)
+    commands: list[str] = []
+    for start in _parallel_command_starts(tokens):
+        command = _parallel_command(tokens, start)
+        if command is not None and command not in commands:
+            commands.append(command)
+    return " ; ".join(commands) or None
 
 
 def _strip_script(tokens: list[str]) -> str | None:
-    """Strip ``script [-qc] -c "<cmd>" [<output>]``, with the output file on either side."""
-    if _basename(tokens[0]) != "script" or len(tokens) < _SCRIPT_C_MIN_TOKENS:
+    """Strip ``script [-qc] -c "<cmd>" [<output>]`` and ``script --command=<cmd>``.
+
+    The output file may sit on either side, and ``--command`` may be
+    abbreviated, as ``getopt`` allows.
+    """
+    if _basename(tokens[0]) != "script":
         return None
-    for i in range(1, len(tokens) - 1):
-        if _SHELL_C_FLAGS_RE.match(tokens[i]):
-            return tokens[i + 1] if i + 1 < len(tokens) else None
+    for i in range(1, len(tokens)):
+        flag, equals, value = tokens[i].partition("=")
+        is_long = len(flag) >= len("--c") and "--command".startswith(flag)
+        if equals:
+            if is_long:
+                return value
+        elif i + 1 < len(tokens) and (is_long or _SHELL_C_FLAGS_RE.match(flag)):
+            return tokens[i + 1]
     return None
 
 

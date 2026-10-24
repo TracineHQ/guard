@@ -103,3 +103,27 @@
 {"command": "script -qc 'ls' /dev/null", "expected": "allow", "mode": "default", "source": "curated", "note": "script -qc around a harmless command"}
 {"command": "parallel -j 2 'echo {}' ::: a b", "expected": "allow", "mode": "default", "source": "curated", "note": "parallel -j 2 around a harmless command"}
 {"command": "cat <<'EOF'\nit's here\nrm -rf /\nEOF\necho 'a\nb' # x", "expected": "allow", "mode": "default", "source": "curated", "note": "a heredoc body is data even when a quoted newline follows it"}
+{"command": "grep -nE '^[0-9]{1,2} x|[Tt]ask$' notes.md", "expected": "allow", "mode": "default", "source": "curated", "note": "a $ anchor ending a single-quoted regex is not an ANSI-C quote: its braces stay literal"}
+{"command": "grep -nE '^[0-9]{1,2} x|[Tt]ask$' notes.md", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a $ anchor ending a single-quoted regex is not an ANSI-C quote: its braces stay literal"}
+{"command": "rg -n '^v[0-9]{1,3}\\.[0-9]+ |[Rr]eadme$' CHANGELOG.md", "expected": "allow", "mode": "default", "source": "curated", "note": "a $ anchor ending a single-quoted regex with a brace range"}
+{"command": "rg -n '^v[0-9]{1,3}\\.[0-9]+ |[Rr]eadme$' CHANGELOG.md", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a $ anchor ending a single-quoted regex with a brace range"}
+{"command": "sed -nE '/^[0-9]{3,} |[Tt]odo$/p' notes.md", "expected": "allow", "mode": "default", "source": "curated", "note": "a $ anchor in a sed pattern with an open-ended brace range"}
+{"command": "sed -nE '/^[0-9]{3,} |[Tt]odo$/p' notes.md", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a $ anchor in a sed pattern with an open-ended brace range"}
+{"command": "grep -nE \"[0-9]{1,2} x|[Tt]ask\" notes.md && printf $'done\\n'", "expected": "allow", "mode": "default", "source": "curated", "note": "an ANSI-C quote that decodes to no quote leaves quoted braces alone"}
+{"command": "grep -nE \"[0-9]{1,2} x|[Tt]ask\" notes.md && printf $'done\\n'", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: an ANSI-C quote that decodes to no quote leaves quoted braces alone"}
+{"command": "cat > notes.md <<'END-NOTES'\nrm -rf / is denied; don't retry it\nEND-NOTES", "expected": "allow", "mode": "auto", "source": "curated", "note": "a hyphenated delimiter: the heredoc body is text, not a command"}
+{"command": "cat > notes.md <<\\EOF\nrm -rf / is denied; don't retry it\nEOF", "expected": "allow", "mode": "auto", "source": "curated", "note": "a backslash-quoted delimiter: the heredoc body is text"}
+{"command": "cat <<'END-NOTES'\nrm -rf / is denied; don't retry it\nEND-NOTES", "expected": "allow", "mode": "default", "source": "curated", "note": "a hyphenated delimiter with no redirect"}
+{"command": "cat <<'END-NOTES'\nrm -rf / is denied; don't retry it\nEND-NOTES", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a hyphenated delimiter with no redirect"}
+{"command": "cat <<\\EOF\nrm -rf / is denied; don't retry it\nEOF\necho 'a\nb' # x", "expected": "allow", "mode": "default", "source": "curated", "note": "a heredoc body that names rm, then a quoted newline"}
+{"command": "cat <<\\EOF\nrm -rf / is denied; don't retry it\nEOF\necho 'a\nb' # x", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a heredoc body that names rm, then a quoted newline"}
+{"command": "parallel --tmpdir /tmp 'echo {}' ::: a b", "expected": "allow", "mode": "default", "source": "curated", "note": "parallel --tmpdir around a harmless command"}
+{"command": "parallel --tmpdir /tmp 'echo {}' ::: a b", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: parallel --tmpdir around a harmless command"}
+{"command": "parallel --bar gzip {} ::: *.log", "expected": "allow", "mode": "default", "source": "curated", "note": "parallel --bar takes no value, so a glob argument is not a command head"}
+{"command": "parallel --bar gzip {} ::: *.log", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: parallel --bar takes no value, so a glob argument is not a command head"}
+{"command": "parallel --newflag gzip {} ::: a b", "expected": "allow", "mode": "default", "source": "curated", "note": "an unlisted option around a harmless command"}
+{"command": "parallel --newflag gzip {} ::: a b", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: an unlisted option around a harmless command"}
+{"command": "parallel 'echo a ; echo {} # x' ::: b", "expected": "allow", "mode": "default", "source": "curated", "note": "a placeholder before a comment"}
+{"command": "parallel 'echo a ; echo {} # x' ::: b", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a placeholder before a comment"}
+{"command": "script --command 'ls' /dev/null", "expected": "allow", "mode": "default", "source": "curated", "note": "script --command around a harmless command"}
+{"command": "script --command 'ls' /dev/null", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: script --command around a harmless command"}

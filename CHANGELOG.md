@@ -106,15 +106,24 @@ adheres to [Semantic Versioning](https://semver.org/).
   a multi-line awk program missed the awk floor the same way. Where the
   quoting can't be read exactly (a `#` comment, a heredoc, `alias`, `$'...'`,
   a backtick, `${x:-y}`), guard reads the command with the quoted lines
-  joined as well as line by line, and denies if either reading denies.
-  `echo 'a<newline>b' ; rm -rf / # x` passed in every mode before.
+  joined as well as line by line, and denies if either reading denies. That
+  reading skips heredoc bodies for every delimiter form (`<<'END-X'`,
+  `<<END.X`, `<<\EOF`, `<<-EOF`). `echo 'a<newline>b' ; rm -rf / # x` passed
+  in every mode before, as did the same command after a `<<'END-X'` heredoc
+  whose body has an apostrophe.
 - `watch`, `script -c` and `parallel` run their command through a shell, and
   that command is now split like a `bash -c` string. A second command in it
   (`watch -n1 'echo a; rm -rf /'`) passed before. The command is also found
   behind the values `watch` (`-n 1`, `--interval 2`, `-q 3`) and `parallel`
-  (`-j 2`) take, behind a clustered `script -qc` or a leading `script -c`,
-  and `parallel ::: 'rm -rf /'` runs its arguments as the commands they are.
-  `watch -n 1 'rm -rf /'` and `parallel -j 2 'rm -rf {}' ::: /` passed before.
+  (`-j 2`, `--tmpdir`, `--nice`, `--env`, `--tagstring`, `-J`, `--memfree`)
+  take; an option guard doesn't list is read both with and without a value. A
+  `parallel` placeholder (`{}`, `{.}`, `{1}`) is replaced inside a
+  quoted command and for every `:::` argument, and `parallel ::: 'rm -rf /'`
+  runs its arguments as the commands they are. `script` is read through a
+  clustered `-qc`, a leading `-c`, and `--command <cmd>` or `--command=<cmd>`.
+  `watch -n 1 'rm -rf /'`, `parallel -j 2 'rm -rf {}' ::: /`,
+  `parallel -j 2 'echo a ; rm -rf {} # x' ::: /` and
+  `script --command 'rm -rf /' /dev/null` passed before.
 
 ### Fixed
 
@@ -148,7 +157,9 @@ adheres to [Semantic Versioning](https://semver.org/).
   no longer ends a word either. An unquoted `{a,b}` still expands and is
   checked as before. When the quoting can't be read exactly (an unterminated
   quote, a backtick, `$(...)` or a `${...}` other than a plain name inside
-  double quotes) or the command has a `$'`, every brace is expanded as before.
+  double quotes) or an ANSI-C quote decodes to a quote or backslash
+  (`$'\x27'`), every brace is expanded as before. A `$` ending a quoted regex
+  (`'[Tt]ask$'`) is not an ANSI-C quote.
 - Read-only guard CLI calls (`guard status`, `guard allowlist list`,
   `guard mode --help`, `guard allowlist --help`) no longer trip
   `protected_files`.
