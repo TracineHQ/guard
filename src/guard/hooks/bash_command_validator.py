@@ -7038,6 +7038,12 @@ _CODE_RUNNER_HEADS: frozenset[str] = (
 
 _REDIRECT_RE = re.compile(r">>|>\s*\S")
 
+# What can make a ``$((`` run a command or write a file: a substitution that is
+# not more arithmetic, a backtick, a process substitution, a command separator
+# or a ``>`` (``$((cd x; y) ; z)`` is a substitution holding a subshell, not
+# arithmetic).
+_DOUBLE_PAREN_RUNS_RE = re.compile(r"\$\((?!\()|`|[<>]\(|[;&|\n>]")
+
 
 def _close_paren(text: str, open_idx: int) -> int:
     """Index of the ``)`` matching ``text[open_idx] == "("``, or ``len(text)``."""
@@ -7050,6 +7056,34 @@ def _close_paren(text: str, open_idx: int) -> int:
             if depth == 0:
                 return j
     return len(text)
+
+
+def _double_paren_regions(masked: str) -> list[tuple[int, int]]:
+    """``(start, close)`` for every ``$((`` in ``masked``, nested ones included.
+
+    ``close`` is the ``)`` matching the first ``(``, or the end of the text
+    when the segment lost its closers.
+    """
+    regions = []
+    start = masked.find("$((")
+    while start >= 0:
+        regions.append((start, _close_paren(masked, start + 1)))
+        start = masked.find("$((", start + 3)
+    return regions
+
+
+def _double_paren_runs(masked: str, start: int, close: int, regions: list[tuple[int, int]]) -> bool:
+    """True if the ``$((`` at ``start`` can run a command at its own level.
+
+    What a nested ``$((`` holds is that region's business, so math nested any
+    depth (``$(( $(( 1 )) + 2 ))``) costs nothing, and a substitution deep inside
+    is checked once, by its innermost ``$((``.
+    """
+    inner = [(s, c) for s, c in regions if start < s < close]
+    return any(
+        not any(s <= m.start() <= c for s, c in inner)
+        for m in _DOUBLE_PAREN_RUNS_RE.finditer(masked, start + 3, close)
+    )
 
 
 def _construct_spans(masked: str) -> list[tuple[str, int, int, int]]:
@@ -7212,9 +7246,10 @@ def _construct_floor(
 
     Each body runs as its own command (a ``>(...)`` body reads the outer
     output, so it is checked as ``cat | <body>`` to catch ``tee >(sh)``).
-    What a ``$((`` holds is checked as arguments to ``cat``: arithmetic runs
-    any substitution inside it, and a ``$((`` that is not arithmetic
-    (``$((cd x; y) ; z)``) is a substitution holding a subshell. Then the
+    What a ``$((`` holds is checked as arguments to ``cat`` when it holds
+    something that runs: arithmetic runs any substitution inside it, and a
+    ``$((`` that is not arithmetic (``$((cd x; y) ; z)``) is a substitution
+    holding a subshell. Nested ``$((`` with nothing else is plain math. Then the
     segment is re-checked with every substitution replaced by ``/``, the worst
     value it could expand to, so ``rm -rf $(echo /)`` still hits the ``rm``
     floor.
@@ -7227,12 +7262,13 @@ def _construct_floor(
         if hit is not None:
             return hit
     masked = _shell_code_mask(segment)
-    start = masked.find("$((")
-    while start >= 0:
-        hit = _floor_check("cat " + segment[start + 3 : _close_paren(masked, start + 1)], command)
+    regions = _double_paren_regions(masked)
+    for start, close in regions:
+        if not _double_paren_runs(masked, start, close, regions):
+            continue
+        hit = _floor_check("cat " + segment[start + 3 : close], command)
         if hit is not None:
             return hit
-        start = masked.find("$((", start + 3)
     subs = [(s, c) for kind, s, _b, c in spans if kind == "substitution"]
     if not subs:
         return None

@@ -257,3 +257,5 @@
 {"command": "ls | $(git branch -D x)", "expected": "deny", "mode": "default", "source": "adversarial", "note": "branch delete run as the command after a pipe"}
 {"command": "$(echo $(git branch -D x))", "expected": "deny", "mode": "default", "source": "adversarial", "note": "nested substitution still holds a branch delete run as the command"}
 {"command": "$(git -C /tmp branch -D x)", "expected": "deny", "mode": "default", "source": "adversarial", "note": "git -C does not make a branch delete a list form"}
+{"command": "echo $((echo hi > ~/.zshrc) )", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a $(( that is a subshell substitution redirects into a shell rc file"}
+{"command": "echo $(( 1 + $(( 2 )) + $(rm -rf ~) ))", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a substitution beside nested arithmetic is still checked"}
