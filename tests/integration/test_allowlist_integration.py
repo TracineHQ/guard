@@ -56,7 +56,7 @@ def test_disable_rules_lets_disk_destruction_through(allowlist_home: Path) -> No
     _write_allowlist(
         allowlist_home / "allowlist.json", {"disable_rules": ["bash.disk_destruction"]}
     )
-    assert _is_allow(decide(cmd))
+    assert decide(cmd) is None
 
 
 def test_disable_rules_does_not_affect_other_rules(allowlist_home: Path) -> None:
@@ -72,24 +72,21 @@ def test_disable_rules_does_not_affect_other_rules(allowlist_home: Path) -> None
 # === ALWAYS_DENY: coarse-grained disable ===
 
 
-def test_disable_always_deny_lets_literal_through(allowlist_home: Path) -> None:
+def test_disable_always_deny_leaves_the_other_floor_rules(allowlist_home: Path) -> None:
     """``rm -rf /`` hits the literal ALWAYS_DENY layer first (rule_id ``bash.always_deny``).
 
-    Disabling that one rule_id is the intentional escape hatch — it doesn't
-    silently degrade the synthetic-matcher layer that catches non-literal
-    catastrophic shapes. A user who reaches for this rule is making a
-    deliberate, audited choice; the behaviour matches the documented
-    layering and the audit log records the bypass.
+    Disabling that one rule_id skips only that layer: the scan goes on, and the
+    rm matcher still denies the same command under its own rule id.
     """
     from guard.hooks.bash_command_validator import decide
 
     cmd = "rm -rf /"
-    assert _is_deny(decide(cmd))
+    assert "bash.always_deny" in decide(cmd)["permissionDecisionReason"]
 
     _write_allowlist(allowlist_home / "allowlist.json", {"disable_rules": ["bash.always_deny"]})
     decision = decide(cmd)
-    assert _is_allow(decision)
-    assert "bash.always_deny" in decision["permissionDecisionReason"]
+    assert _is_deny(decision)
+    assert "bash.dangerous_rm" in decision["permissionDecisionReason"]
 
 
 # === Retired config grants nothing ===
@@ -136,7 +133,7 @@ def test_audit_log_records_allowlist_bypass(
     )
     decide("dd if=/dev/zero of=/dev/sda")
     last = json.loads(decision_log_env.read_text(encoding="utf-8").strip().splitlines()[-1])
-    assert last["decision"] == "allow"
+    assert last["decision"] == "pass"
     assert last["reason"] == "allowlist: rule 'bash.disk_destruction' disabled by user config"
 
 

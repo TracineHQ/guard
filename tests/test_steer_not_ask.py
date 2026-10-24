@@ -231,14 +231,16 @@ def test_credential_access_is_a_steering_deny(tool_name: str, tool_input: dict[s
 # === git -C validator ===
 
 
-def test_git_c_config_write_steers_to_cd() -> None:
-    reason = _assert_steer(git_c_validator.decide("git -C /repo config user.name bob"))
-    assert "cd " in reason
+def test_git_c_read_exec_is_a_steering_deny() -> None:
+    reason = _assert_steer(git_c_validator.decide("git -C /repo log --output=/tmp/x"))
+    assert "writes a file or execs" in reason
 
 
-def test_git_c_unknown_subcommand_steers_to_cd() -> None:
-    reason = _assert_steer(git_c_validator.decide("git -C /repo frobnicate --x"))
-    assert "cd /repo && git frobnicate" in reason
+@pytest.mark.parametrize(
+    "command", ["git -C /repo config user.name bob", "git -C /repo frobnicate --x"]
+)
+def test_git_c_other_subcommands_get_no_decision(command: str) -> None:
+    assert git_c_validator.decide(command) is None
 
 
 # === commit_message_validator ===
@@ -272,7 +274,7 @@ def test_unknown_command_passes(cmd: str, permission_mode: str) -> None:
 
 _OFF_CASES = [
     (credential_check, _payload("Read", {"file_path": "~/.aws/credentials"})),
-    (git_c_validator, _payload("Bash", {"command": "git -C /repo config user.name bob"})),
+    (git_c_validator, _payload("Bash", {"command": "git -C /repo log --output=/tmp/x"})),
     (bash_command_validator, _payload("Bash", {"command": "reboot"})),
     (agent_output_guard, _payload("Read", {"file_path": _AGENT_OUTPUT_FILE})),
 ]

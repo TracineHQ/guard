@@ -7,8 +7,8 @@ reach in a given mode -- recorded as ``{command, expected, mode, source, note}``
 The ``allow``/``deny`` files are the original false-positive / false-negative
 ratchets (seeded from real convo session history); the threat-category files
 (``escalation.jsonl``, ``host_control.jsonl``, ...) add the elevated-risk tier
-and its sibling hard denies. ``mode`` is a Claude Code permission_mode, and
-only ``auto`` changes an outcome (STEER rules pass, FLOOR rules deny). A probe
+and its sibling hard denies. ``mode`` is a Claude Code permission_mode,
+recorded and never acted on. A probe
 of "does guard classify this right?" becomes a permanent row here instead of a
 throwaway ``guard test`` string.
 

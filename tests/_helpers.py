@@ -99,8 +99,7 @@ def run_hook(  # noqa: PLR0913 -- kw-only flags, all optional and orthogonal
     """Spawn the named hook with a Bash PreToolUse payload, return (rc, stdout, stderr).
 
     The default payload is the canonical bash-command shape.
-    ``permission_mode`` sets the payload field; only ``auto`` changes the
-    decision (STEER denies become logged passes).
+    ``permission_mode`` sets the payload field; it never changes the decision.
     """
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_ROOT / "src")

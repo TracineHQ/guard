@@ -19,7 +19,6 @@ import pytest
 from guard._corpus import CorpusRow, classify, default_corpus_dir, evaluate, load_corpus
 from guard.cli import _corpus_payload, cmd_corpus
 from guard.hooks.bash_command_validator import decide
-from tests._helpers import is_deny
 
 
 def test_default_corpus_dir_loads_rows() -> None:
@@ -78,8 +77,7 @@ _HARNESS_INVOCATIONS = [
 @pytest.mark.parametrize("command", _HARNESS_INVOCATIONS)
 def test_guard_harness_invocations_not_denied(command: str) -> None:
     """The corpus runner + read-only diagnostics (incl. the ``--json`` global)
-    are never denied. ``guard test`` is deliberately excluded -- it is steered to
-    the corpus (see test_guard_test_probe_steered_in_dev_tree)."""
+    are never denied."""
     result = decide(command)
     assert classify(result) == "allow", (
         f"guard harness invocation should not be denied: {command!r} -> {result!r}"
@@ -109,11 +107,8 @@ def test_guard_corpus_add_not_denied(command: str) -> None:
     )
 
 
-# --------------------------------------------------------------------------
-# Harness steering: ad-hoc `guard test '<cmd>'` is redirected to the corpus
-# inside a guard source checkout (where default_corpus_dir exists).
-# --------------------------------------------------------------------------
-_STEERED_PROBES = [
+# ``guard test '<cmd>'`` classifies its quoted argument and runs nothing.
+_PROBES = [
     "guard test 'ls -la'",
     "uv run guard test 'rm -rf /'",
     "uvx guard test 'su'",
@@ -122,21 +117,6 @@ _STEERED_PROBES = [
 ]
 
 
-@pytest.mark.parametrize("command", _STEERED_PROBES)
-def test_guard_test_probe_steered_in_dev_tree(command: str) -> None:
-    """In a guard checkout, ad-hoc `guard test '<cmd>'` denies with the corpus
-    steer -- pytest runs from source, so default_corpus_dir exists."""
-    result = decide(command)
-    assert is_deny(result), f"ad-hoc guard test should be steered (deny): {command!r} -> {result!r}"
-    assert "bash.use_corpus_harness" in result.get("permissionDecisionReason", ""), (
-        f"steer should carry the bash.use_corpus_harness rule_id: {command!r}"
-    )
-
-
-@pytest.mark.parametrize("command", ["guard corpus", "uv run guard corpus", "guard test --help"])
-def test_corpus_and_help_not_steered(command: str) -> None:
-    """The corpus runner and flag-only `guard test --help` are NOT probes."""
-    result = decide(command)
-    assert "bash.use_corpus_harness" not in ((result or {}).get("permissionDecisionReason", "")), (
-        f"{command!r} must not be steered"
-    )
+@pytest.mark.parametrize("command", _PROBES)
+def test_guard_test_probe_passes(command: str) -> None:
+    assert decide(command) is None

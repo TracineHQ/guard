@@ -23,19 +23,10 @@
 {"command": "g\"h\" auth token", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-A: split-quoted head g\"h\" folds to gh"}
 {"command": "echo \"gh auth token\"", "expected": "allow", "mode": "default", "source": "crossexam", "note": "anti-FP R-A: quoted PHRASE (has whitespace) stays masked -- echoing text is not execution position"}
 {"command": "echo \"$(gh auth token)\"", "expected": "deny", "mode": "default", "source": "crossexam", "note": "anti-regression R-A: $() command-sub is left for the masker, still executes -> still denies"}
-{"command": "yq --inplace=true '.a=1' file.yaml", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-D/F6: =-joined long flag --inplace=true (flag part before = matches dangerous set; was allow)"}
-{"command": "yq --in-place=true '.a=1' file.yaml", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-D/F6: --in-place=true hyphenated long form"}
-{"command": "yq --inplace=1 '.a=1' file.yaml", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-D/F6: --inplace=1 numeric value"}
-{"command": "sudo yq --inplace=true '.a=1' file.yaml", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-D/F6: wrapped --inplace=true"}
-{"command": "yq eval --inplace=true '.a=1' file.yaml", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-D/F6: eval subcommand + --inplace=true"}
-{"command": "yq -i.bak '.a=1' file.yaml", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-D/F6: -i.bak leading-letter short flag carries the -i in-place bit"}
-{"command": "yq -i9 '.a=1' file.yaml", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-D/F6: -i9 leading -i + digit suffix, denied for consistency"}
 {"command": "yq -I4 '.a' config.yaml", "expected": "allow", "mode": "default", "source": "crossexam", "note": "anti-FP R-D: -I4 uppercase indent is not the lowercase -i in-place flag"}
 {"command": "find . -name '-delete'", "expected": "allow", "mode": "default", "source": "crossexam", "note": "R-F: -delete as a -name search VALUE is not the destructive action flag (was a false-positive deny)"}
 {"command": "sudo find . -name '-delete'", "expected": "allow", "mode": "default", "source": "crossexam", "note": "R-F: wrapped find, -delete is the -name value"}
 {"command": "timeout 5 find . -iname '-delete'", "expected": "allow", "mode": "default", "source": "crossexam", "note": "R-F: -iname value variant"}
-{"command": "find . -empty -delete", "expected": "deny", "mode": "default", "source": "crossexam", "note": "anti-regression R-F: -empty is a 0-value primary -- it must NOT skip the real -delete action that follows"}
-{"command": "find . -name '*.log' -delete", "expected": "deny", "mode": "default", "source": "crossexam", "note": "anti-regression R-F: real -delete after a -name value still denies"}
 {"command": ":() ( :|:& )", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-F/F5: fork bomb with SUBSHELL body, func-def opener ( not {"}
 {"command": "bomb() ( rm -rf / )", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-F/F5: named func subshell body hides inner rm -rf /"}
 {"command": "function bomb { rm -rf / ; }", "expected": "deny", "mode": "default", "source": "crossexam", "note": "R-F/F5: function-keyword form brace body"}

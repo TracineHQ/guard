@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TracineHQ contributors
-"""Ordinary work that auto mode used to deny, and the floor it must keep.
+"""Ordinary work guard used to deny, and the floor it must keep.
 
 An over-blocking check ran real agent commands through ``auto`` mode. Each
-``PASSES_IN_AUTO`` row is a short, generic stand-in for a shape it found
-denied: a function joined by ``&&``, a heredoc body read as commands, a ``-c``
+``PASSES`` row is a short, generic stand-in for a shape it found denied: a function joined by ``&&``, a heredoc body read as commands, a ``-c``
 string split on whitespace, an awk command built from a literal, a literal
 inline program, and a pipe into a script. Each ``STILL_DENIES`` row is the
 floor action the fix must not let through, in every mode.
@@ -17,7 +16,7 @@ import pytest
 from guard.hooks import bash_command_validator as bcv
 from tests._helpers import is_deny
 
-PASSES_IN_AUTO: list[str] = [
+PASSES: list[str] = [
     # 1. A function body that neither pipes into nor backgrounds itself.
     "f() { echo hi; } && f",
     "f() { echo hi; }; f 2>&1",
@@ -118,36 +117,16 @@ STILL_DENIES: list[str] = [
 ]
 
 
-@pytest.mark.parametrize("command", PASSES_IN_AUTO)
-def test_ordinary_work_passes_in_auto(command: str) -> None:
-    assert not is_deny(bcv.decide(command, permission_mode="auto"))
+@pytest.mark.parametrize("permission_mode", ["auto", "default"])
+@pytest.mark.parametrize("command", PASSES)
+def test_ordinary_work_passes(command: str, permission_mode: str) -> None:
+    assert bcv.decide(command, permission_mode=permission_mode) is None
 
 
 @pytest.mark.parametrize("permission_mode", ["auto", "default"])
 @pytest.mark.parametrize("command", STILL_DENIES)
 def test_floor_still_denies(command: str, permission_mode: str) -> None:
     assert is_deny(bcv.decide(command, permission_mode=permission_mode))
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        "python3 -c 'print(1)'",
-        "python3 - <<'EOF'\nprint(1)\nEOF",
-        "node -e 'console.log(1)'",
-        "osascript -e 'beep'",
-        "perl -e 'print 1'",
-    ],
-)
-def test_literal_inline_program_still_denies_outside_auto(command: str) -> None:
-    assert is_deny(bcv.decide(command))
-
-
-@pytest.mark.parametrize(
-    "command", ["awk '{ cmd = \"wc -l \" $1; cmd | getline n }' f", "printf '{}' | python3 x.py"]
-)
-def test_overblock_fix_holds_in_default_mode(command: str) -> None:
-    assert bcv.decide(command) is None
 
 
 def test_fork_bomb_message_says_fork_bomb() -> None:

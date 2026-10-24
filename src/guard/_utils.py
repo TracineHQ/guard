@@ -7,7 +7,7 @@ Provides:
   ``~/.claude/guard-decisions.jsonl`` (schema v1, see
   ``docs/output-format.md``)
 - ``log_decision()`` — the single canonical writer hooks call when they
-  emit an allow/deny decision
+  deny or pass a call
 - ``read_permission_mode(hook_input)`` — extract the documented Claude Code
   ``permission_mode`` from a PreToolUse payload (logged, never a policy input)
 - ``sanitize_for_stderr()`` — strip control chars before writing user input
@@ -71,8 +71,7 @@ def read_permission_mode(hook_input: dict[str, Any] | None) -> str:
 
     Defaults to ``"default"`` when the field is absent or non-string.
     Unknown literal values are returned as-is. The value is recorded in the
-    decision log. Only ``auto`` changes a decision: there guard keeps its
-    hard floor and hands STEER rules to Claude Code (``guard.registry``).
+    decision log and never changes a decision.
     """
     if hook_input is not None:
         raw = hook_input.get("permission_mode")
@@ -307,7 +306,7 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
     hook_id: str,
     event: str,
     tool_name: str | None,
-    decision: Literal["allow", "deny", "pass", "defer"],
+    decision: Literal["deny", "pass"],
     reason: str,
     command_excerpt: str | None = None,
     session_id: str = "",
@@ -335,7 +334,7 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
         hook_id: Namespaced hook id, e.g. ``"guard.bash_command_validator"``.
         event: Claude Code event name (typically ``"PreToolUse"``).
         tool_name: ``Bash``/``Edit``/``Read``/etc., or ``None``.
-        decision: One of ``allow``/``deny``/``pass``/``defer``.
+        decision: ``deny`` or ``pass``.
         reason: Human-readable rationale (truncated to 1024 chars).
         command_excerpt: Optional bash-command excerpt (truncated to 4096).
         session_id: Claude Code session id.
@@ -475,7 +474,7 @@ def log_permission_request(  # noqa: PLR0913 -- mirror log_decision's keyword-on
 
 
 def emit_pretooluse_decision(
-    decision: Literal["allow", "deny"],
+    decision: Literal["deny"],
     reason: str,
     *,
     updated_input: dict[str, Any] | None = None,
@@ -484,9 +483,10 @@ def emit_pretooluse_decision(
     """Build a PreToolUse decision envelope.
 
     Args:
-        decision: ``"allow"`` or ``"deny"``. Guard never emits ``"ask"``: a
-            flagged call is denied with a reason that steers the agent to a
-            safer form or back to the user.
+        decision: always ``"deny"``. Guard never emits ``"allow"`` or
+            ``"ask"``: a flagged call is denied with a reason that steers the
+            agent to a safer form or back to the user, and anything else gets
+            no decision.
         reason: Human-readable rationale surfaced to the user/agent. For a
             deny, say what to do instead.
         updated_input: Optional rewritten tool input merged into the envelope.

@@ -35,7 +35,6 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from guard._utils import GUARD_HOME, log_decision, read_permission_mode, sanitize_for_stderr
-from guard.registry import auto_pass_reason, is_deferred_to_auto
 
 Mode = Literal["enforce", "shadow", "off"]
 _VALID_MODES: frozenset[str] = frozenset(("enforce", "shadow", "off"))
@@ -70,7 +69,6 @@ _BASH_MATCHER_RULE_IDS: tuple[str, ...] = (
     "bash.conditional_denied_flag",
     "bash.credential_leak",
     "bash.dangerous_construct",
-    "bash.dangerous_env_sink",
     "bash.dangerous_interpreter",
     "bash.dangerous_rm",
     "bash.db_cli_destructive",
@@ -80,20 +78,14 @@ _BASH_MATCHER_RULE_IDS: tuple[str, ...] = (
     "bash.env_split_string",
     "bash.escalation_shell",
     "bash.eval_builtin",
-    "bash.exec_wrapper",
     "bash.fs_attr_sensitive",
     "bash.function_definition",
     "bash.gcloud_destructive",
     "bash.gem_remote_install",
     "bash.gh_api_destructive",
-    "bash.git_config_injection",
     "bash.git_force_push",
     "bash.git_read_exec",
-    "bash.git_ref_mutation",
     "bash.git_force_refspec",
-    "bash.git_submodule_add",
-    "bash.git_worktree_add",
-    "bash.glob_head",
     "bash.go_remote_install",
     "bash.gpg_secret_delete",
     "bash.helm_remote_install",
@@ -103,23 +95,14 @@ _BASH_MATCHER_RULE_IDS: tuple[str, ...] = (
     "bash.kubectl_destructive",
     "bash.mongo_destructive",
     "bash.network_policy_wipe",
-    "bash.npm_url_install",
-    "bash.npx_remote",
-    "bash.persistence",
-    "bash.pip_install_url",
     "bash.process_attach",
     "bash.process_tree_kill",
     "bash.registry_config",
-    "bash.remote_shell_wrapper",
     "bash.secret_egress",
     "bash.secret_value",
     "bash.sensitive_write",
     "bash.shell_wrapper",
     "bash.sudo_escalation",
-    "bash.tool_alternative",
-    "bash.trap_exploit",
-    "bash.use_corpus_harness",
-    "bash.var_expanded_head",
     "bash.wrapper_stacking",
 )
 
@@ -272,17 +255,13 @@ def apply_decision(  # noqa: PLR0913 -- hook id, payload, envelope, excerpt + po
     *,
     trust_root: bool = False,
     overridable: bool = True,
-    rule: str | None = None,
 ) -> None:
     """Log a hook's decision and hand it to Claude Code, honoring guard mode.
 
     ``off`` emits nothing and ``shadow`` logs a deny without emitting it,
     except for ``trust_root`` decisions (guard's own files), which hold in
     every mode. ``hook_id`` in ``disable_rules`` turns the decision into a
-    logged pass unless ``overridable`` is False. In Claude Code's ``auto``
-    permission mode a deny whose tier key (``rule``, else
-    ``hook_id``) is a STEER rule becomes a logged pass with no output; FLOOR
-    denies are unchanged. A deny exits 2.
+    logged pass unless ``overridable`` is False. A deny exits 2.
     """
     allowlist = load_allowlist()
     hso = envelope["hookSpecificOutput"]
@@ -305,10 +284,6 @@ def apply_decision(  # noqa: PLR0913 -- hook id, payload, envelope, excerpt + po
     bypass = hook_bypass_reason(allowlist, hook_id) if overridable else None
     if bypass is not None:
         log_decision(decision="pass", reason=bypass, **record)
-        return
-    tier_key = rule or hook_id
-    if decision == "deny" and is_deferred_to_auto(tier_key, permission_mode):
-        log_decision(decision="pass", reason=auto_pass_reason(tier_key), **record)
         return
     log_decision(decision=decision, reason=hso["permissionDecisionReason"], **record)
     if decision == "deny" and allowlist.mode == "shadow" and not trust_root:

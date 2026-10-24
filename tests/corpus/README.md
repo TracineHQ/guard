@@ -31,12 +31,13 @@ runner and CI pick it up automatically. No code change needed to add a case.
 |---|---|---|
 | `command` | yes | The exact bash command string fed to `decide()`. |
 | `expected` | yes | The decision class guard must reach: `allow` or `deny`. |
-| `mode` | no (default `default`) | Passed to `decide()` as the Claude Code permission mode. Only `auto` changes the outcome: there STEER rules pass and FLOOR rules still deny (see `docs/dangerous-commands.md`). |
+| `mode` | no (default `default`) | Passed to `decide()` as the Claude Code permission mode. It is recorded, never acted on: every mode gets the same decision. |
 | `source` | no | Provenance: `curated` (hand-written), `adversarial` (found by a sweep), `convo:session` (seeded from real usage). |
 | `note` | no | One line on why the row exists / what it guards against. |
 
-`expected` collapses guard's envelope: interactive passthrough (`None`) and an
-explicit allow both count as `allow`; `deny` is the literal decision. Guard never asks.
+`expected` collapses guard's envelope: `deny` is a deny, and `allow` means guard
+gave no decision, so Claude Code's own permission step decides. Guard never
+allows or asks.
 
 Rows are adjudicated against guard's shipped policy: your allowlist never
 changes an outcome, and a corpus run writes nothing to the
@@ -52,14 +53,14 @@ evaluates every file. Rows are self-describing via `expected`/`mode`.
 | File | Covers |
 |---|---|
 | `allow.jsonl` | Real dev commands guard must NOT deny (FP ratchet, seeded from session history). |
-| `deny.jsonl` | Dangerous-floor commands guard must deny in both modes (FN ratchet). |
+| `deny.jsonl` | Dangerous-floor commands guard must deny in every mode (FN ratchet). |
 | `escalation.jsonl` | Non-sudo privilege escalation (`su`, `doas`, `pkexec`, `runuser`, `setpriv`, `machinectl shell`). Elevated-risk tier: denied in every mode. |
 | `host_control.jsonl` | Host power / runlevel control (`reboot`, `shutdown`, `systemctl poweroff`, `init 0`, `systemctl isolate <power>.target`). Elevated-risk tier: denied in every mode. |
 | `registry.jsonl` | Package-registry / index redirection (`npm config set registry`, `pip config set global.index-url`). Elevated-risk tier: denied in every mode. |
 | `fs_attr.jsonl` | Filesystem-attribute tampering on sensitive paths (`chown`/`chgrp`/`chattr`/`setfacl`). Both-mode hard deny. |
 | `secret_egress.jsonl` | Credential-file network egress (`curl -T ~/.ssh/id_rsa`, `nc < key`). Both-mode hard deny. |
 | `crossexam.jsonl` | Adversarial cross-examination findings -- the default append target for `guard corpus add`. Grows append-only as new bypasses / FPs are found. |
-| `auto.jsonl` | Claude Code `auto` permission mode: STEER shapes must pass, FLOOR shapes (including payloads a STEER shape hides) must still deny, and default rows pin that nothing else changed. |
+| `auto.jsonl` | Rows run in Claude Code `auto` permission mode: floor shapes (including payloads hidden in a substitution, a function body or a `-c` string) deny, and shapes off the floor pass. |
 
 ## Adding a fixture
 

@@ -9,10 +9,8 @@ command shapes guard must classify a particular way. One row is one fixture::
      "note": "...", "source": "..."}
 
 ``mode`` is a Claude Code ``permission_mode`` such as ``default`` / ``auto``.
-Only ``auto`` changes the
-decision: there guard keeps its FLOOR rules and hands STEER rules to Claude
-Code (see ``guard.registry.RULE_TIERS``). Rows are adjudicated against the
-shipped policy, never the developer's allowlist.
+It is recorded in the decision log and never changes the decision. Rows are
+adjudicated against the shipped policy, never the developer's allowlist.
 
 Both consumers read THIS module, so the fixtures are never duplicated:
 
@@ -169,13 +167,12 @@ def load_corpus() -> list[CorpusRow]:
 def classify(result: dict[str, str] | None) -> str:
     """Map a ``decide()`` envelope to its decision class (allow/deny).
 
-    ``None`` (interactive passthrough) and an explicit allow envelope both mean
-    "not blocked" -> ``allow``.
+    Guard only denies or passes. ``allow`` means "not blocked": the command
+    goes on to Claude Code's own permission step.
     """
     if result is None:
         return ALLOW
-    decision = result.get("permissionDecision", ALLOW)
-    return decision if decision in _DECISIONS else ALLOW
+    return DENY
 
 
 @contextlib.contextmanager

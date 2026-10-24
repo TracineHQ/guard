@@ -131,18 +131,3 @@ def test_az_rest_bypass_denied(command: str) -> None:
 # ---------------------------------------------------------------------------
 # bash /dev/stdin: shell-wrapper bypass via stdin device
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        pytest.param("bash /dev/stdin", id="bash-dev-stdin"),
-        pytest.param("sh /dev/stdin", id="sh-dev-stdin"),
-        pytest.param("bash /dev/fd/0", id="bash-dev-fd-0"),
-        pytest.param("bash /proc/self/fd/0", id="bash-proc-self-fd-0"),
-        pytest.param("bash -", id="bash-dash-stdin"),
-        pytest.param("sh -", id="sh-dash-stdin"),
-    ],
-)
-def test_bash_stdin_device_bypass_denied(command: str) -> None:
-    assert is_deny(decide(command)), f"expected deny for: {command!r}"

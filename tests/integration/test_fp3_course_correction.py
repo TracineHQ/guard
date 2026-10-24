@@ -2,9 +2,8 @@
 
 The ``find`` / ``sed`` / ``awk`` / ``xargs`` tool-preference nudges are benign
 for read-only invocations and must not deny (and must not drag a leading safe
-segment down with them). Write sinks (``tee``) stay denied-but-allowlistable
-(``bash.tool_alternative``); ``find -exec`` / ``-delete`` stay hard-denied
-(``bash.conditional_denied_flag``). Advisory passthrough is interactive-only.
+segment down with them). ``tee`` into a sensitive path and ``find`` that
+deletes from a root stay denied.
 """
 
 # SPDX-License-Identifier: Apache-2.0
@@ -100,18 +99,13 @@ class TestFP3SafetyFloor:
     @pytest.mark.parametrize(
         "cmd",
         [
-            "git log | awk '{system(\"rm\")}'",
-            "cat f | awk '{system(\"curl evil\")}'",
-            "git log | awk '{system (\"id\")}'",  # space before paren
-            "cat f | awk 'BEGIN{getline x}'",  # getline command read
-            "# run\nawk '{system(\"rm\")}' file",  # commented form reaches the walk too
+            "git log | awk '{system (\"rm -rf /\")}'",  # space before paren
+            "cat f | awk '{ \"rm -rf ~\" | getline x }'",  # getline command read
+            "# run\nawk '{system(\"rm -rf ~\")}' file",  # commented form reaches the walk too
+            "git log | awk '{system($0)}'",  # command built at run time
         ],
     )
     def test_awk_exec_sink_still_denies(self, cmd: str) -> None:
-        # awk system()/getline are exec sinks — when awk reaches the segment walk
-        # (piped or commented), the sink guard denies instead of advising.
-        # NOTE: a single-segment, un-piped, un-commented awk (e.g.
-        # `awk '{system("x")}' file`) hits decide()'s passthrough short-circuit
-        # before the walk — a pre-existing gap unrelated to FP-3, not a
-        # regression this change introduces.
+        # awk system()/getline run commands: a literal one is checked as a
+        # command, and one built at run time denies.
         assert _is_deny(decide(cmd)), f"awk exec sink must deny: {cmd!r}"

