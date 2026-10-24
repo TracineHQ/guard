@@ -6,10 +6,9 @@ Also covers the posture that goes with it:
 
 - read-only tools never trip ``protected_files``;
 - ``.claude/settings*.json`` are not guard's to protect;
-- the default protected list is guard's own trust root; git-exec, agent
-  instruction, MCP and cloud-profile files are protected only in lockdown;
-- strict default-deny is opt-in via ``guard mode lockdown`` and never
-  switched on by Claude Code's ``permission_mode``;
+- the protected list is guard's own trust root; git-exec, agent
+  instruction, MCP and cloud-profile files are not protected;
+- an unknown command passes in every ``permission_mode``;
 - ``guard mode off`` silences every hook except the trust root, and
   ``shadow`` logs without blocking.
 """
@@ -146,14 +145,12 @@ def test_trust_root_edit_is_a_steering_deny(tmp_path: Path, rel: str) -> None:
 )
 def test_read_only_tools_never_trip(tool_name: str, tool_input: dict[str, Any]) -> None:
     assert protected_files.decide(tool_name, tool_input) is None
-    assert protected_files.decide(tool_name, tool_input, lockdown=True) is None
 
 
 @pytest.mark.parametrize("name", ["settings.json", "settings.local.json"])
 def test_settings_files_are_not_protected(tmp_path: Path, name: str) -> None:
     target = {"file_path": str(tmp_path / ".claude" / name)}
     assert protected_files.decide("Edit", target) is None
-    assert protected_files.decide("Edit", target, lockdown=True) is None
 
 
 @pytest.mark.parametrize(
@@ -167,10 +164,9 @@ def test_settings_files_are_not_protected(tmp_path: Path, name: str) -> None:
         ".aws/config",
     ],
 )
-def test_extended_list_is_lockdown_only(tmp_path: Path, rel: str) -> None:
+def test_git_and_agent_config_files_are_not_protected(tmp_path: Path, rel: str) -> None:
     target = {"file_path": str(tmp_path / rel)}
     assert protected_files.decide("Write", target) is None
-    _assert_steer(protected_files.decide("Write", target, lockdown=True))
 
 
 def test_interpreter_read_of_protected_path_passes() -> None:
@@ -217,15 +213,6 @@ def test_mode_off_skips_extra_patterns(
     assert _run_hook(protected_files, target, capsys) == ""
 
 
-def test_lockdown_mode_protects_extended_list(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    target = _payload("Edit", {"file_path": str(tmp_path / "CLAUDE.md")})
-    assert _run_hook(protected_files, target, capsys) == ""
-    _set_mode("lockdown")
-    _assert_steer(json.loads(_run_hook(protected_files, target, capsys)))
-
-
 # === credential_check ===
 
 
@@ -244,14 +231,16 @@ def test_credential_access_is_a_steering_deny(tool_name: str, tool_input: dict[s
 # === git -C validator ===
 
 
-def test_git_c_config_write_steers_to_cd() -> None:
-    reason = _assert_steer(git_c_validator.decide("git -C /repo config user.name bob"))
-    assert "cd " in reason
+def test_git_c_read_exec_is_a_steering_deny() -> None:
+    reason = _assert_steer(git_c_validator.decide("git -C /repo log --output=/tmp/x"))
+    assert "writes a file or execs" in reason
 
 
-def test_git_c_unknown_subcommand_steers_to_cd() -> None:
-    reason = _assert_steer(git_c_validator.decide("git -C /repo frobnicate --x"))
-    assert "cd /repo && git frobnicate" in reason
+@pytest.mark.parametrize(
+    "command", ["git -C /repo config user.name bob", "git -C /repo frobnicate --x"]
+)
+def test_git_c_other_subcommands_get_no_decision(command: str) -> None:
+    assert git_c_validator.decide(command) is None
 
 
 # === commit_message_validator ===
@@ -271,20 +260,13 @@ def test_ai_identity_is_a_steering_deny(tmp_path: Path) -> None:
     assert "tell the user" in reason.lower()
 
 
-# === bash: strict default-deny is lockdown-only ===
+# === bash: an unknown command passes in every permission mode ===
 
 
 @pytest.mark.parametrize("permission_mode", ["auto", "dontAsk", "bypassPermissions"])
 @pytest.mark.parametrize("cmd", ["flarbnoz --gronk", "typst compile resume.typ", "terraform plan"])
-def test_permission_mode_never_enables_strict(cmd: str, permission_mode: str) -> None:
+def test_unknown_command_passes(cmd: str, permission_mode: str) -> None:
     assert bash_command_validator.decide(cmd, permission_mode=permission_mode) is None
-
-
-def test_bash_hook_lockdown_comes_from_guard_mode(capsys: pytest.CaptureFixture[str]) -> None:
-    payload = _payload("Bash", {"command": "flarbnoz --gronk"}, permission_mode="auto")
-    assert _run_hook(bash_command_validator, payload, capsys) == ""
-    _set_mode("lockdown")
-    assert _decision(json.loads(_run_hook(bash_command_validator, payload, capsys))) == "deny"
 
 
 # === mode honored by every hook ===
@@ -292,7 +274,7 @@ def test_bash_hook_lockdown_comes_from_guard_mode(capsys: pytest.CaptureFixture[
 
 _OFF_CASES = [
     (credential_check, _payload("Read", {"file_path": "~/.aws/credentials"})),
-    (git_c_validator, _payload("Bash", {"command": "git -C /repo config user.name bob"})),
+    (git_c_validator, _payload("Bash", {"command": "git -C /repo log --output=/tmp/x"})),
     (bash_command_validator, _payload("Bash", {"command": "reboot"})),
     (agent_output_guard, _payload("Read", {"file_path": _AGENT_OUTPUT_FILE})),
 ]
@@ -383,9 +365,7 @@ def test_subagent_scope_honors_mode(
     [
         # Thunks, not calls: a decide() at collection time runs before the
         # per-test isolation fixture and would log to the default path.
-        lambda: protected_files.decide("Edit", {"file_path": "/repo/CLAUDE.md"}, lockdown=True),
         lambda: bash_command_validator.decide("rm -rf /"),
-        lambda: bash_command_validator.decide("flarbnoz --gronk", lockdown=True),
     ],
 )
 def test_override_hints_parse(make_envelope: Callable[[], dict[str, Any] | None]) -> None:
@@ -400,18 +380,16 @@ def test_override_hints_parse(make_envelope: Callable[[], dict[str, Any] | None]
         parser.parse_args(shlex.split(hint)[1:])
 
 
-# === lockdown is a guard mode ===
+# === lockdown is retired ===
 
 
-def test_guard_mode_accepts_lockdown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_guard_mode_rejects_lockdown(capsys: pytest.CaptureFixture[str]) -> None:
     from guard import cli
-    from guard.allowlist import load_allowlist
 
-    project = tmp_path / "project"
-    project.mkdir()
-    monkeypatch.chdir(project)
-    assert cli.main(["--json", "mode", "lockdown"]) == 0
-    assert load_allowlist(project).mode == "lockdown"
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--json", "mode", "lockdown"])
+    assert exc.value.code == 2
+    assert "invalid choice: 'lockdown'" in capsys.readouterr().err
 
 
 # === write-target extraction stays inside each command ===

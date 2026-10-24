@@ -53,11 +53,11 @@ def test_load_global(isolated_homes: tuple[Path, Path]) -> None:
     from guard.allowlist import load_allowlist
 
     gdir, cwd = isolated_homes
-    _write(gdir / "allowlist.json", {"disable_rules": ["bash.npx_remote"], "mode": "shadow"})
+    _write(gdir / "allowlist.json", {"disable_rules": ["bash.host_control"], "mode": "shadow"})
     al = load_allowlist(cwd=cwd)
-    assert al.disable_rules == {"bash.npx_remote"}
+    assert al.disable_rules == {"bash.host_control"}
     assert al.mode == "shadow"
-    assert al.is_rule_disabled("bash.npx_remote") is True
+    assert al.is_rule_disabled("bash.host_control") is True
     assert al.is_rule_disabled("bash.something_else") is False
 
 
@@ -68,7 +68,7 @@ def test_project_file_is_ignored_and_reported_once(
     from guard.allowlist import load_allowlist
 
     gdir, cwd = isolated_homes
-    _write(gdir / "allowlist.json", {"disable_rules": ["bash.npx_remote"]})
+    _write(gdir / "allowlist.json", {"disable_rules": ["bash.host_control"]})
     project = cwd / ".claude" / "guard" / "allowlist.json"
     _write(
         project,
@@ -79,7 +79,7 @@ def test_project_file_is_ignored_and_reported_once(
         },
     )
     al = load_allowlist(cwd=cwd)
-    assert al.disable_rules == {"bash.npx_remote"}
+    assert al.disable_rules == {"bash.host_control"}
     assert al.mode == "enforce"
     assert al.sources == (gdir / "allowlist.json",)
     err = capsys.readouterr().err
@@ -102,6 +102,23 @@ def test_lockdown_in_project_file_is_ignored_too(
     assert "retired" in capsys.readouterr().err
 
 
+def test_global_lockdown_mode_is_retired_and_reported_once(
+    isolated_homes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    from guard.allowlist import load_allowlist
+
+    gdir, cwd = isolated_homes
+    _write(gdir / "allowlist.json", {"mode": "lockdown", "disable_rules": ["bash.host_control"]})
+    al = load_allowlist(cwd=cwd)
+    assert al.mode == "enforce"
+    assert al.disable_rules == {"bash.host_control"}
+    assert capsys.readouterr().err.splitlines() == [
+        "guard: allowlist: mode lockdown is retired and ignored; see guard's CHANGELOG"
+    ]
+    load_allowlist(cwd=cwd)
+    assert capsys.readouterr().err == ""
+
+
 def test_global_allow_commands_are_ignored_and_reported_once(
     isolated_homes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -111,12 +128,12 @@ def test_global_allow_commands_are_ignored_and_reported_once(
     _write(
         gdir / "allowlist.json",
         {
-            "disable_rules": ["bash.npx_remote"],
+            "disable_rules": ["bash.host_control"],
             "allow_commands": [{"rule": "bash.disk_destruction", "command": "x", "reason": "y"}],
         },
     )
     al = load_allowlist(cwd=cwd)
-    assert al.disable_rules == {"bash.npx_remote"}
+    assert al.disable_rules == {"bash.host_control"}
     assert not hasattr(al, "allow_commands")
     err = capsys.readouterr().err
     assert err.splitlines() == [

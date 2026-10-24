@@ -32,7 +32,6 @@ def test_critical_imports_resolve() -> None:
     # Registry must expose the load-bearing rule sets.
     assert registry.COMMANDS, "registry.COMMANDS empty"
     assert registry.ALWAYS_DENY, "registry.ALWAYS_DENY empty"
-    assert registry.STRICT_FEEDBACK, "registry.STRICT_FEEDBACK empty"
     # _utils must expose the JSONL writer + decision helpers.
     assert callable(_utils.append_jsonl)
     assert callable(_utils.log_decision)

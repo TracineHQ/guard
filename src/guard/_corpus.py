@@ -5,18 +5,16 @@
 The corpus (``tests/corpus/*.jsonl``) is the single source of truth for the
 command shapes guard must classify a particular way. One row is one fixture::
 
-    {"command": "...", "expected": "allow|deny", "mode": "default|lockdown|...",
+    {"command": "...", "expected": "allow|deny", "mode": "default|auto|...",
      "note": "...", "source": "..."}
 
-``mode`` is ``lockdown`` (guard's opt-in strict default-deny) or a Claude Code
-``permission_mode`` such as ``default`` / ``auto``. Only ``auto`` changes the
-decision: there guard keeps its FLOOR rules and hands STEER rules to Claude
-Code (see ``guard.registry.RULE_TIERS``). Rows are adjudicated against the
-shipped policy, never the developer's allowlist.
+``mode`` is a Claude Code ``permission_mode`` such as ``default`` / ``auto``.
+It is recorded in the decision log and never changes the decision. Rows are
+adjudicated against the shipped policy, never the developer's allowlist.
 
 Both consumers read THIS module, so the fixtures are never duplicated:
 
-* ``guard corpus`` -- a whitelisted, strict-mode-safe CLI runner that adjudicates
+* ``guard corpus`` -- a CLI runner that adjudicates
   every fixture in one process and reports mismatches. Agents run it instead of
   spraying ad-hoc ``guard test '<cmd>'`` strings (which lose the case the moment
   the shell call returns).
@@ -56,7 +54,6 @@ if TYPE_CHECKING:
 ALLOW = "allow"
 DENY = "deny"
 _DECISIONS = frozenset({ALLOW, DENY})
-LOCKDOWN = "lockdown"
 
 
 @dataclass(frozen=True)
@@ -170,13 +167,12 @@ def load_corpus() -> list[CorpusRow]:
 def classify(result: dict[str, str] | None) -> str:
     """Map a ``decide()`` envelope to its decision class (allow/deny).
 
-    ``None`` (interactive passthrough) and an explicit allow envelope both mean
-    "not blocked" -> ``allow``.
+    Guard only denies or passes. ``allow`` means "not blocked": the command
+    goes on to Claude Code's own permission step.
     """
     if result is None:
         return ALLOW
-    decision = result.get("permissionDecision", ALLOW)
-    return decision if decision in _DECISIONS else ALLOW
+    return DENY
 
 
 @contextlib.contextmanager
@@ -185,15 +181,12 @@ def _builtin_policy() -> Iterator[None]:
 
     A fixture states what guard ships, so the developer's allowlist
     (``disable_rules``, ``mode``) may not change the answer, and a corpus
-    run must not append its rows to the real decision log or strict-deny
-    queue. Patches the bindings ``decide()`` reads at call time and
-    restores them on exit.
+    run must not append its rows to the real decision log. Patches the
+    bindings ``decide()`` reads at call time and restores them on exit.
     """
     targets = (
         (_bcv, "load_allowlist", lambda _cwd=None: Allowlist()),
         (_utils, "GUARD_DECISIONS_PATH", os.devnull),
-        (_utils, "GUARD_STRICT_DENY_QUEUE_PATH", os.devnull),
-        (_bcv, "GUARD_STRICT_DENY_QUEUE_PATH", os.devnull),
     )
     saved = [(obj, name, getattr(obj, name)) for obj, name, _new in targets]
     try:
@@ -212,8 +205,6 @@ def adjudicate(command: str, mode: str) -> str:
     fixture's outcome and nothing is logged.
     """
     with _builtin_policy():
-        if mode == LOCKDOWN:
-            return classify(decide(command, lockdown=True))
         return classify(decide(command, permission_mode=mode))
 
 

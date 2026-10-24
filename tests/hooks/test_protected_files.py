@@ -18,10 +18,10 @@ from typing import Any
 import pytest
 
 from guard.hooks import protected_files as pf
-from guard.hooks.protected_files import LOCKDOWN_PATTERNS, PROTECTED_PATTERNS, decide, is_protected
-from tests._helpers import LIVE_GUARD
+from guard.hooks.protected_files import PROTECTED_PATTERNS, decide, is_protected
+from tests._helpers import LIVE_GUARD, SAMPLE_PATTERNS
 
-_LOCKDOWN = pf._effective_patterns(mode="lockdown")  # noqa: SLF001 -- module-private pattern resolver
+_PATTERNS = (*PROTECTED_PATTERNS, *SAMPLE_PATTERNS)
 # The guard package these tests import: the live copy protected_files keys on.
 _GUARD = str(LIVE_GUARD)
 # The live-tree entry a path inside the package matches: ``src/`` for a
@@ -140,8 +140,8 @@ class TestIsProtected:
             ("/repo/.git/hooks/pre-commit", ".git/hooks"),
         ],
     )
-    def test_matches_lockdown_list(self, path: str, pattern: str) -> None:
-        assert is_protected(path, _LOCKDOWN) == pattern
+    def test_matches_sample_patterns(self, path: str, pattern: str) -> None:
+        assert is_protected(path, _PATTERNS) == pattern
 
     def test_all_patterns_have_recognizable_shape(self) -> None:
         recognized_suffixes = (
@@ -157,7 +157,7 @@ class TestIsProtected:
             "/mcp_servers",
         )
         recognized_prefixes = (".git/", ".gitmodules", ".gitattributes")
-        for p in (*PROTECTED_PATTERNS, *LOCKDOWN_PATTERNS):
+        for p in _PATTERNS:
             if p in pf._LIVE_TREE:  # noqa: SLF001 -- module-private live tree
                 continue
             assert p.endswith(recognized_suffixes) or p.startswith(recognized_prefixes), p
@@ -186,13 +186,13 @@ class TestCaseInsensitiveFs:
         self, monkeypatch: pytest.MonkeyPatch, path: str, pattern: str
     ) -> None:
         monkeypatch.setattr(pf, "_CASE_INSENSITIVE_FS", True)
-        assert is_protected(path, _LOCKDOWN) == pattern
+        assert is_protected(path, _PATTERNS) == pattern
 
     def test_case_sensitive_fs_does_not_match_uppercased_variants(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(pf, "_CASE_INSENSITIVE_FS", False)
-        assert is_protected("/repo/.GIT/hooks/post-commit", _LOCKDOWN) is None
+        assert is_protected("/repo/.GIT/hooks/post-commit", _PATTERNS) is None
 
 
 # Each row: tool name, tool input, and whether protected_files denies it.

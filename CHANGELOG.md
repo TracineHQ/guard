@@ -8,63 +8,51 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Under Claude Code's `auto` permission mode guard keeps only a hard floor.
-  Every deny rule is now classified FLOOR or STEER (with a one-line rationale)
-  in `registry.py` and in `docs/dangerous-commands.md`. In `auto`, FLOOR rules
-  (destructive, code injection, guard evasion, supply chain, credentials)
-  deny as before; STEER rules (redirects, `bash -c`, `git add -A`, tool
-  nudges, ...) return no decision and are logged as `decision: "pass"` with
-  reason `deferred to auto mode (steer rule <id>)`. Payloads a STEER shape
-  hides (a function body, a trap handler, a `bash -c` string, a remote
-  `ssh` / `docker exec` command, a `find -exec` command) are still checked
-  against the floor. Other permission modes, `lockdown` and allowlist
-  overrides behave exactly as before.
-- Eight shape detectors move from FLOOR to STEER: `bash.var_expanded_head`,
-  `bash.glob_head`, `bash.dangerous_env_sink`, `bash.git_config_injection`,
-  `bash.npm_url_install`, `bash.npx_remote`, `bash.pip_install_url` and
-  `bash.persistence`. In real sessions under `auto` nearly every deny they
-  made was a harmless command (a variable set in the same command, a glob
-  inside quoted code, `PYTHONPATH`, a local install, `crontab -l`). In `auto`
-  Claude Code's classifier now judges those calls; every other mode and
-  `lockdown` still deny them. The trade-off: in `auto`, a destructive command
-  hidden behind one of these shapes (`R=rm; $R -rf ~`) is caught by the
-  classifier, not by guard.
-- `agent_output_guard` is FLOOR: a subagent transcript read denies in `auto`
-  too, while background command output passes in every mode.
-- The floor holds against the wrappers that used to hide a command from it.
-  `env` options are peeled (`env -i`, `-u NAME`, `-C DIR`, `--`) and the
-  assignments after them still meet `bash.dangerous_env_sink`
-  (`env -i LD_PRELOAD=... cmd`), shell
+- **Breaking:** guard denies or gives no decision, the same in every
+  permission mode. It no longer returns `allow`, so no call it sees skips
+  Claude Code's permission step or auto mode's classifier, and Claude Code's
+  `permission_mode` is logged but never changes a decision. Rules that only
+  steered a call toward a better shape are gone: plain redirects, `bash -c`,
+  `git add -A`, `git branch -D`, `git remote add`, `git worktree add`,
+  `git submodule add`, `git config` writes, exec env vars (`PYTHONPATH`,
+  `GIT_SSH_COMMAND`), a variable or glob as the command name, `env -i`,
+  `pip` / `npm` / `npx` installs from a URL, `crontab`, and the `git -C`
+  subcommand list. Claude Code's classifier judges those calls. What guard
+  still denies is in `docs/dangerous-commands.md`; where it is headed is in
+  `docs/rules-design.md`. The trade-off: a destructive command hidden behind
+  a variable or glob command name (`R=rm; $R -rf ~`) is left to the
+  classifier.
+- Guard sees through the wrappers that used to hide a command from it.
+  `env` options are peeled (`env -i`, `-u NAME`, `-C DIR`, `--`), shell
   options before `-c` are skipped (`bash -o pipefail -c`, `bash -c --`),
   `ssh host --`, `docker container exec`, `docker compose exec` and `nsenter`
   payloads are checked, a shell reading a here-string or process
   substitution on stdin (`{ bash; } <<< '...'`) counts as running it, and an
-  unfiltered `find . -delete` / `find .. -exec rm` is FLOOR. A `-c` string
+  unfiltered `find . -delete` / `find .. -exec rm` is denied. Payloads a
+  command hides (a function body, a trap handler, a `bash -c` string, a
+  `find -exec` command) are checked as commands of their own. A `-c` string
   that is empty, a `{}` placeholder or runs a command named by an expansion
-  (`bash -c "$X"`) is denied in `auto`; `$` in an argument is fine. Variable and glob command heads (`$R`, `$@`, `/bin/r?`) and
-  `bash.admin_default_deny` (secret reads, IAM grants, public access) are
-  FLOOR.
-- awk programs are checked in every mode: a literal command in `system()`,
-  `print | "cmd"` or `"cmd" | getline` goes through the floor, and one built
+  (`bash -c "$X"`) is denied; `$` in an argument is fine.
+- awk programs are checked: a literal command in `system()`,
+  `print | "cmd"` or `"cmd" | getline` is checked as a command, and one built
   at run time (`system($0)`) is denied.
 - Redirects into `.git/config`, `.git/hooks/`, `~/.gitconfig` and
-  `$XDG_CONFIG_HOME/git/config` are FLOOR, and `>|` is read as a redirect
+  `$XDG_CONFIG_HOME/git/config` deny, and `>|` is read as a redirect
   rather than a pipe.
-- The `bash.dangerous_construct` deny now names the construct that actually
-  matched (command substitution, process substitution, here-string,
-  redirect, arithmetic expansion). A redirect is steered to the Write or
-  Edit tool or to a pipe instead of being reported as a substitution.
+- The `bash.dangerous_construct` deny now names what actually matched:
+  output run as code (`bash <(curl ...)`), or a redirect and the sensitive
+  path it reaches.
 - An inline program written out literally (`python3 -c '...'`,
   `python3 - <<'EOF'`, `node -e`, `node --input-type=module < file.mjs`,
-  `osascript -e`, `ruby -e`, `perl -e`) is STEER in `auto` under
-  `bash.dangerous_interpreter:literal`: it is as visible as a script file,
-  which already passes. A program from a pipe, a variable, a substitution or
-  an unquoted heredoc that expands stays FLOOR, and so does one that evals
+  `osascript -e`, `ruby -e`, `perl -e`) passes: it is as visible as a
+  script file, which already passes. A program from a pipe, a variable, a
+  substitution or an unquoted heredoc that expands is denied, and so is one
+  that evals
   stdin (`cat s | python3 -c 'exec(sys.stdin.read())'`, `ruby -e 'eval
   STDIN.read'`, `perl -ne 'eval'`). Each `osascript` `do shell script` string
   (and `do script`, `write text`, JXA `doShellScript`) is floor-checked like a
   `bash -c` string; one built at run time, `run script`, a raw Apple event and
-  JXA `$.system` deny. Default mode and `lockdown` still deny all of these.
+  JXA `$.system` deny.
 - Pipe-to-shell denies only when the consumer reads its program from stdin
   (`curl ... | sh`, `cat s | python3`, `cat s | python3 -`). Piping local data
   into a script or module (`python3 tool.py`, `python3 -m json.tool`) passes
@@ -99,6 +87,13 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Removed
 
+- **Breaking:** strict default-deny is gone. In 1.5.0, Claude Code's
+  `auto`, `dontAsk` and `bypassPermissions` modes (or `CLAUDE_AUTONOMOUS=1`)
+  made guard deny every command off its safe list and queue it to
+  `GUARD_STRICT_DENY_QUEUE_PATH`. The queue, its variable and the
+  `CLAUDE_AUTONOMOUS` fallback are gone with it. An allowlist that still sets
+  `"mode": "lockdown"` runs as `enforce`, and each hook process prints one
+  stderr line saying so.
 - **Breaking for anyone with `allow_commands`:** per-command allowlisting
   is gone. `allow_commands` entries no longer exempt anything, and
   `guard allowlist allow-command` / `remove-command` no longer exist. Every
@@ -114,6 +109,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- What a `$((` holds is checked: a substitution inside arithmetic
+  (`echo $(( $(rm -rf /) + 1 ))`), or a `$((cd x; y) ; z)` that bash reads
+  as nested subshells (`echo $((cd /tmp; echo a) ; rm -rf ~ )`). Both passed
+  before.
 - Development dependencies pulled in by pre-commit move past published
   advisories: `filelock` 4.2.4 and `virtualenv` 21.14.13. Installed guard
   doesn't use either.
@@ -159,7 +158,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Over-blocking in `auto` found by replaying real agent commands:
+- Over-blocking found by replaying real agent commands:
   - The fork bomb check reads only the function body, so `f() { ...; } && f`,
     `f 2>&1` and `f | head` pass, and its deny says "fork bomb".
   - Heredoc bodies are data. A body written to a file or fed to a filter no
@@ -195,25 +194,20 @@ adheres to [Semantic Versioning](https://semver.org/).
 - Read-only guard CLI calls (`guard status`, `guard allowlist list`,
   `guard mode --help`, `guard allowlist --help`) no longer trip
   `protected_files`.
-- `git config` reads (`--get core.hooksPath`, `--list`, `get <key>`) are no
-  longer denied as config injection, and writes no longer slip past it when
-  an option value comes first (`--file .git/config`, `--type path`) or the
-  `set` subcommand is used.
-- `git -C <repo> fetch` is allowed when it only updates remote-tracking refs.
-  Pruning, forcing, a destination refspec or `--upload-pack` still deny.
-- The `git worktree add` steer now gives a sequence guard actually allows
-  (add the worktree detached, then `git switch -c` inside it).
+- `git -C <repo> fetch` passes. Only `--upload-pack`, `--exec` and an
+  `ext::` remote, which run a program, deny.
+- The `unknown_flags` telemetry `SECURITY.md` describes is written: an admin
+  CLI command guard passes logs its unrecognized `--*` flags. It used to ride
+  only on approvals, which admin CLI commands never got.
 - Tests and the corpus no longer touch the developer's real home: conftest
   isolates `HOME`, `GUARD_DATA_DIR` and the decision-log paths, the corpus
   adjudicates against guard's shipped policy without writing logs, and a
   collection-time `decide()` call that wrote to the real decision log is gone.
 - `bash.dangerous_interpreter` no longer blocks running a script or module
   (`uv run python tools/dev.py`, `python3 scripts/x.py`, `python -m pytest`).
-  Those runs now pass through to Claude Code's own permission flow; lockdown
-  still denies them. The rule now targets inline code only (eval flags such as
-  `-c` / `-e` / `-p` / `-r`, a program on stdin, `python -m timeit`), and a
-  family-aware flag scan keeps forms like `node -p`, `perl -pe`, `php -r` and
-  `python3 <<EOF` denied.
+  Those runs now pass through to Claude Code's own permission step. The rule
+  now targets inline code only (eval flags such as `-c` / `-e` / `-p` / `-r`,
+  a program on stdin, `python -m timeit`), read by a family-aware flag scan.
 - `agent_output_guard` no longer blocks reading background command output.
   Claude Code writes background Bash output and subagent transcripts to the
   same `tasks/<id>.output` directory; the hook now resolves each path on disk

@@ -35,7 +35,7 @@
 {"command": "chroot / reboot", "expected": "deny", "mode": "default", "source": "adversarial", "note": "exec-wrapper peel: chroot <newroot> positional stripped, inner reboot fires"}
 {"command": "stdbuf -o0 poweroff", "expected": "deny", "mode": "default", "source": "adversarial", "note": "exec-wrapper peel: stdbuf flags stripped, inner poweroff fires"}
 {"command": "runuser -u root -- reboot", "expected": "deny", "mode": "default", "source": "adversarial", "note": "exec-wrapper peel: runuser -u <user> -- separator, inner reboot fires"}
-{"command": "sudo poweroff", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "strict: sudo-peeled poweroff denies in lockdown"}
+{"command": "sudo poweroff", "expected": "deny", "mode": "default", "source": "adversarial", "note": "sudo-peeled poweroff denies"}
 {"command": "systemctl status sshd", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: status query is read-only, not host control"}
 {"command": "systemctl list-units --type=service", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: listing units is read-only"}
 {"command": "systemctl is-active nginx", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: is-active is a read-only state query"}

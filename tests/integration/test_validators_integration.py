@@ -86,7 +86,7 @@ def test_bash_validator_denies_dangerous_command(tmp_path):
         assert rc == 2, f"expected deny, got rc={rc} stdout={stdout!r}"
 
 
-def test_bash_validator_allows_safe_pipeline(tmp_path):
+def test_bash_validator_passes_safe_pipeline(tmp_path):
     hook = HOOKS_DIR / "bash_command_validator.py"
     payload = {
         "session_id": "test",
@@ -96,18 +96,14 @@ def test_bash_validator_allows_safe_pipeline(tmp_path):
         "cwd": str(tmp_path),
     }
     rc, stdout, _ = _run_hook(hook, payload, {"GUARD_DECISIONS_PATH": str(tmp_path / "x.jsonl")})
-    assert rc == 0
-    decision = json.loads(stdout)
-    assert decision["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert (rc, stdout) == (0, "")
 
 
 @pytest.mark.parametrize(
     "command",
     [
-        "git add -A",
-        "git add --all",
-        "git add .",
-        "git branch -D feature",
+        "git push --force origin main",
+        "git push --mirror backup",
         "terraform destroy",
     ],
 )
@@ -158,7 +154,7 @@ def test_git_c_validator_denies_destructive(tmp_path):
     payload = {
         "session_id": "test",
         "tool_name": "Bash",
-        "tool_input": {"command": "git -C /repo clean -fd"},
+        "tool_input": {"command": "git -C /repo log --output=/tmp/x"},
         "hook_event_name": "PreToolUse",
         "cwd": str(tmp_path),
     }
@@ -168,7 +164,7 @@ def test_git_c_validator_denies_destructive(tmp_path):
     assert decision["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
-def test_git_c_validator_allows_status(tmp_path):
+def test_git_c_validator_passes_status(tmp_path):
     hook = HOOKS_DIR / "git_c_validator.py"
     payload = {
         "session_id": "test",
@@ -178,9 +174,7 @@ def test_git_c_validator_allows_status(tmp_path):
         "cwd": str(tmp_path),
     }
     rc, stdout, _ = _run_hook(hook, payload)
-    assert rc == 0
-    decision = json.loads(stdout)
-    assert decision["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert (rc, stdout) == (0, "")
 
 
 def test_commit_message_validator_denies_ai_attribution(tmp_path):

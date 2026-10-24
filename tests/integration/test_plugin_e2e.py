@@ -45,7 +45,7 @@ EXPECTED_PRE_TOOL_USE_HOOK_NAMES = {
 EXPECTED_PERMISSION_REQUEST_HOOK_NAMES = {"permission_request_logger"}
 EXPECTED_HOOK_NAMES = EXPECTED_PRE_TOOL_USE_HOOK_NAMES | EXPECTED_PERMISSION_REQUEST_HOOK_NAMES
 MAX_RECORD_BYTES = 4096
-VALID_DECISIONS = {"allow", "deny", "pass", "defer"}
+VALID_DECISIONS = {"deny", "pass"}
 
 # AI-attribution trailer assembled at runtime so the test source itself
 # does not contain the literal string (avoids tripping content scanners
@@ -184,7 +184,12 @@ def _edit_payload(file_path: str) -> dict[str, object]:
 CASES: list[tuple[str, str, dict[str, object], str]] = [
     # bash_command_validator
     ("benign ls", "bash_command_validator.py", _bash_payload("ls -la"), "passthrough"),
-    ("git add -A", "bash_command_validator.py", _bash_payload("git add -A"), "deny"),
+    (
+        "force push",
+        "bash_command_validator.py",
+        _bash_payload("git push --force origin main"),
+        "deny",
+    ),
     ("rm -rf root", "bash_command_validator.py", _bash_payload("rm -rf /"), "deny"),
     (
         "curl pipe shell",
@@ -195,13 +200,13 @@ CASES: list[tuple[str, str, dict[str, object], str]] = [
     (
         "env -i bash",
         "bash_command_validator.py",
-        _bash_payload("env -i bash -c 'rm -rf /tmp/x'"),
+        _bash_payload("env -i bash -c 'rm -rf /'"),
         "deny",
     ),
     (
         "dollar paren substitution",
         "bash_command_validator.py",
-        _bash_payload("cat $(rm -rf /tmp/x)"),
+        _bash_payload("cat $(rm -rf /)"),
         "deny",
     ),
     (
@@ -211,8 +216,13 @@ CASES: list[tuple[str, str, dict[str, object], str]] = [
         "deny",
     ),
     # git_c_validator
-    ("git -C status", "git_c_validator.py", _bash_payload("git -C /repo status"), "allow"),
-    ("git -C commit", "git_c_validator.py", _bash_payload("git -C /repo commit"), "deny"),
+    ("git -C status", "git_c_validator.py", _bash_payload("git -C /repo status"), "passthrough"),
+    (
+        "git -C log --output",
+        "git_c_validator.py",
+        _bash_payload("git -C /repo log --output=/tmp/x"),
+        "deny",
+    ),
     # commit_message_validator
     (
         "AI commit msg",
@@ -447,7 +457,7 @@ def test_jsonl_contract(staged: Path, log_path: Path) -> None:
     rc, _stdout, _stderr = run_hook(
         staged,
         "bash_command_validator.py",
-        _bash_payload("git add -A"),
+        _bash_payload("git push --force origin main"),
         log_path,
     )
     # Fix #7: deny path now exits 2.

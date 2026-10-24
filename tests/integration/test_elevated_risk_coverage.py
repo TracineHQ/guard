@@ -7,8 +7,7 @@ Two fences land together (see ``bash_command_validator``):
 * **Elevated-risk tier** -- high harm-capability / low legitimate-frequency
   shapes (non-sudo escalation, host power control, package-registry
   redirection). Denied in every mode with a specific rule_id and a reason
-  that names the safer route; lockdown keeps the same id rather than the
-  generic strict default-deny.
+  that names the safer route.
 
 * **Hard deny** -- sibling filesystem-attribute tampering (chown/chgrp/chattr/
   setfacl on a sensitive path) and credential-file network egress
@@ -61,7 +60,7 @@ def _rule_id(result: dict[str, str] | None) -> str | None:
 
 
 # --------------------------------------------------------------------------
-# Elevated-risk tier: deny in default and lockdown, same rule_id.
+# Elevated-risk tier: deny in every mode, specific rule_id.
 # Wrapper-peeled variants (sudo/doas/timeout/env prefixes) must still fire --
 # _match_elevated_risk walks _candidate_forms.
 # --------------------------------------------------------------------------
@@ -114,19 +113,13 @@ _ELEVATED_CASES: list[pytest.ParameterSet] = [
 ]
 
 
-@pytest.mark.parametrize("lockdown", [False, True])
+@pytest.mark.parametrize("permission_mode", ["default", "auto"])
 @pytest.mark.parametrize(("command", "rule_id"), _ELEVATED_CASES)
-def test_elevated_risk_denies(command: str, rule_id: str, *, lockdown: bool) -> None:
-    """Denied with the SAME specific id with or without lockdown.
-
-    Lockdown would default-deny these anyway, but with a generic
-    ``bash.strict_default_deny``; the elevated-risk dispatch keeps the sharp
-    rule_id so the strict-deny review queue stays attributable.
-    """
-    result = decide(command, lockdown=lockdown)
-    assert _decision(result) == "deny", f"{command!r} not denied (lockdown={lockdown})"
+def test_elevated_risk_denies(command: str, rule_id: str, permission_mode: str) -> None:
+    result = decide(command, permission_mode=permission_mode)
+    assert _decision(result) == "deny", f"{command!r} not denied ({permission_mode})"
     assert _rule_id(result) == rule_id, (
-        f"{command!r} denied under {_rule_id(result)!r}, not {rule_id} (lockdown={lockdown})"
+        f"{command!r} denied under {_rule_id(result)!r}, not {rule_id} ({permission_mode})"
     )
 
 
@@ -167,10 +160,10 @@ _HARD_DENY_CASES: list[pytest.ParameterSet] = [
 ]
 
 
-@pytest.mark.parametrize("mode", ["default", "lockdown"])
+@pytest.mark.parametrize("mode", ["default", "auto"])
 @pytest.mark.parametrize(("command", "rule_id"), _HARD_DENY_CASES)
 def test_hard_deny_both_modes(command: str, rule_id: str, mode: str) -> None:
-    result = decide(command, lockdown=mode == "lockdown")
+    result = decide(command, permission_mode=mode)
     assert _decision(result) == "deny", (
         f"{command!r} should deny in {mode} mode, got {_decision(result)!r}"
     )
@@ -181,9 +174,7 @@ def test_hard_deny_both_modes(command: str, rule_id: str, mode: str) -> None:
 
 # --------------------------------------------------------------------------
 # Anti-FP floor: benign neighbours must not be denied and must not hit one of
-# the new rule_ids. Asserted in default mode (lockdown would default-deny
-# non-read-only verbs for unrelated reasons, which says nothing about these
-# matchers).
+# the new rule_ids.
 # --------------------------------------------------------------------------
 _ANTI_FP_CASES: list[pytest.ParameterSet] = [
     # reads / status, not power control

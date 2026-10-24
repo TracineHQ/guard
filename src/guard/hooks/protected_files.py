@@ -13,11 +13,10 @@ from, its allowlist and the subagent scope file. The install is matched by
 real path and inode: everything under the ``src/`` directory ``run-hook``
 puts first on ``sys.path`` (the package alone for a wheel install), plus
 ``bin/run-hook`` and ``hooks/hooks.json``. A clone or worktree of guard's
-source is ordinary code an agent may edit. ``guard mode lockdown`` adds
-git-exec, agent-instruction, MCP and cloud-profile files. Projects add
-patterns via ``GUARD_PROTECTED_EXTRA`` and ``.claude/guard-protected.txt``.
-``guard mode off`` keeps only the trust root; ``shadow`` logs other matches
-without blocking.
+source is ordinary code an agent may edit. Projects add patterns via
+``GUARD_PROTECTED_EXTRA`` and ``.claude/guard-protected.txt``. ``guard mode
+off`` keeps only the trust root; ``shadow`` logs other matches without
+blocking.
 """
 
 from __future__ import annotations
@@ -146,43 +145,6 @@ PROTECTED_PATTERNS: list[str] = [
     ".claude/guard/allowlist.json",
 ]
 
-# Added by ``guard mode lockdown``. Writes to these turn a "harmless" file
-# edit into code execution or reshape what every later session does, so a
-# locked-down machine keeps agents off them entirely.
-LOCKDOWN_PATTERNS: list[str] = [
-    # Git infrastructure: a write to .git/hooks/ replaces the repo's own
-    # hook scripts, which run on every commit/push. .git/config holds
-    # exec sinks (core.hooksPath, alias.* w/ !shell). .gitmodules can
-    # auto-fetch attacker-controlled submodule URLs whose own hooks fire
-    # during init. .git/info/attributes overrides .gitattributes (filter.*
-    # exec sinks).
-    ".git/hooks",
-    ".git/config",
-    ".git/info/attributes",
-    ".git/info/exclude",
-    ".gitmodules",
-    ".gitattributes",
-    # Agent-config poisoning surface: these reshape future agent behavior
-    # across every later session. User-global instructions are listed BEFORE
-    # the project-level patterns so the more specific suffix wins the
-    # first-match iteration.
-    ".claude/CLAUDE.md",
-    ".aider.conf.yml.user",
-    "CLAUDE.md",
-    ".cursorrules",
-    ".cursor/rules",
-    ".aider.conf.yml",
-    ".continue/config.json",
-    # MCP server registrations: adding one mounts new tools into the
-    # agent's capability surface.
-    ".claude/mcp_servers",
-    ".claude/mcp.json",
-    # Cloud profile selection. ``~/.aws/config`` sets the default profile
-    # the agent later assumes; flipping it is a privilege-escalation
-    # primitive that bypasses every shell matcher.
-    ".aws/config",
-]
-
 
 # === Project-local pattern extension ===
 #
@@ -264,16 +226,14 @@ def _extra_patterns(cwd: Path | None = None) -> list[str]:
 def _effective_patterns(cwd: Path | None = None, *, mode: str = "enforce") -> tuple[str, ...]:
     """Return the pattern tuple for a guard ``mode``.
 
-    ``off`` keeps only the trust root. ``lockdown`` adds
-    ``LOCKDOWN_PATTERNS``. Every mode but ``off`` appends the project
+    ``off`` keeps only the trust root. Every other mode appends the project
     extras AFTER the built-ins so the first-match iteration in
     ``is_protected()`` favours the built-in suffixes (the trust root first,
     so a trust-root match is never reported as an overridable one).
     """
     if mode == "off":
         return tuple(PROTECTED_PATTERNS)
-    lockdown = LOCKDOWN_PATTERNS if mode == "lockdown" else []
-    return (*PROTECTED_PATTERNS, *lockdown, *_extra_patterns(cwd))
+    return (*PROTECTED_PATTERNS, *_extra_patterns(cwd))
 
 
 def _stat(path: Path) -> os.stat_result | None:
@@ -1638,29 +1598,20 @@ def deny_reason(matched: str, text: str = "") -> str:
             "is running from and to the subagent scope file, so a session can't rewrite "
             f"its own guardrails. {_TELL_THE_USER}; they can make the edit."
         )
-    if matched in LOCKDOWN_PATTERNS:
-        return (
-            f"Protected file: {named} (guard lockdown). Lockdown keeps agents off "
-            "git hooks and config, agent instruction files, MCP registrations and "
-            f"cloud profiles. {_TELL_THE_USER}; they can make the edit, or leave "
-            "lockdown with `guard mode enforce`."
-        )
     return (
         f"Protected file: {named} (project protected list). {_TELL_THE_USER}; "
         "they can make the edit."
     )
 
 
-def decide(
-    tool_name: str, tool_input: dict[str, Any], *, lockdown: bool = False
-) -> dict[str, Any] | None:
+def decide(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any] | None:
     """Return a steering ``deny`` envelope when a protected path is written.
 
     Pure decision logic for the registry adapter (``guard test``): no
-    logging, no allowlist, ``enforce`` patterns unless ``lockdown``.
+    logging, no allowlist, ``enforce`` patterns.
     ``hook()`` shares ``_match_for_tool`` so the two can't drift.
     """
-    patterns = _effective_patterns(mode="lockdown" if lockdown else "enforce")
+    patterns = _effective_patterns()
     hit, _ = _match_for_tool(tool_name, tool_input, patterns)
     if hit is None:
         return None

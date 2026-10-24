@@ -37,7 +37,7 @@ _REQUIRED_FIELDS = (
     "session_id",
 )
 
-_VALID_DECISIONS = {"allow", "deny", "pass", "defer"}
+_VALID_DECISIONS = {"deny", "pass"}
 
 
 def _run_hook(
@@ -49,7 +49,6 @@ def _run_hook(
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO / "src")
     env["GUARD_DECISIONS_PATH"] = str(decisions_path)
-    env["GUARD_STRICT_DENY_QUEUE_PATH"] = str(decisions_path.parent / "queue.jsonl")
     if env_overrides:
         env.update(env_overrides)
     proc = subprocess.run(
@@ -71,7 +70,7 @@ _HOOK_CASES: list[tuple[str, dict[str, Any]]] = [
         {
             "session_id": "sess-1",
             "tool_name": "Bash",
-            "tool_input": {"command": "git add -A"},
+            "tool_input": {"command": "git push --force origin main"},
             "hook_event_name": "PreToolUse",
             "cwd": "/tmp/work",
         },
@@ -81,7 +80,7 @@ _HOOK_CASES: list[tuple[str, dict[str, Any]]] = [
         {
             "session_id": "sess-1",
             "tool_name": "Bash",
-            "tool_input": {"command": "git -C /repo clean -fd"},
+            "tool_input": {"command": "git -C /repo log --output=/tmp/x"},
             "hook_event_name": "PreToolUse",
             "cwd": "/tmp/work",
         },
@@ -213,7 +212,7 @@ def test_bash_validator_session_id_comes_from_payload(tmp_path: Path) -> None:
     payload = {
         "session_id": "PAYLOAD-SID-XYZ",
         "tool_name": "Bash",
-        "tool_input": {"command": "git add -A"},
+        "tool_input": {"command": "git push --force origin main"},
         "hook_event_name": "PreToolUse",
         "cwd": str(tmp_path),
     }
@@ -230,7 +229,7 @@ def test_bash_validator_session_id_comes_from_payload(tmp_path: Path) -> None:
 
 
 def test_at_least_one_hook_emits_a_real_decision(tmp_path: Path) -> None:
-    """Sanity: drive every hook against `git add -A` and assert >=1 decision logged.
+    """Sanity: drive every hook against a force push and assert >=1 decision logged.
 
     Confirms the ``log_decision`` wiring isn't silently a no-op across the
     board.
@@ -239,7 +238,7 @@ def test_at_least_one_hook_emits_a_real_decision(tmp_path: Path) -> None:
     payload = {
         "session_id": "smoke",
         "tool_name": "Bash",
-        "tool_input": {"command": "git add -A"},
+        "tool_input": {"command": "git push --force origin main"},
         "hook_event_name": "PreToolUse",
         "cwd": str(tmp_path),
     }
@@ -254,10 +253,10 @@ def test_at_least_one_hook_emits_a_real_decision(tmp_path: Path) -> None:
     ):
         _run_hook(HOOKS_DIR / f"{hook_name}.py", payload, decisions_path)
 
-    # At least bash_command_validator should fire on `git add -A`.
+    # At least bash_command_validator should fire on the force push.
     assert decisions_path.exists()
     lines = decisions_path.read_text().splitlines()
-    assert lines, "no decisions logged for any hook on `git add -A`"
+    assert lines, "no decisions logged for any hook on the force push"
 
     # Every line must be valid JSON with schema_version 1.
     for line in lines:

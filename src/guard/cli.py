@@ -15,9 +15,8 @@ Subcommands:
 - ``guard test "<command>" ...`` — invokes ``decide()`` on each relevant
   hook in-process; no log access, no subprocess. Accepts multiple commands.
 - ``guard corpus`` — adjudicate every fixture in ``tests/corpus/*.jsonl``
-  through ``decide()`` in one process; exit 1 on any mismatch. The
-  whitelisted, lockdown-safe test harness — agents run this instead of
-  spraying ad-hoc ``guard test`` strings. ``guard corpus add '<cmd>'
+  through ``decide()`` in one process; exit 1 on any mismatch. Agents run
+  this instead of spraying ad-hoc ``guard test`` strings. ``guard corpus add '<cmd>'
   --expect <d>`` appends one fixture row (into a bare ``tests/corpus`` file)
   and adjudicates it, so a found bypass becomes a permanent regression row.
 - ``guard diff`` — print the effective runtime config (registered hook ids,
@@ -396,7 +395,6 @@ def cmd_status() -> tuple[dict[str, Any], str]:
         "enforce": "denies are surfaced and exit 2",
         "shadow": "denies are logged with mode=shadow, not enforced (trust root excepted)",
         "off": "hooks are short-circuited except guard's own trust root",
-        "lockdown": "enforce plus bash default-deny and the extended protected-file list",
     }.get(allowlist.mode, "")
     lines = [
         f"guard {__version__}",
@@ -424,14 +422,13 @@ def cmd_status() -> tuple[dict[str, Any], str]:
 
 
 _HEALTHCHECK_PROBES: tuple[tuple[str, str, str], ...] = (
-    # (command, guard mode, expected rule_id substring). Three probes: two
-    # always-deny commands under enforce plus one lockdown probe that
-    # exercises the strict_default_deny path. A registry-only weakening
-    # cannot turn the healthcheck green; a mode plumbing regression cannot
-    # either. Rule_id is the stable contract, not body wording.
+    # (command, guard mode, expected rule_id substring). Three floor
+    # commands, each denied by a different rule, so a registry-only weakening
+    # cannot turn the healthcheck green. Rule_id is the stable contract, not
+    # body wording.
     ("rm -rf /", "enforce", "bash.always_deny"),
-    ("python -c 'x'", "enforce", "bash.always_deny"),
-    ("flarbnoz --gronk", "lockdown", "bash.strict_default_deny"),
+    ("git push --force origin main", "enforce", "bash.always_deny"),
+    ("gh auth token", "enforce", "bash.credential_leak"),
 )
 
 
@@ -499,13 +496,11 @@ def _run_healthcheck_probe(
 def cmd_healthcheck() -> tuple[dict[str, Any], str]:
     """Synthesize known-deny PreToolUse payloads and assert guard denies.
 
-    Three probes: two always-deny commands under ``enforce`` plus one
-    ``lockdown`` probe that exercises the strict_default_deny path. Each
-    runs against a throwaway guard home, so the user's own mode and
-    allowlist don't change the result. Each must come back with
-    ``permissionDecision: deny`` AND the expected rule_id substring in
-    the reason. Requiring distinct probes plus rule_id matching defeats
-    both single-rule registry weakening and mode plumbing regressions.
+    Three floor commands under ``enforce``. Each runs against a throwaway
+    guard home, so the user's own mode and allowlist don't change the
+    result. Each must come back with ``permissionDecision: deny`` AND the
+    expected rule_id substring in the reason. Requiring distinct probes plus
+    rule_id matching defeats single-rule registry weakening.
 
     When a probe fails, the full deny envelope is in
     ``~/.claude/guard-decisions.jsonl`` -- this output stays minimal.
@@ -755,9 +750,9 @@ def _corpus_payload(report: CorpusReport) -> tuple[dict[str, Any], str]:
 def cmd_corpus() -> tuple[dict[str, Any], str]:
     """Adjudicate every fixture in ``tests/corpus/*.jsonl`` and report mismatches.
 
-    The whitelisted, lockdown-safe harness: one process runs ``decide()`` over
-    the whole fixture corpus, so agents stop spraying ad-hoc ``guard test '<cmd>'``
-    strings (blocked in lockdown, and lost the moment the shell call returns).
+    One process runs ``decide()`` over the whole fixture corpus, so agents stop
+    spraying ad-hoc ``guard test '<cmd>'`` strings (lost the moment the shell
+    call returns).
     A newly found bypass or false positive becomes a one-line fixture row picked
     up here and in CI. The caller sets the exit code from ``payload['ok']``.
     """
@@ -851,7 +846,7 @@ def _test_specs(command: str) -> Iterable[dict[str, Any]]:
 
 
 def cmd_mode(value: str | None) -> tuple[dict[str, Any], str]:
-    """Print or set the guard mode (enforce|shadow|off|lockdown).
+    """Print or set the guard mode (enforce|shadow|off).
 
     With no ``value``, prints the effective mode and where it comes from.
     With a value, writes that mode to the global allowlist file and reports
@@ -1278,7 +1273,7 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  guard corpus add 'gh auth token' --expect deny\n"
-            "  guard corpus add 'yq -I4 x.yaml' --expect allow --mode lockdown\n"
+            "  guard corpus add 'git push origin feature' --expect allow\n"
             "  guard corpus add '\"gh\" auth token' --expect deny --file crossexam.jsonl"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1294,8 +1289,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--mode",
         default="default",
         help=(
-            "Mode to adjudicate under: 'lockdown' for strict default-deny, otherwise a "
-            "Claude Code permission_mode (default: default)."
+            "Claude Code permission_mode recorded on the row (default: default). "
+            "It doesn't change the decision."
         ),
     )
     p_corpus_add.add_argument(
@@ -1372,14 +1367,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_mode = sub.add_parser(
         "mode",
         help=(
-            "Print or set the guard mode (enforce|shadow|off|lockdown). "
+            "Print or set the guard mode (enforce|shadow|off). "
             "With no value, prints the effective mode and the source file."
         ),
     )
     p_mode.add_argument(
         "value",
         nargs="?",
-        choices=["enforce", "shadow", "off", "lockdown"],
+        choices=["enforce", "shadow", "off"],
         help="If set, writes mode to the global allowlist file.",
     )
     _add_global_flag(p_mode)

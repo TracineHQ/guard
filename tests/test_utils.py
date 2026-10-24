@@ -304,7 +304,7 @@ def test_log_decision_omits_optional_fields(guard_decisions_jsonl: Path) -> None
         hook_id="guard.test_hook",
         event="PreToolUse",
         tool_name=None,
-        decision="allow",
+        decision="pass",
         reason="ok",
     )
 
@@ -664,13 +664,13 @@ def test_log_decision_falsy_extra_is_not_merged(guard_decisions_jsonl: Path) -> 
         hook_id="guard.test",
         event="PreToolUse",
         tool_name="Bash",
-        decision="allow",
+        decision="pass",
         reason="ok",
         extra={},
     )
     record = json.loads(guard_decisions_jsonl.read_text().splitlines()[-1])
     # All canonical fields present, no spurious keys from extra={}.
-    assert record["decision"] == "allow"
+    assert record["decision"] == "pass"
 
 
 def test_log_internal_error_writes_hashed_traceback(guard_decisions_jsonl: Path) -> None:

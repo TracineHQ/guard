@@ -112,9 +112,3 @@
 {"command": "cat s | python3 -c 'import sys; exec(sys.stdin.read())'", "expected": "deny", "mode": "auto", "source": "curated", "note": "FLOOR: literal program that evals stdin"}
 {"command": "osascript -e 'do shell script \"rm -rf ~\"'", "expected": "deny", "mode": "auto", "source": "curated", "note": "FLOOR: do shell script string hits the rm floor"}
 {"command": "osascript -e 'do shell script \"ls \" & p'", "expected": "deny", "mode": "auto", "source": "curated", "note": "FLOOR: do shell script string built at run time"}
-{"command": "echo hi > notes.txt", "expected": "deny", "mode": "lockdown", "source": "curated", "note": "lockdown ignores auto: STEER construct still denies"}
-{"command": "git add -A", "expected": "deny", "mode": "lockdown", "source": "curated", "note": "lockdown ignores auto: STEER literal still denies"}
-{"command": "python3 -c 'print(1)'", "expected": "deny", "mode": "lockdown", "source": "curated", "note": "lockdown ignores auto: a literal inline program still denies"}
-{"command": "echo hi > notes.txt", "expected": "deny", "mode": "default", "source": "curated", "note": "default mode: STEER still denies"}
-{"command": "git add -A", "expected": "deny", "mode": "default", "source": "curated", "note": "default mode: STEER still denies"}
-{"command": "python3 -c 'print(1)'", "expected": "deny", "mode": "default", "source": "curated", "note": "default mode: STEER still denies"}

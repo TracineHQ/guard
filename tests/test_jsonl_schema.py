@@ -53,7 +53,7 @@ def test_record_carries_v_and_mode(jsonl: Path) -> None:
         hook_id="guard.x",
         event="PreToolUse",
         tool_name="Bash",
-        decision="allow",
+        decision="pass",
         reason="ok",
     )
     rec = json.loads(jsonl.read_text().splitlines()[-1])
@@ -84,7 +84,7 @@ def test_v_and_schema_version_are_consistent(jsonl: Path) -> None:
         hook_id="guard.x",
         event="PreToolUse",
         tool_name="Bash",
-        decision="allow",
+        decision="pass",
         reason="ok",
     )
     rec = json.loads(jsonl.read_text().splitlines()[-1])

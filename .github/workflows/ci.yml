@@ -233,9 +233,6 @@ jobs:
           #   #allow           — no hook must return deny
           #   #deny            — at least one hook must return deny
           #   #override <env>  — set GUARD_ADMIN_ALLOW_VERBS=<env>, assert allow
-          #
-          # permission_mode=default: override blocks must be tested in interactive
-          # mode so GUARD_ADMIN_ALLOW_VERBS takes effect before strict-deny.
           CORPUS="tests/integration/aws_catalog_smoke_corpus.txt"
           GUARD_BIN="/tmp/guard-smoke/bin/guard"
           /tmp/guard-smoke/bin/python - "$CORPUS" "$GUARD_BIN" <<'PYEOF'

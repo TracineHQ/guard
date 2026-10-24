@@ -18,12 +18,12 @@ Guardrails not walls: guard catches the obvious foot-guns at the Claude Code hoo
 
 | Hook | What it catches |
 |---|---|
-| bash_command_validator | dangerous shell commands (rm -rf, eval/source, env-var hijack, shell-wrapper bypass) + admin-CLI default-deny for `aws`/`gcloud`/`az`/`kubectl`/`launchctl` (only read-only verbs pass) |
-| git_c_validator | `git -C path` traversal, `git -c key=value` config injection, `git commit -C` silent message reuse |
+| bash_command_validator | dangerous shell commands (rm -rf of a root, force push, `eval`, payloads hidden in `bash -c`, substitutions and function bodies) + admin-CLI default-deny for `aws`/`gcloud`/`az`/`kubectl`/`launchctl` (only read-only verbs pass) |
+| git_c_validator | `git -c` overrides of `core.hooksPath` / `core.attributesFile`, and `git -C` read verbs that run a program or write a file (`log --output=`, `fetch --upload-pack`) |
 | credential_check | hardcoded credentials in tool inputs |
 | commit_message_validator | AI-attribution trailers (`Co-Authored-By: Claude…`) and missing/file-backed commit messages |
 | agent_output_guard | reads of subagent transcript files (`/tmp/claude-<uid>/.../tasks/*.output`); background command output stays readable |
-| protected_files | edits to the guard install that's running, its allowlist, and subagent scope, plus your own patterns (lockdown adds agent-instruction, git-hook and MCP config files) |
+| protected_files | edits to the guard install that's running, its allowlist, and subagent scope, plus your own patterns |
 | subagent_scope | file edits outside the declared `.claude/subagent-scope.json` allowlist |
 | permission_request_logger | observation-only: logs every Claude Code permission prompt as a `permission_request` JSONL row (no enforcement) |
 
@@ -71,15 +71,16 @@ Then `guard status` shows the log location and last record, `guard noisy --since
 
 Guard reads a small set of environment variables. See [SKILL.md](SKILL.md) for the canonical descriptions and defaults.
 
-Guard never asks. Every block is a deny whose reason tells the agent what
-to do instead: usually stop and tell you, with the command or allowlist
-override you can run. You get the context in the conversation, not a
-confirm dialog without it.
+Guard never asks and never approves. Every block is a deny whose reason
+tells the agent what to do instead: usually stop and tell you, with the
+command or allowlist override you can run. Everything else gets no decision
+from guard and goes on to Claude Code's own permission step, auto mode's
+classifier included.
 
 **Healthcheck:** `guard healthcheck` exits 0 on healthy, non-zero on
 failure. Suitable for CI gates and cron-based monitors.
 
-**Mode (enforce / shadow / off / lockdown):** a top-level `"mode"` field in
+**Mode (enforce / shadow / off):** a top-level `"mode"` field in
 `~/.claude/guard/allowlist.json`, set with `guard mode <mode>`. Default is
 `"enforce"`. One file, one place to look: there are no per-repo overrides,
 so a repo you clone can't switch guard off.
@@ -92,25 +93,20 @@ Every hook honors the mode:
   then `guard mode enforce`.
 - `off` -- hooks go quiet, except edits to the running guard's code and allowlist.
   Those stay blocked so a session can't rewrite guard while it's off.
-- `lockdown` -- opt-in strict default-deny for driven or unattended agents.
-  Bash commands off the read-only safe list are denied, and protected_files
-  adds agent-instruction, git-hook, MCP and `.aws/config` files. Only
-  `guard mode lockdown` turns it on; Claude Code's `permission_mode` never does.
 
-Under Claude Code's `auto` permission mode (and outside `lockdown`) guard
-keeps only its hard floor: destructive, code-injection, guard-evasion and
-credential rules still deny, along with edits to guard's own files and AI
-attribution in commits. Shape rules (redirects, `bash -c`,
-`git add -A`, a variable or glob as the command name, exec env vars, `pip` /
-`npm` / `npx` installs, ...) pass to Claude Code's own classifier, which sees
-the whole conversation, and are logged as `pass`. Payloads those shapes hide
-are still checked against the floor. The FLOOR / STEER list is in
-[docs/dangerous-commands.md](docs/dangerous-commands.md#auto-mode-hard-floor-vs-steering).
+`lockdown` is retired: an allowlist that still names it gets one warning and
+runs as `enforce`.
+
+Claude Code's `permission_mode` is logged, never acted on: every mode gets the
+same decision. Shape rules (redirects, `bash -c`, `git add -A`, exec env vars,
+`pip` / `npm` / `npx` installs, ...) are gone; Claude Code's classifier sees
+the whole conversation and judges those. Payloads a shape hides are still
+checked against the rules. What guard denies is in
+[docs/dangerous-commands.md](docs/dangerous-commands.md).
 
 | Variable | Purpose |
 |---|---|
 | `GUARD_DECISIONS_PATH` | Override the JSONL decision-log path |
-| `GUARD_STRICT_DENY_QUEUE_PATH` | Override the strict-deny queue path |
 | `GUARD_DEBUG` | Emit per-hook debug to stderr |
 | `GUARD_DATA_DIR` | Override guard's data directory |
 | `GUARD_PROTECTED_EXTRA` | Comma-separated extra protected glob patterns, added to any in `.claude/guard-protected.txt` (rooted at cwd) |

