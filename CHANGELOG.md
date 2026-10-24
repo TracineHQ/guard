@@ -16,12 +16,20 @@ adheres to [Semantic Versioning](https://semver.org/).
   `git add -A`, `git branch -D`, `git remote add`, `git worktree add`,
   `git submodule add`, `git config` writes, exec env vars (`PYTHONPATH`,
   `GIT_SSH_COMMAND`), a variable or glob as the command name, `env -i`,
-  `pip` / `npm` / `npx` installs from a URL, `crontab`, and the `git -C`
-  subcommand list. Claude Code's classifier judges those calls. What guard
+  `pip` / `npm` / `npx` installs from a URL, `crontab`, `git commit -C` /
+  `--reuse-message`, and the `git -C` subcommand list. Claude Code's
+  classifier judges those calls. What guard
   still denies is in `docs/dangerous-commands.md`; where it is headed is in
   `docs/rules-design.md`. The trade-off: a destructive command hidden behind
   a variable or glob command name (`R=rm; $R -rf ~`) is left to the
   classifier.
+- A rule turned off with `guard allowlist disable-rule` is skipped and the
+  scan goes on, so any other rule the command meets still denies: with
+  `bash.always_deny` off, `rm -rf /` still denies as `bash.dangerous_rm`.
+  Before, the first disabled rule a command met let the whole command
+  through.
+- `git_c_validator` denies `git -C <path> stash show --output=` like the bare
+  form.
 - Guard sees through the wrappers that used to hide a command from it.
   `env` options are peeled (`env -i`, `-u NAME`, `-C DIR`, `--`), shell
   options before `-c` are skipped (`bash -o pipefail -c`, `bash -c --`),
@@ -112,7 +120,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 - What a `$((` holds is checked: a substitution inside arithmetic
   (`echo $(( $(rm -rf /) + 1 ))`), or a `$((cd x; y) ; z)` that bash reads
   as nested subshells (`echo $((cd /tmp; echo a) ; rm -rf ~ )`). Both passed
-  before.
+  before. Arithmetic with nothing in it that runs (`$(( $(( 1 )) + 2 ))`)
+  passes at any depth.
+- A `trap` handler is checked as a command whatever else the line holds:
+  `trap 'rm -rf ~; echo -p' EXIT` passed before.
 - Development dependencies pulled in by pre-commit move past published
   advisories: `filelock` 4.2.4 and `virtualenv` 21.14.13. Installed guard
   doesn't use either.
@@ -198,7 +209,9 @@ adheres to [Semantic Versioning](https://semver.org/).
   `ext::` remote, which run a program, deny.
 - The `unknown_flags` telemetry `SECURITY.md` describes is written: an admin
   CLI command guard passes logs its unrecognized `--*` flags. It used to ride
-  only on approvals, which admin CLI commands never got.
+  only on approvals, which admin CLI commands never got. Only the
+  `--[A-Za-z0-9-]+` name is kept, so a fused value (`--token:SECRET`) never
+  reaches the log.
 - Tests and the corpus no longer touch the developer's real home: conftest
   isolates `HOME`, `GUARD_DATA_DIR` and the decision-log paths, the corpus
   adjudicates against guard's shipped policy without writing logs, and a
