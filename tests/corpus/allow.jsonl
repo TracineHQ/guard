@@ -86,3 +86,65 @@
 {"command": "uv run python -m pytest", "expected": "allow", "mode": "default", "source": "curated", "note": "module run passes through"}
 {"command": "python -m pip install -e .", "expected": "allow", "mode": "default", "source": "curated", "note": "-e after -m <module> is pip's argv, not a python eval flag"}
 {"command": "python3 x.py -c cfg", "expected": "allow", "mode": "default", "source": "curated", "note": "-c after the script path is the script's argv"}
+{"command": "awk -F'[ =]' '\n/^\\[ax\\] bus / && $4 <= 102800 {\nw++\nm = ($6 > $8) ? $6 : $8\nif (m > pk) pk = m\n}\nEND { print \"windows\", w, \"peak\", pk+0 }' build/probe/stdout.txt", "expected": "allow", "mode": "auto", "source": "convo:session", "note": "multi-line awk program: the `$4` line is awk, not a command named by an expansion"}
+{"command": "awk -F'[ =]' '\n/^\\[ax\\] bus / && $4 <= 102800 {\nw++\nm = ($6 > $8) ? $6 : $8\nif (m > pk) pk = m\n}\nEND { print \"windows\", w, \"peak\", pk+0 }' build/probe/stdout.txt", "expected": "allow", "mode": "default", "source": "convo:session", "note": "multi-line awk program stays one awk command"}
+{"command": "jq -r '\n.items[]\n| select(.size > 10)\n| .name' data.json", "expected": "allow", "mode": "default", "source": "convo:session", "note": "multi-line jq filter: its `|` lines are jq pipes, not shell pipes"}
+{"command": "bash -c 'awk \"\n{ print \\$4 }\" f'", "expected": "allow", "mode": "auto", "source": "curated", "note": "a multi-line awk program inside a `bash -c` string is one awk command"}
+{"command": "grep -c -E -e '^\\[ft\\] f(3[4-9][0-9][0-9]|[4-9][0-9]{3}) guest' build/probe/stdout.txt", "expected": "allow", "mode": "default", "source": "convo:session", "note": "a repeat count in a quoted regex is not a brace expansion"}
+{"command": "grep -c -E -e '^\\[ft\\] f(3[4-9][0-9][0-9]|[4-9][0-9]{3}) guest +([2-9][0-9]|[0-9]{3,})\\.' build/probe/stdout.txt", "expected": "allow", "mode": "default", "source": "convo:session", "note": "an open-ended `{3,}` in a quoted regex stays one word; expanded, the quote broke and the `|` split the command"}
+{"command": "git -C /tmp/repo log --format='%s' -n 300 | grep -nE \"\\b[A-Z][0-9]{1,2}[a-z]?\\b|[Tt]ask [0-9]\"", "expected": "allow", "mode": "default", "source": "convo:session", "note": "`{1,2}` in a double-quoted regex stays literal; `[Tt]ask` was read as a glob command head"}
+{"command": "echo '{a,b} c' {d,e}", "expected": "allow", "mode": "default", "source": "curated", "note": "a quoted brace group with a space stays whole beside a real expansion"}
+{"command": "echo 'a\nb' # x", "expected": "allow", "mode": "default", "source": "curated", "note": "a trailing comment after a multi-line quote: both readings find one echo"}
+{"command": "# note\necho 'a\nb'", "expected": "allow", "mode": "default", "source": "curated", "note": "a leading comment line before a multi-line quote"}
+{"command": "# it's\nls\necho 'a\nb'", "expected": "allow", "mode": "default", "source": "curated", "note": "an apostrophe in a comment line does not turn later lines into commands"}
+{"command": "git commit -m \"fix\n\nbody\" # note", "expected": "allow", "mode": "default", "source": "curated", "note": "a multi-line commit message with a trailing comment"}
+{"command": "watch -n 1 'ls -la'", "expected": "allow", "mode": "default", "source": "curated", "note": "watch -n 1 around a harmless command"}
+{"command": "watch -d ls", "expected": "allow", "mode": "default", "source": "curated", "note": "watch -d around a harmless command"}
+{"command": "script -qc 'ls' /dev/null", "expected": "allow", "mode": "default", "source": "curated", "note": "script -qc around a harmless command"}
+{"command": "parallel -j 2 'echo {}' ::: a b", "expected": "allow", "mode": "default", "source": "curated", "note": "parallel -j 2 around a harmless command"}
+{"command": "cat <<'EOF'\nit's here\nrm -rf /\nEOF\necho 'a\nb' # x", "expected": "allow", "mode": "default", "source": "curated", "note": "a heredoc body is data even when a quoted newline follows it"}
+{"command": "grep -nE '^[0-9]{1,2} x|[Tt]ask$' notes.md", "expected": "allow", "mode": "default", "source": "curated", "note": "a $ anchor ending a single-quoted regex is not an ANSI-C quote: its braces stay literal"}
+{"command": "grep -nE '^[0-9]{1,2} x|[Tt]ask$' notes.md", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a $ anchor ending a single-quoted regex is not an ANSI-C quote: its braces stay literal"}
+{"command": "rg -n '^v[0-9]{1,3}\\.[0-9]+ |[Rr]eadme$' CHANGELOG.md", "expected": "allow", "mode": "default", "source": "curated", "note": "a $ anchor ending a single-quoted regex with a brace range"}
+{"command": "rg -n '^v[0-9]{1,3}\\.[0-9]+ |[Rr]eadme$' CHANGELOG.md", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a $ anchor ending a single-quoted regex with a brace range"}
+{"command": "sed -nE '/^[0-9]{3,} |[Tt]odo$/p' notes.md", "expected": "allow", "mode": "default", "source": "curated", "note": "a $ anchor in a sed pattern with an open-ended brace range"}
+{"command": "sed -nE '/^[0-9]{3,} |[Tt]odo$/p' notes.md", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a $ anchor in a sed pattern with an open-ended brace range"}
+{"command": "grep -nE \"[0-9]{1,2} x|[Tt]ask\" notes.md && printf $'done\\n'", "expected": "allow", "mode": "default", "source": "curated", "note": "an ANSI-C quote that decodes to no quote leaves quoted braces alone"}
+{"command": "grep -nE \"[0-9]{1,2} x|[Tt]ask\" notes.md && printf $'done\\n'", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: an ANSI-C quote that decodes to no quote leaves quoted braces alone"}
+{"command": "cat > notes.md <<'END-NOTES'\nrm -rf / is denied; don't retry it\nEND-NOTES", "expected": "allow", "mode": "auto", "source": "curated", "note": "a hyphenated delimiter: the heredoc body is text, not a command"}
+{"command": "cat > notes.md <<\\EOF\nrm -rf / is denied; don't retry it\nEOF", "expected": "allow", "mode": "auto", "source": "curated", "note": "a backslash-quoted delimiter: the heredoc body is text"}
+{"command": "cat <<'END-NOTES'\nrm -rf / is denied; don't retry it\nEND-NOTES", "expected": "allow", "mode": "default", "source": "curated", "note": "a hyphenated delimiter with no redirect"}
+{"command": "cat <<'END-NOTES'\nrm -rf / is denied; don't retry it\nEND-NOTES", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a hyphenated delimiter with no redirect"}
+{"command": "cat <<\\EOF\nrm -rf / is denied; don't retry it\nEOF\necho 'a\nb' # x", "expected": "allow", "mode": "default", "source": "curated", "note": "a heredoc body that names rm, then a quoted newline"}
+{"command": "cat <<\\EOF\nrm -rf / is denied; don't retry it\nEOF\necho 'a\nb' # x", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a heredoc body that names rm, then a quoted newline"}
+{"command": "parallel --tmpdir /tmp 'echo {}' ::: a b", "expected": "allow", "mode": "default", "source": "curated", "note": "parallel --tmpdir around a harmless command"}
+{"command": "parallel --tmpdir /tmp 'echo {}' ::: a b", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: parallel --tmpdir around a harmless command"}
+{"command": "parallel --bar gzip {} ::: *.log", "expected": "allow", "mode": "default", "source": "curated", "note": "parallel --bar takes no value, so a glob argument is not a command head"}
+{"command": "parallel --bar gzip {} ::: *.log", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: parallel --bar takes no value, so a glob argument is not a command head"}
+{"command": "parallel --newflag gzip {} ::: a b", "expected": "allow", "mode": "default", "source": "curated", "note": "an unlisted option around a harmless command"}
+{"command": "parallel --newflag gzip {} ::: a b", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: an unlisted option around a harmless command"}
+{"command": "parallel 'echo a ; echo {} # x' ::: b", "expected": "allow", "mode": "default", "source": "curated", "note": "a placeholder before a comment"}
+{"command": "parallel 'echo a ; echo {} # x' ::: b", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a placeholder before a comment"}
+{"command": "script --command 'ls' /dev/null", "expected": "allow", "mode": "default", "source": "curated", "note": "script --command around a harmless command"}
+{"command": "script --command 'ls' /dev/null", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: script --command around a harmless command"}
+{"command": "n=$((a << 2)) # shift\ngit commit -m 'Title\n\nIt mentions rm and watch.'", "expected": "allow", "mode": "auto", "source": "curated", "note": "a shift in arithmetic before a multi-line commit message (default mode denies $((...)) on main too)"}
+{"command": "(( n <<= 1 )) # double\ngit commit -m 'Title\n\nbody'", "expected": "allow", "mode": "default", "source": "curated", "note": "an arithmetic command before a multi-line commit message"}
+{"command": "(( n <<= 1 )) # double\ngit commit -m 'Title\n\nbody'", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: an arithmetic command before a multi-line commit message"}
+{"command": "echo $[1<<2] # c\necho 'a\nb'", "expected": "allow", "mode": "default", "source": "curated", "note": "the old bracket arithmetic form with a shift"}
+{"command": "echo $[1<<2] # c\necho 'a\nb'", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: the old bracket arithmetic form with a shift"}
+{"command": "parallel 'rm -rf {}/node_modules' ::: packages/a packages/b", "expected": "allow", "mode": "default", "source": "curated", "note": "a placeholder with a suffix, over harmless arguments"}
+{"command": "parallel 'rm -rf {}/node_modules' ::: packages/a packages/b", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a placeholder with a suffix, over harmless arguments"}
+{"command": "parallel -j8 'rm -rf {}' ::: build dist .cache", "expected": "allow", "mode": "default", "source": "curated", "note": "rm -rf over build directories"}
+{"command": "parallel -j8 'rm -rf {}' ::: build dist .cache", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: rm -rf over build directories"}
+{"command": "parallel 'convert {} {.}.png' ::: a.jpg b.jpg", "expected": "allow", "mode": "default", "source": "curated", "note": "{.} is the argument without its extension"}
+{"command": "parallel 'convert {} {.}.png' ::: a.jpg b.jpg", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: {.} is the argument without its extension"}
+{"command": "parallel 'cp {} out/{/}' ::: src/a.txt src/b.txt", "expected": "allow", "mode": "default", "source": "curated", "note": "{/} is the basename"}
+{"command": "parallel 'cp {} out/{/}' ::: src/a.txt src/b.txt", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: {/} is the basename"}
+{"command": "parallel 'mkdir -p out/{//}' ::: a/b/c.txt", "expected": "allow", "mode": "default", "source": "curated", "note": "{//} is the dirname"}
+{"command": "parallel 'mkdir -p out/{//}' ::: a/b/c.txt", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: {//} is the dirname"}
+{"command": "script -q /dev/null make test", "expected": "allow", "mode": "default", "source": "curated", "note": "BSD script around a harmless command"}
+{"command": "script -q /dev/null make test", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: BSD script around a harmless command"}
+{"command": "script -F /dev/null make test", "expected": "allow", "mode": "default", "source": "curated", "note": "BSD script -F around a harmless command"}
+{"command": "script -F /dev/null make test", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: BSD script -F around a harmless command"}
+{"command": "script -a session.log", "expected": "allow", "mode": "default", "source": "curated", "note": "script with only an output file"}
+{"command": "script -a session.log", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: script with only an output file"}

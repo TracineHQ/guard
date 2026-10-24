@@ -112,11 +112,48 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- Development dependencies pulled in by pre-commit move past published
+  advisories: `filelock` 4.2.4 and `virtualenv` 21.14.13. Installed guard
+  doesn't use either.
 - A repo can't loosen guard. Guard reads no mode or `disable_rules` from the
   working directory, so a cloned repo's `.claude/guard/allowlist.json` with
   `"mode": "off"` or disabled rules does nothing. What it does read there
   only adds limits: `.claude/guard-protected.txt` and
   `.claude/subagent-scope.json`.
+- A command after a multi-line quoted argument is checked again. Guard split
+  on every newline, so the line after a quoted newline began inside the
+  quote and the `;`, `&&` or `|` after its closing quote read as quoted:
+  `echo 'a<newline>b' ; rm -rf /` passed in every mode. A `system()` call in
+  a multi-line awk program missed the awk floor the same way. Where the
+  quoting can't be read exactly (a `#` comment, a heredoc, `alias`, `$'...'`,
+  a backtick, `${x:-y}`), guard reads the command with the quoted lines
+  joined as well as line by line, and denies if either reading denies. That
+  reading skips heredoc bodies for every delimiter form (`<<'END-X'`,
+  `<<END.X`, `<<\EOF`, `<<-EOF`) and reads a `<<` inside `$((...))` or
+  `((...))` as a shift, but `((echo 'a'; b) ; c)` as nested subshells, as
+  bash does. `echo 'a<newline>b' ; rm -rf / # x` passed in every mode before,
+  as did the same command after a `<<'END-X'` heredoc whose body has an
+  apostrophe.
+- `watch`, `parallel` and `script -c` run their command through a shell, and
+  that command is now split like a `bash -c` string. A second command in it
+  (`watch -n1 'echo a; rm -rf /'`) passed before. The command is also found
+  behind the values `watch` (`-n 1`, `--interval 2`, `-q 3`) and `parallel`
+  (`-j 2`, `--tmpdir`, `--nice`, `--env`, `--tagstring`, `-J`, `--memfree`)
+  take; an option guard doesn't list is read both with and without a value. A
+  `parallel` placeholder is replaced inside a quoted command and for every
+  `:::` argument by what it stands for: `{}` and `{1}` the argument, `{//}`
+  its dirname, `{/}` its basename, `{.}` and `{/.}` the name without its
+  extension. `parallel ::: 'rm -rf /'` runs its arguments as the commands
+  they are. `script` is read through a clustered `-qc`, a leading `-c`,
+  `--command <cmd>` or `--command=<cmd>`. macOS `script` has no `-c` and runs
+  the words after its output file directly, so they are read as the command,
+  after the options `-t` (which takes a value) and `-F` (which does not)
+  (`script -q /dev/null make test`).
+  `watch -n 1 'rm -rf /'`, `parallel -j 2 'rm -rf {}' ::: /`,
+  `parallel 'rm -rf {//}' ::: ./build`,
+  `parallel -j 2 'echo a ; rm -rf {} # x' ::: /`,
+  `script --command 'rm -rf /' /dev/null`, `script -q /dev/null rm -rf /` and
+  `script -F /dev/null rm -rf /` passed before.
 
 ### Fixed
 
@@ -134,7 +171,25 @@ adheres to [Semantic Versioning](https://semver.org/).
   - An awk command that starts with a literal (`cmd = "wc -l " $1`) is
     checked by that literal; only a command built entirely at run time
     (`system($0)`) is denied.
-
+  - A newline inside quotes no longer splits the command, so a multi-line
+    awk, jq or `-c` program is one argument rather than one command per
+    line. A program line such as `$4 <= 102800 {` is no longer denied as a
+    command named by an expansion. When the quoting can't be read exactly
+    (a heredoc, a `#` that may start a comment, a backtick, `$'...'`,
+    `$(...)` inside double quotes, a `${...}` other than a plain name,
+    `alias`, an unterminated quote), guard splits on every newline as before
+    and also checks the command with the quoted lines joined.
+- A brace inside quotes or after a backslash is left alone, as bash leaves it.
+  Brace expansion split the line on whitespace and ignored quotes, so a
+  quantifier such as `{1,2}` or `{3,}` in `grep -E "[0-9]{1,2} x|y"` became
+  extra words, the quote broke, a later `|` split the command, and a
+  fragment like `[Tt]ask` was denied as a glob command head. A quoted space
+  no longer ends a word either. An unquoted `{a,b}` still expands and is
+  checked as before. When the quoting can't be read exactly (an unterminated
+  quote, a backtick, `$(...)` or a `${...}` other than a plain name inside
+  double quotes) or an ANSI-C quote decodes to a quote or backslash
+  (`$'\x27'`), every brace is expanded as before. A `$` ending a quoted regex
+  (`'[Tt]ask$'`) is not an ANSI-C quote.
 - Read-only guard CLI calls (`guard status`, `guard allowlist list`,
   `guard mode --help`, `guard allowlist --help`) no longer trip
   `protected_files`.
