@@ -148,6 +148,33 @@
 {"command": "script -F /dev/null make test", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: BSD script -F around a harmless command"}
 {"command": "script -a session.log", "expected": "allow", "mode": "default", "source": "curated", "note": "script with only an output file"}
 {"command": "script -a session.log", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: script with only an output file"}
+{"command": "rm -rf build>/dev/null", "expected": "allow", "mode": "default", "source": "curated", "note": "a glued redirect after a harmless operand"}
+{"command": "rm -rf build>/dev/null", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a glued redirect after a harmless operand"}
+{"command": "rm -rf build</dev/null", "expected": "allow", "mode": "default", "source": "curated", "note": "a glued input redirect after a harmless operand"}
+{"command": "rm -rf build</dev/null", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a glued input redirect after a harmless operand"}
+{"command": "rm -rf build&>/dev/null", "expected": "allow", "mode": "default", "source": "curated", "note": "a glued &> redirect after a harmless operand"}
+{"command": "rm -rf build&>/dev/null", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a glued &> redirect after a harmless operand"}
+{"command": "rm -rf build<<EOF\nx\nEOF", "expected": "allow", "mode": "default", "source": "curated", "note": "a glued heredoc after a harmless operand"}
+{"command": "rm -rf build<<EOF\nx\nEOF", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a glued heredoc after a harmless operand"}
+{"command": "rm -rf build 2>&1", "expected": "allow", "mode": "default", "source": "curated", "note": "a descriptor redirect after a harmless operand"}
+{"command": "rm -rf build 2>&1", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a descriptor redirect after a harmless operand"}
+{"command": "make test 2>&1", "expected": "allow", "mode": "default", "source": "curated", "note": "a descriptor redirect"}
+{"command": "make test 2>&1", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a descriptor redirect"}
+{"command": "rm -rf '~>x'", "expected": "allow", "mode": "default", "source": "curated", "note": "a quoted operator is part of the path"}
+{"command": "rm -rf '~>x'", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a quoted operator is part of the path"}
+{"command": "rm -rf \"/>x\"", "expected": "allow", "mode": "default", "source": "curated", "note": "a double-quoted operator is part of the path"}
+{"command": "rm -rf \"/>x\"", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a double-quoted operator is part of the path"}
+{"command": "rm -rf ~2>/dev/null", "expected": "allow", "mode": "default", "source": "curated", "note": "a digit glued to the word is part of it, not a descriptor"}
+{"command": "rm -rf ~2>/dev/null", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a digit glued to the word is part of it, not a descriptor"}
+{"command": "sudo rm -rf '~>x'", "expected": "allow", "mode": "default", "source": "curated", "note": "a quoted operator behind sudo is still part of the path"}
+{"command": "sudo rm -rf '~>x'", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a quoted operator behind sudo is still part of the path"}
+{"command": "nohup rm -rf '~>x'", "expected": "allow", "mode": "default", "source": "curated", "note": "a quoted operator behind nohup is still part of the path"}
+{"command": "nohup rm -rf '~>x'", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a quoted operator behind nohup is still part of the path"}
+{"command": "echo 'a>b'", "expected": "allow", "mode": "default", "source": "curated", "note": "a quoted operator in an argument"}
+{"command": "echo 'a>b'", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a quoted operator in an argument"}
+{"command": "grep -E 'a>b' f", "expected": "allow", "mode": "default", "source": "curated", "note": "a quoted operator in a pattern"}
+{"command": "grep -E 'a>b' f", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a quoted operator in a pattern"}
+{"command": "echo x>file", "expected": "allow", "mode": "auto", "source": "curated", "note": "a glued redirect to a file (default mode steers it to the Write tool)"}
 {"command": "npm run dev &", "expected": "allow", "mode": "default", "source": "curated", "note": "a backgrounded dev server"}
 {"command": "npm run dev &", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a backgrounded dev server"}
 {"command": "sleep 5 & wait", "expected": "allow", "mode": "default", "source": "curated", "note": "background then wait"}
