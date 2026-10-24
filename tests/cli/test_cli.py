@@ -907,11 +907,12 @@ def test_cmd_mode_reads_default_enforce(cli_homes: Path) -> None:
     assert "global:  (unset)" in pretty
 
 
-def test_cmd_mode_writes_global_mode(tmp_path: Path, cli_homes: Path) -> None:
-    """``guard mode shadow`` writes the global allowlist's mode field."""
+@pytest.mark.parametrize("flags", [[], ["--global"]], ids=["bare", "legacy-global-flag"])
+def test_cmd_mode_writes_global_mode(tmp_path: Path, cli_homes: Path, flags: list[str]) -> None:
+    """``guard mode shadow`` (``--global`` still accepted) writes the global mode field."""
     from guard import cli
 
-    rc = cli.main(["--json", "mode", "shadow"])
+    rc = cli.main(["--json", "mode", "shadow", *flags])
     assert rc == 0
     assert _global_doc(tmp_path)["mode"] == "shadow"
     assert not (cli_homes / ".claude").exists()
