@@ -170,6 +170,9 @@ def test_non_floor_shape_gets_no_decision(command: str, permission_mode: str) ->
         "find . -exec rm -rf / \\;",
         "flock /tmp/l bash -c 'rm -rf ~'",
         "printf x > ~/.bashrc",
+        "x=$((cd /tmp; echo a) ; rm -rf / )",
+        "echo $((cd /tmp; echo a) ; rm -rf ~ )",
+        "echo $(( $(rm -rf /) + 1 ))",
     ],
 )
 def test_hidden_floor_payload_denies(command: str) -> None:
@@ -189,6 +192,10 @@ def test_hidden_floor_payload_denies(command: str) -> None:
         "cat notes.txt | sort > sorted.txt",
         "cat > notes.txt << 'EOF'\nf() { f | f & }\nEOF",
         "grep -n 'function f(\\|f()' src/a.js",
+        "echo $((1 + 2))",
+        "n=$(( (3 + 4) * 2 ))",
+        "echo $(( $(wc -l < a.txt) + 1 ))",
+        "echo $(( $(git rev-list --count HEAD) - 1 ))",
     ],
 )
 def test_benign_hidden_payload_passes(command: str) -> None:

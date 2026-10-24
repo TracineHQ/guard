@@ -7002,7 +7002,7 @@ def _construct_spans(masked: str) -> list[tuple[str, int, int, int]]:
     original text with their quoting intact. ``kind`` is ``substitution``
     (``$(...)``, backticks), ``process_in`` (``<(...)``) or ``process_out``
     (``>(...)``). The closer sits at ``body_end``. ``$((...))`` arithmetic runs
-    no command and is skipped.
+    no command and is skipped (``_construct_floor`` checks what it holds).
     """
     spans: list[tuple[str, int, int, int]] = []
     kinds = {"$(": "substitution", "<(": "process_in", ">(": "process_out"}
@@ -7154,9 +7154,12 @@ def _construct_floor(
 
     Each body runs as its own command (a ``>(...)`` body reads the outer
     output, so it is checked as ``cat | <body>`` to catch ``tee >(sh)``).
-    Then the segment is re-checked with every substitution replaced by ``/``,
-    the worst value it could expand to, so ``rm -rf $(echo /)`` still hits the
-    ``rm`` floor.
+    What a ``$((`` holds is checked as arguments to ``cat``: arithmetic runs
+    any substitution inside it, and a ``$((`` that is not arithmetic
+    (``$((cd x; y) ; z)``) is a substitution holding a subshell. Then the
+    segment is re-checked with every substitution replaced by ``/``, the worst
+    value it could expand to, so ``rm -rf $(echo /)`` still hits the ``rm``
+    floor.
     """
     for kind, _start, body_start, close in spans:
         body = segment[body_start:close].strip()
@@ -7165,6 +7168,13 @@ def _construct_floor(
         hit = _floor_check(f"cat | {body}" if kind == "process_out" else body, command)
         if hit is not None:
             return hit
+    masked = _shell_code_mask(segment)
+    start = masked.find("$((")
+    while start >= 0:
+        hit = _floor_check("cat " + segment[start + 3 : _close_paren(masked, start + 1)], command)
+        if hit is not None:
+            return hit
+        start = masked.find("$((", start + 3)
     subs = [(s, c) for kind, s, _b, c in spans if kind == "substitution"]
     if not subs:
         return None
