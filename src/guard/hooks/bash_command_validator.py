@@ -4353,6 +4353,25 @@ def _collect_unknown_flags(spec: AdminCliSpec, tokens: list[str], cap: int = 8) 
     return seen
 
 
+def _admin_unknown_flags_extra(segments: list[str]) -> dict[str, Any] | None:
+    """Return ``{"unknown_flags": [...]}`` for the first admin CLI segment that has any.
+
+    Telemetry for the pass record: flag names only, never values.
+    """
+    for seg in segments:
+        raw = seg.split()
+        if not raw:
+            continue
+        head = _basename(raw[0])
+        for spec in ADMIN_CLI_SPECS:
+            if spec.cli_name == head and spec.known_flags:
+                unknown = _collect_unknown_flags(spec, raw[1:])
+                if unknown:
+                    return {"unknown_flags": unknown}
+                break
+    return None
+
+
 def _strip_cloud_global_flags(
     tokens: list[str],
     value_flags: frozenset[str],
@@ -6603,7 +6622,7 @@ def _decide_inner(
         _log_local(command, "deny", f"elevated-risk ({rule_id})")
         return _deny(_format_deny_reason(rule_id, body))
 
-    _log_local(command, "passthrough", "no match")
+    _log_local(command, "passthrough", "no match", extra=_admin_unknown_flags_extra(segments))
     return None
 
 
