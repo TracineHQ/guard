@@ -18,11 +18,18 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import guard
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HOOKS_DIR = REPO_ROOT / "src" / "guard" / "hooks"
+# The guard package in-process tests import (site-packages in CI's wheel
+# run). protected_files keys guard's own code on the real path of the copy
+# that runs, so in-process tests name live files under it; tests that spawn
+# a hook from src/ use HOOKS_DIR instead.
+LIVE_GUARD = Path(guard.__file__).resolve().parent
 
 
 def hook_path(name: str) -> Path:
@@ -56,24 +63,6 @@ def decision_from_stdout(stdout: str) -> str | None:
     if isinstance(hso, dict):
         return hso.get("permissionDecision")
     return envelope.get("permissionDecision") if isinstance(envelope, dict) else None
-
-
-def git(repo: Path, *args: str) -> None:
-    """Run ``git`` in ``repo`` with inherited ``GIT_*`` overrides stripped.
-
-    A pre-push hook exports ``GIT_DIR`` and friends; left in place they would
-    point these calls at guard's own repo instead of the test's temp repo.
-    """
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    argv = ["git", "-C", str(repo), *args]
-    subprocess.run(argv, check=True, capture_output=True, env=env)
-
-
-def init_git_repo(path: Path) -> Path:
-    """Create ``path`` (if needed) as a fresh git work tree and return it."""
-    path.mkdir(parents=True, exist_ok=True)
-    git(path, "init", "-q")
-    return path
 
 
 def lockdown_guard_home(guard_data_dir: str | None = None) -> Path:

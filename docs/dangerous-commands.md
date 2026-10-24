@@ -361,8 +361,8 @@ is **advisory** (logged, passed through) rather than a hard deny, so a benign
 read isn't blocked. A destructive payload in those same tools (`find -exec` /
 `-delete`, `xargs rm`, `awk 'system(...)'`) is still caught by the denied-flag
 arm or the always-deny matcher before it reaches the nudge. Like other
-matcher denies, a `bash.tool_alternative` block can be bypassed per-command
-via the user allowlist (`~/.claude/guard/allowlist.json`).
+matcher denies, `bash.tool_alternative` can be turned off with
+`guard allowlist disable-rule bash.tool_alternative`.
 
 ## High-risk ASK commands
 

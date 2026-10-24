@@ -163,49 +163,25 @@ def test_status_no_log(decision_log_env: Path) -> None:
     assert "exists: no" in pretty
 
 
-def _tracked_project_mode(tmp_path: Path, mode: str) -> tuple[Path, Path]:
-    """Return ``(project, allowlist)``: a git repo whose project file is tracked."""
-    from tests._helpers import git, init_git_repo
+def test_status_ignores_retired_project_allowlist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    decision_log_env: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import guard.allowlist
+    from guard.cli import cmd_status
 
-    project = init_git_repo(tmp_path / "project")
-    target = project / ".claude" / "guard" / "allowlist.json"
+    monkeypatch.setattr(guard.allowlist, "_WARNED_RETIRED", set())
+    target = tmp_path / ".claude" / "guard" / "allowlist.json"
     target.parent.mkdir(parents=True)
-    target.write_text(json.dumps({"mode": mode}), encoding="utf-8")
-    git(project, "add", "-f", ".claude/guard/allowlist.json")
-    return project, target
-
-
-def test_status_reports_untrusted_project_allowlist(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decision_log_env: Path
-) -> None:
-    from guard.cli import cmd_status
-
-    project, target = _tracked_project_mode(tmp_path, "off")
-    monkeypatch.chdir(project)
-    payload, pretty = cmd_status()
-    assert payload["mode"] == "enforce"
-    assert payload["project_allowlist"] == {
-        "path": str(target),
-        "exists": True,
-        "trusted": False,
-        "reason": "tracked by git",
-    }
-    assert f"project allowlist: {target}" in pretty
-    assert "UNTRUSTED: tracked by git" in pretty
-    # The fix lives in the CLI, never in the hook warning that can reach the model.
-    assert "git rm --cached .claude/guard/allowlist.json" in pretty
-    assert "--global" in pretty
-
-
-def test_status_reports_missing_project_allowlist(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decision_log_env: Path
-) -> None:
-    from guard.cli import cmd_status
-
+    target.write_text(json.dumps({"mode": "off"}), encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     payload, pretty = cmd_status()
-    assert payload["project_allowlist"]["exists"] is False
-    assert "project allowlist: none" in pretty
+    assert payload["mode"] == "enforce"
+    assert "project_allowlist" not in payload
+    assert "project allowlist" not in pretty
+    assert f"project allowlist {target} is retired and ignored" in capsys.readouterr().err
 
 
 # === guard status: wiring check ===
@@ -894,176 +870,92 @@ def test_main_migrate_log_dispatch(tmp_path: Path) -> None:
 # === _dispatch_allowlist branches ===
 
 
-def test_dispatch_allowlist_disable_rule_via_main(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``guard allowlist disable-rule <id>`` writes the rule to the project allowlist."""
-    from guard import cli
+def _global_doc(tmp_path: Path) -> dict:
+    path = tmp_path / "global" / ".claude" / "guard" / "allowlist.json"
+    return json.loads(path.read_text(encoding="utf-8"))
 
+
+@pytest.fixture
+def cli_homes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """chdir into a fresh project dir with ``GUARD_DATA_DIR`` under ``tmp_path``."""
     project = tmp_path / "project"
     project.mkdir()
     monkeypatch.chdir(project)
     monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "global" / ".claude" / "guard"))
+    return project
 
-    rc = cli.main(["--json", "allowlist", "disable-rule", "bash.disk_destruction", "--project"])
+
+def test_dispatch_allowlist_disable_rule_via_main(tmp_path: Path, cli_homes: Path) -> None:
+    """``guard allowlist disable-rule <id>`` writes the rule to the global allowlist."""
+    from guard import cli
+
+    rc = cli.main(["--json", "allowlist", "disable-rule", "bash.disk_destruction"])
     assert rc == 0
-    doc = json.loads((project / ".claude" / "guard" / "allowlist.json").read_text(encoding="utf-8"))
-    assert doc["disable_rules"] == ["bash.disk_destruction"]
+    assert _global_doc(tmp_path)["disable_rules"] == ["bash.disk_destruction"]
+    assert not (cli_homes / ".claude").exists()
 
 
-def test_cmd_mode_reads_default_enforce(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cmd_mode_reads_default_enforce(cli_homes: Path) -> None:
     """``guard mode`` with no allowlist file reports the default enforce mode."""
     from guard import cli
 
-    project = tmp_path / "project"
-    project.mkdir()
-    monkeypatch.chdir(project)
-    monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "global" / ".claude" / "guard"))
-
     rc = cli.main(["--json", "mode"])
     assert rc == 0
+    payload, pretty = cli.cmd_mode(None)
+    assert payload["effective_mode"] == "enforce"
+    assert payload["global_mode"] is None
+    assert "global:  (unset)" in pretty
 
 
-def test_cmd_mode_writes_project_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``guard mode shadow`` writes the project allowlist's mode field."""
+@pytest.mark.parametrize("flags", [[], ["--global"]], ids=["bare", "legacy-global-flag"])
+def test_cmd_mode_writes_global_mode(tmp_path: Path, cli_homes: Path, flags: list[str]) -> None:
+    """``guard mode shadow`` (``--global`` still accepted) writes the global mode field."""
     from guard import cli
 
-    project = tmp_path / "project"
-    project.mkdir()
-    monkeypatch.chdir(project)
-    monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "global" / ".claude" / "guard"))
-
-    rc = cli.main(["--json", "mode", "shadow"])
+    rc = cli.main(["--json", "mode", "shadow", *flags])
     assert rc == 0
-    doc = json.loads((project / ".claude" / "guard" / "allowlist.json").read_text(encoding="utf-8"))
-    assert doc["mode"] == "shadow"
+    assert _global_doc(tmp_path)["mode"] == "shadow"
+    assert not (cli_homes / ".claude").exists()
+    payload, _ = cli.cmd_mode(None)
+    assert payload["effective_mode"] == "shadow"
+    assert payload["global_mode"] == "shadow"
 
 
-def test_cmd_mode_round_trip_back_to_enforce(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Setting shadow then enforce overwrites the project mode field."""
+def test_cmd_mode_round_trip_back_to_enforce(tmp_path: Path, cli_homes: Path) -> None:
+    """Setting shadow then enforce overwrites the global mode field."""
     from guard import cli
-
-    project = tmp_path / "project"
-    project.mkdir()
-    monkeypatch.chdir(project)
-    monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "global" / ".claude" / "guard"))
 
     cli.main(["--json", "mode", "shadow"])
-    cli.main(["--json", "mode", "enforce"])
-    doc = json.loads((project / ".claude" / "guard" / "allowlist.json").read_text(encoding="utf-8"))
-    assert doc["mode"] == "enforce"
-
-
-def test_cmd_mode_shows_untrusted_project_mode(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``guard mode`` says why a tracked project file's looser mode is ignored."""
-    from guard import cli
-
-    project, _ = _tracked_project_mode(tmp_path, "off")
-    monkeypatch.chdir(project)
-    payload, pretty = cli.cmd_mode(None, scope="project")
+    payload, _ = cli.cmd_mode("enforce")
+    assert payload["previous"] == "shadow"
     assert payload["effective_mode"] == "enforce"
-    assert payload["project_mode"] == "off"
-    assert payload["project_allowlist"]["trusted"] is False
-    assert "untrusted: tracked by git" in pretty
+    assert _global_doc(tmp_path)["mode"] == "enforce"
 
 
-def test_cmd_mode_write_to_tracked_project_file_warns(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_cmd_mode_ignores_retired_project_mode(
+    cli_homes: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Writing ``off`` into a tracked project file leaves enforce in effect, loudly."""
+    """A project file's mode, looser or stricter, no longer counts."""
+    import guard.allowlist
     from guard import cli
 
-    project, _ = _tracked_project_mode(tmp_path, "enforce")
-    monkeypatch.chdir(project)
-    payload, _ = cli.cmd_mode("off", scope="project")
+    monkeypatch.setattr(guard.allowlist, "_WARNED_RETIRED", set())
+    target = cli_homes / ".claude" / "guard" / "allowlist.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps({"mode": "lockdown"}), encoding="utf-8")
+    payload, _ = cli.cmd_mode(None)
     assert payload["effective_mode"] == "enforce"
-    assert "tracked by git" in capsys.readouterr().err
+    assert "project_mode" not in payload
 
 
-def test_dispatch_allowlist_enable_rule_via_main(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``guard allowlist enable-rule <id>`` removes the rule from the project allowlist."""
+def test_dispatch_allowlist_enable_rule_via_main(tmp_path: Path, cli_homes: Path) -> None:
+    """``guard allowlist enable-rule <id>`` removes the rule from the global allowlist."""
     from guard import cli
 
-    project = tmp_path / "project"
-    project.mkdir()
-    monkeypatch.chdir(project)
-    monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "global" / ".claude" / "guard"))
-
-    # Seed: disable, then enable.
-    cli.main(["--json", "allowlist", "disable-rule", "bash.disk_destruction", "--project"])
-    rc = cli.main(["--json", "allowlist", "enable-rule", "bash.disk_destruction", "--project"])
+    cli.main(["--json", "allowlist", "disable-rule", "bash.disk_destruction"])
+    rc = cli.main(["--json", "allowlist", "enable-rule", "bash.disk_destruction"])
     assert rc == 0
-    doc = json.loads((project / ".claude" / "guard" / "allowlist.json").read_text(encoding="utf-8"))
-    assert doc["disable_rules"] == []
-
-
-def test_dispatch_allowlist_allow_command_via_main(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``guard allowlist allow-command ...`` writes an entry through the dispatcher."""
-    from guard import cli
-
-    project = tmp_path / "project"
-    project.mkdir()
-    monkeypatch.chdir(project)
-    monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "global" / ".claude" / "guard"))
-
-    rc = cli.main(
-        [
-            "--json",
-            "allowlist",
-            "allow-command",
-            "--rule",
-            "bash.disk_destruction",
-            "--command",
-            "dd if=/dev/zero of=/tmp/x.qcow2 bs=1M count=1",
-            "--reason",
-            "VM image fixture",
-            "--project",
-        ]
-    )
-    assert rc == 0
-    doc = json.loads((project / ".claude" / "guard" / "allowlist.json").read_text(encoding="utf-8"))
-    assert doc["allow_commands"][0]["rule"] == "bash.disk_destruction"
-
-
-def test_dispatch_allowlist_remove_command_via_main(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``guard allowlist remove-command ...`` removes an entry through the dispatcher."""
-    from guard import cli
-
-    project = tmp_path / "project"
-    project.mkdir()
-    monkeypatch.chdir(project)
-    monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path / "global" / ".claude" / "guard"))
-
-    cli.main(
-        [
-            "--json",
-            "allowlist",
-            "allow-command",
-            "--rule",
-            "r",
-            "--command",
-            "c",
-            "--reason",
-            "x",
-            "--project",
-        ]
-    )
-    rc = cli.main(
-        ["--json", "allowlist", "remove-command", "--rule", "r", "--command", "c", "--project"]
-    )
-    assert rc == 0
-    doc = json.loads((project / ".claude" / "guard" / "allowlist.json").read_text(encoding="utf-8"))
-    assert doc["allow_commands"] == []
+    assert _global_doc(tmp_path)["disable_rules"] == []
 
 
 def test_dispatch_allowlist_no_subcommand_shows_help(

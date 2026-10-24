@@ -6,9 +6,9 @@ disable-model-invocation: true
 
 # /guard:status
 
-Print guard's effective config (mode, schema version), whether the project
-allowlist is trusted and why, the JSONL decision-log path, the line count,
-and the timestamp of the most recent record.
+Print guard's effective config (mode, schema version), the JSONL
+decision-log path, the line count, and the timestamp of the most recent
+record.
 
 ```!
 guard status

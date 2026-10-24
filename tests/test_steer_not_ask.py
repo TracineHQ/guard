@@ -34,6 +34,7 @@ from guard.hooks import (
     protected_files,
     subagent_scope,
 )
+from tests._helpers import LIVE_GUARD
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -118,9 +119,10 @@ def test_no_source_emits_an_ask() -> None:
 @pytest.mark.parametrize(
     "rel",
     [
-        "src/guard/hooks/bash_command_validator.py",
-        "src/guard/registry.py",
-        "src/guard/_utils.py",
+        # Guard's live code is absolute, so ``tmp_path / rel`` keeps it as is.
+        str(LIVE_GUARD / "hooks" / "bash_command_validator.py"),
+        str(LIVE_GUARD / "registry.py"),
+        str(LIVE_GUARD / "_utils.py"),
         ".claude/guard/allowlist.json",
         ".claude/subagent-scope.json",
     ],
@@ -172,17 +174,17 @@ def test_extended_list_is_lockdown_only(tmp_path: Path, rel: str) -> None:
 
 
 def test_interpreter_read_of_protected_path_passes() -> None:
-    cmd = "python3 -c \"print(open('src/guard/_utils.py').read())\""
+    cmd = f"python3 -c \"print(open('{LIVE_GUARD}/_utils.py').read())\""
     assert protected_files.decide("Bash", {"command": cmd}) is None
 
 
 @pytest.mark.parametrize(
     "cmd",
     [
-        "python3 -c \"open('src/guard/_utils.py','w').write('')\"",
-        "python3 -c \"import pathlib; pathlib.Path('src/guard/registry.py').write_text('')\"",
-        "node -e \"require('fs').writeFileSync('src/guard/_utils.py','')\"",
-        "ruby -e \"File.write('src/guard/_utils.py','')\"",
+        f"python3 -c \"open('{LIVE_GUARD}/_utils.py','w').write('')\"",
+        f"python3 -c \"import pathlib; pathlib.Path('{LIVE_GUARD}/registry.py').write_text('')\"",
+        f"node -e \"require('fs').writeFileSync('{LIVE_GUARD}/_utils.py','')\"",
+        f"ruby -e \"File.write('{LIVE_GUARD}/_utils.py','')\"",
     ],
 )
 def test_interpreter_write_to_protected_path_denies(cmd: str) -> None:
@@ -194,7 +196,7 @@ def test_oversized_eval_body_still_denies() -> None:
     _assert_steer(protected_files.decide("Bash", {"command": f"python3 -c '{body}'"}))
 
 
-@pytest.mark.parametrize("rel", ["src/guard/_utils.py", ".claude/guard/allowlist.json"])
+@pytest.mark.parametrize("rel", [str(LIVE_GUARD / "_utils.py"), ".claude/guard/allowlist.json"])
 @pytest.mark.parametrize("mode", ["off", "shadow"])
 def test_trust_root_holds_in_off_and_shadow(
     tmp_path: Path, mode: str, rel: str, capsys: pytest.CaptureFixture[str]
@@ -381,19 +383,17 @@ def test_subagent_scope_honors_mode(
     [
         # Thunks, not calls: a decide() at collection time runs before the
         # per-test isolation fixture and would log to the default path.
-        lambda: protected_files.decide("Edit", {"file_path": "/repo/src/guard/registry.py"}),
-        lambda: protected_files.decide(
-            "Bash", {"command": "cp /tmp/x /repo/src/guard/registry.py"}
-        ),
+        lambda: protected_files.decide("Edit", {"file_path": "/repo/CLAUDE.md"}, lockdown=True),
         lambda: bash_command_validator.decide("rm -rf /"),
         lambda: bash_command_validator.decide("flarbnoz --gronk", lockdown=True),
     ],
 )
 def test_override_hints_parse(make_envelope: Callable[[], dict[str, Any] | None]) -> None:
-    """Every ``guard allowlist ...`` a deny suggests must parse with the real CLI."""
+    """Every ``guard allowlist ...`` / ``guard mode ...`` a deny suggests must parse."""
     from guard import cli
 
-    hints = re.findall(r"`(guard allowlist [^`]+)`", _reason(_require(make_envelope())))
+    reason = _reason(_require(make_envelope()))
+    hints = re.findall(r"`(guard (?:allowlist|mode) [^`]+)`", reason)
     assert hints
     parser = cli._build_parser()  # noqa: SLF001 -- the CLI's own parser
     for hint in hints:
@@ -425,10 +425,14 @@ def test_guard_mode_accepts_lockdown(tmp_path: Path, monkeypatch: pytest.MonkeyP
         "perl -pi -e 's/a/b/' notes.txt | head src/guard/_utils.py",
     ],
 )
-def test_inplace_editor_operands_stop_at_control_operators(cmd: str) -> None:
+def test_inplace_editor_operands_stop_at_control_operators(
+    cmd: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Run from outside guard's checkout: there ``src/`` is the live install.
+    monkeypatch.chdir(tmp_path)
     assert protected_files.decide("Bash", {"command": cmd}) is None
 
 
 def test_inplace_edit_after_control_operator_still_denies() -> None:
-    cmd = "cat notes.txt && sed -i 's/a/b/' src/guard/_utils.py"
+    cmd = f"cat notes.txt && sed -i 's/a/b/' {LIVE_GUARD}/_utils.py"
     _assert_steer(protected_files.decide("Bash", {"command": cmd}))

@@ -73,35 +73,55 @@ adheres to [Semantic Versioning](https://semver.org/).
   denied whatever its arguments (`wget -qO- x | python3 tool.py`).
   `| python3 -m json.tool`, `| jq` and a literal `-c` / `-e` program with no
   code sink (`| python3 -c 'import json,sys; ...'`) only parse it and pass.
+- `protected_files` protects the install that is running, found by its real
+  path, not any path ending in `guard/hooks/<name>.py`: everything under its
+  `src/`, `bin/run-hook` and `hooks/hooks.json` for a source checkout, the
+  package directory for a wheel. A clone or worktree of guard's source is
+  ordinary code an agent may edit; the live install stays protected in every
+  mode. It matches the file, not the spelling: `~`, `$HOME`, variables the
+  command sets (`F=...`, `for f in ...`), `cd`, `pushd` and `git -C` are
+  resolved, a hard link or a spelling the volume folds is the same file, and
+  removing, moving, hard-linking or copying into a directory that holds the
+  install counts. A name it can't know (`$X`, `$(...)`) inside the install,
+  or right beside it in a directory the command names, denies. The legacy
+  hook-script patterns match only under `.claude/hooks/`.
+- `protected_files` reads Bash the way bash does: comments, `$'...'`, line
+  continuations, heredocs (a shell or interpreter reading one runs it; for
+  anything else it is data), and `find -exec` with a read-only program. A
+  command it can't read for sure (an unterminated quote, substitution or
+  heredoc) denies when it names a protected path.
+- The `protected_files` deny reason names the text that matched (a path in a
+  script body, a relative target) next to the protected path it reaches.
+- `GUARD_PROTECTED_EXTRA` and `.claude/guard-protected.txt` add up; a repo's
+  file no longer replaces your environment variable.
+- Deny reasons offer `guard allowlist disable-rule <rule_id>` as the only
+  override. The protected-files deny for guard's code offers none.
+
+### Removed
+
+- **Breaking for anyone with `allow_commands`:** per-command allowlisting
+  is gone. `allow_commands` entries no longer exempt anything, and
+  `guard allowlist allow-command` / `remove-command` no longer exist. Every
+  exemption it held was a false positive that belonged fixed in the rule:
+  turn the rule off with `guard allowlist disable-rule <rule_id>`, or report
+  it. Per-repo `.claude/guard/allowlist.json` files are ignored too, `mode`
+  included, and `--project` is gone from `guard allowlist` and `guard mode`
+  (`--global` is still accepted and changes nothing). Config lives only in
+  `~/.claude/guard/allowlist.json`: `mode` and `disable_rules`. An old file
+  still loads. Guard ignores the retired key or project file, and the first
+  time each hook process meets one it prints one stderr line naming it.
+  Delete it to quiet the line.
 
 ### Security
 
 - Development dependencies pulled in by pre-commit move past published
   advisories: `filelock` 4.2.4 and `virtualenv` 21.14.13. Installed guard
   doesn't use either.
-- A project allowlist (`.claude/guard/allowlist.json`) that git tracks can
-  no longer loosen guard. Any repo could ship one with `"mode": "off"` or
-  disabled rules and switch guard off for every agent working in it. The
-  project file is now trusted only when it is a regular file whose
-  `.claude` directory sits at the root of a git work tree and git does not
-  track it (untracked or gitignored, the usual home for your own local
-  entries). Tracking is checked by file identity, so an index entry spelled
-  to land on the same file can't hide it, whether it uses another case or
-  Unicode form that APFS folds together or code points that
-  case-insensitive HFS+ ignores in names. A trusted file works as before.
-  An untrusted one (tracked, below the repository root such as inside a gitignored
-  `node_modules/`, outside a work tree, behind a symlink, or unverifiable
-  because git is missing, fails or times out) can only tighten: its mode
-  applies only when stricter than the global/default mode, its
-  `disable_rules` and `allow_commands` are ignored, and each hook run
-  prints one stderr warning naming the file and the reason.
-  `guard status`, `guard mode` and `guard allowlist list` now show whether
-  the project file is trusted, why, and how to fix it, and
-  `guard allowlist disable-rule` / `allow-command` warn when the entry
-  they write won't take effect. Guard runs git only when a project file
-  would loosen something and caches the answer in
-  `~/.claude/guard/project-trust-cache.json`, keyed on the file and the
-  repo's git index (an unverifiable answer for about a minute).
+- A repo can't loosen guard. Guard reads no mode or `disable_rules` from the
+  working directory, so a cloned repo's `.claude/guard/allowlist.json` with
+  `"mode": "off"` or disabled rules does nothing. What it does read there
+  only adds limits: `.claude/guard-protected.txt` and
+  `.claude/subagent-scope.json`.
 - A command after a multi-line quoted argument is checked again. Guard split
   on every newline, so the line after a quoted newline began inside the
   quote and the `;`, `&&` or `|` after its closing quote read as quoted:

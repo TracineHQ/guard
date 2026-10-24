@@ -55,7 +55,7 @@ section is the contract. Consumers can opt-in by reading the env var directly
 | `v` | int | yes | schema version, currently `1`. Short alias of `schema_version`. |
 | `schema_version` | int | yes | long form, kept for backward compatibility |
 | `type` | enum string | optional | record-shape discriminator. Defaults to `"decision"` when absent. Currently one of `"decision"`, `"internal_error"`, or `"permission_request"` (§3.4, §3.5). Consumers MUST filter on `type` to avoid blending non-decision records into decision tallies. |
-| `mode` | enum string | yes (decision) | one of `"enforce"`, `"shadow"`, `"off"`, `"lockdown"`. Set per-record from the resolved allowlist mode (trusted project > global > default `"enforce"`; an untrusted project file can only tighten). `"shadow"` decisions are logged but not enforced; `"off"` short-circuits the hook and emits no record, except trust-root denies from `protected_files`. |
+| `mode` | enum string | yes (decision) | one of `"enforce"`, `"shadow"`, `"off"`, `"lockdown"`. Set per-record from the global allowlist's mode (default `"enforce"`). `"shadow"` decisions are logged but not enforced; `"off"` short-circuits the hook and emits no record, except trust-root denies from `protected_files`. |
 | `timestamp` | string (ISO-8601 UTC, microsecond precision, `Z` suffix) | yes | e.g. `"2026-04-29T14:32:11.123456Z"` |
 | `hook_id` | string | yes (decision) | namespaced: `guard.<hook_module>` (e.g. `guard.bash_command_validator`) |
 | `event` | string | yes (decision) | matches Claude Code event names (`PreToolUse`, `PostToolUse`) |
@@ -77,7 +77,7 @@ section is the contract. Consumers can opt-in by reading the env var directly
   observational only; useful for testing new rules without breaking flows).
   Trust-root denies from `protected_files` still block.
 - `"off"` — hooks are silent and write nothing, except `protected_files`
-  denies on guard's trust root (its own code, allowlist and subagent scope),
+  denies on guard's trust root (its running code, allowlist and subagent scope),
   which still block and log with `mode: "off"`.
 - `"lockdown"` — enforced, plus the opt-in strict default-deny: Bash
   commands off the safe list are denied (`bash.strict_*` rule_ids) and
@@ -85,11 +85,9 @@ section is the contract. Consumers can opt-in by reading the env var directly
 
 As of v1.4.0, the writer emits the resolved allowlist mode on every
 decision record (default `"enforce"`). Operators flip mode with
-`guard mode <enforce|shadow|off|lockdown> [--project|--global]`, which writes a
-top-level `"mode"` field into `.claude/guard/allowlist.json`. Project
-beats global beats the default, as long as the project file is trusted
-(untracked, at the repository root); an untrusted one, such as a file git
-tracks, only counts when its mode is stricter. `"shadow"` is useful for testing a new
+`guard mode <enforce|shadow|off|lockdown>`, which writes a top-level
+`"mode"` field into `~/.claude/guard/allowlist.json`. A per-repo
+`.claude/guard/allowlist.json` is ignored. `"shadow"` is useful for testing a new
 rule against real sessions without blocking: the writer still logs
 `decision: "deny"` with `mode: "shadow"`, but the hook exits 0 with an
 empty stdout so Claude Code's normal permission flow takes over (trust-root
@@ -132,8 +130,8 @@ Group git-C decisions on `hook_id == "guard.git_c_validator"`. Its tier keys
 
 Lockdown rule_ids (`bash.admin_unknown_flag_strict`,
 `bash.strict_default_deny`, `bash.strict_feedback`) and
-`bash.command_too_long` (every mode) are eligible for allowlist override; see
-`guard allowlist allow-command --rule <rule_id> --command '<command>' --reason '...'`.
+`bash.command_too_long` (every mode) can be turned off like any other rule:
+`guard allowlist disable-rule <rule_id>`.
 
 ### 3.4 `internal_error` records
 

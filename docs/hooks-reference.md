@@ -277,19 +277,29 @@ to read by its exact path.
 
 ### What it checks
 
-Denies writes to guard's trust root: the validator modules, `registry.py`,
-`_utils.py`, `.claude/guard/allowlist.json` and `.claude/subagent-scope.json`.
-Backwards-compat patterns also cover the original `hooks/` layout for forks.
+Denies writes to guard's trust root: the guard install that is running
+(everything under its `src/`, `bin/run-hook` and `hooks/hooks.json` for a
+source checkout, the package directory for a wheel),
+`.claude/guard/allowlist.json` and `.claude/subagent-scope.json`. Guard's
+install is matched by real path and inode, not by name, so a clone or
+worktree of guard's source is ordinary code, while a hard link or a spelling
+the volume folds is not. Removing, moving, hard-linking or copying into a
+directory that holds the install counts as a write. Backwards-compat
+patterns also cover hook scripts installed under `.claude/hooks/` by older
+setups.
 The trust root stays protected in every guard mode, `off` included. Under
 `guard mode lockdown` the list grows to git hooks and config, agent
 instruction files (`CLAUDE.md`, `.cursorrules`, ...), MCP registrations and
-`~/.aws/config`. Project patterns from `.claude/guard-protected.txt` or
-`GUARD_PROTECTED_EXTRA` apply in every mode but `off`.
+`~/.aws/config`. Project patterns from `.claude/guard-protected.txt` and
+`GUARD_PROTECTED_EXTRA` (both apply) count in every mode but `off`.
 
-Bash writes are matched too: `_match_for_tool` routes `Bash` payloads through
-`bash_write_targets`, which extracts redirect / `tee` / `cp` / `dd of=` /
-in-place-editor targets per command (operands stop at `&&`, `|`, `;`) and
-runs each through `is_protected`. Operators inside quotes stay operands.
+Bash writes are matched too. The command is read the way bash reads it
+(quotes, `$'...'`, comments, line continuations, `$(...)` and backtick
+bodies, heredocs), split at `;`, `&&`, `||`, `|` and newlines, and each
+command's write targets (redirects, `tee`, `cp` / `mv` / `install`, `dd of=`,
+in-place editors, removals, hard links) are resolved and checked.
+`bash -c` and `eval` strings, substitution bodies and heredocs a shell
+reads are scanned the same way. Operators inside quotes stay operands.
 `guard allowlist <write>` and `guard mode <mode>` count as writes to the
 allowlist, so the agent can't reconfigure guard through its CLI. Reads stay
 reads: `--help` / `-h`, `guard status`, `guard allowlist list` and a bare
@@ -300,12 +310,16 @@ tool passes (`Read`, `Grep`, `Glob`, `WebFetch`, `Agent`, `AskUserQuestion`,
 
 ### Example deny
 
+The reason names the protected path and, when they differ, the text in the
+tool input that matched it.
+
 ```
-Protected file: guard/registry.py. guard blocks agent edits to its own code
-and subagent scope so a session can't rewrite its own guardrails. Don't retry
-or route around it. Tell the user what you want to change and why; they can
-make the edit, or allow it with `guard allowlist allow-command --rule
-guard.protected_files --command '<path or exact command>' --reason '...'`.
+Protected path: /home/me/.claude/plugins/cache/tracine/guard/1.5.0/src,
+matched by `/home/me/.claude/plugins/cache/tracine/guard/1.5.0/src/guard/_utils.py`.
+guard blocks agent writes to the install it is running from and to the
+subagent scope file, so a session can't rewrite its own guardrails. Don't
+retry or route around it. Tell the user what you want to change and why;
+they can make the edit.
 ```
 
 ---

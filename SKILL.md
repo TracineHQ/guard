@@ -26,8 +26,7 @@ authoritative references. Quick map:
   only verbs whose `(service, verb)` tuple is in the read-only catalog pass;
   everything else denies with `bash.admin_default_deny`. AWS uses the
   strict-allowlist model (no prefix shortcut); see SECURITY.md for the
-  decision tree. Override per-command via `allow_commands`, per-rule via
-  `disable_rules`, or per-verb via
+  decision tree. Override per-rule via `disable_rules`, or per-verb via
   `GUARD_ADMIN_ALLOW_VERBS=aws:ec2.run-instances,gcloud:functions.deploy`.
 - `git_c_validator` — `git -c core.hooksPath=...` and `core.attributesFile=...`
   denied regardless of value; `git -c alias.x='!cmd'` and other config-exec
@@ -39,6 +38,8 @@ authoritative references. Quick map:
   opaque message sources (`-F <stream>`, `--file=-`, paths outside cwd).
 - `credential_check` — secret patterns in Edit/Write/Bash payloads.
 - `protected_files` — Edit/Write (and Bash writes) to guard's own hook code,
+  meaning the install that's running (matched by real path, so a clone or
+  worktree of guard's source stays editable),
   `.claude/guard/allowlist.json` and `.claude/subagent-scope.json`; lockdown
   adds `.git/hooks`, `CLAUDE.md`, `.cursorrules`, MCP config and
   `.aws/config` (extensible via `GUARD_PROTECTED_EXTRA` and
@@ -58,12 +59,12 @@ the user, with the command or `guard allowlist` override they can run).
 
 ## Modes
 
-`guard mode <enforce|shadow|off|lockdown>` (project by default, `--global`
-for the per-user file). Every hook honors it.
+`guard mode <enforce|shadow|off|lockdown>` writes `~/.claude/guard/allowlist.json`.
+Every hook honors it.
 
 - `enforce` (default) -- deny what matches, pass the rest through.
 - `shadow` -- log would-be denies with `mode: "shadow"`; only trust-root denies block.
-- `off` -- hooks go quiet, except edits to guard's own code and allowlist.
+- `off` -- hooks go quiet, except edits to the running guard's code and allowlist.
 - `lockdown` -- opt-in strict default-deny for driven or unattended agents.
   Any Bash command not on the safe-prefix allowlist is denied with a
   `STRICT_FEEDBACK` message, and `protected_files` adds its lockdown list.
@@ -92,7 +93,7 @@ Grep the log for that reason.
 
 ## Extending protected_files patterns
 
-`protected_files` ships with a built-in pattern list (guard's own code and allowlist, plus `.git/hooks`, `CLAUDE.md` and friends under lockdown). Projects with their own kill-switch / doctrine paths can extend that list two ways without forking:
+`protected_files` ships with a built-in pattern list (the running guard's code and allowlist, plus `.git/hooks`, `CLAUDE.md` and friends under lockdown). Projects with their own kill-switch / doctrine paths can extend that list two ways without forking:
 
 1. **Env var** `GUARD_PROTECTED_EXTRA="bin,standards,dispatch"` — comma-separated. Whitespace trimmed; blank entries skipped.
 2. **Project file** `.claude/guard-protected.txt` (rooted at the working directory):
@@ -106,76 +107,54 @@ Grep the log for that reason.
    ```
    One pattern per line; `#` starts a comment to end of line; blank lines OK.
 
-If the file exists, it is the source of truth — the env var is ignored. If the file is absent, the env var is read. Pattern syntax matches the built-in list — segment match for directory names (last segment with no `.`), suffix match for files. No new grammar.
+Both apply: the file's patterns and the env var's add up, so a repo's file can't drop yours. Pattern syntax matches the built-in list: segment match for directory names (last segment with no `.`), suffix match for files. No new grammar.
 
 The patterns resolve at hook-call time, so live edits take effect on the next tool call without restarting Claude Code.
 
-## Allowlist (per-rule disable + per-command override)
+## Allowlist (per-rule disable)
 
-When guard's default policy is too strict for a specific command or file, the allowlist lets you turn off a rule by id, or allow one exact command, without forking the plugin.
-
-### File locations
-
-Both files use the same JSON schema.
-
-- **Project**: `.claude/guard/allowlist.json`, rooted at the working directory. Keep it out of git (gitignore it): see the trust rule below.
-- **Global**: `~/.claude/guard/allowlist.json` (per-user, applies to every project).
-
-### Project trust
-
-Any repo you clone could ship a project allowlist that switches guard off, so guard trusts the project file only when it is a regular file in the `.claude/guard/` directory at the root of a git work tree and git does not track it (untracked or gitignored). That is the normal home for your own local entries. Guard checks tracking by file identity: if any path git tracks is the same file, the file is tracked. That catches index entries spelled to land on it, whether in another case or Unicode form that APFS folds together, or with code points that case-insensitive HFS+ ignores in names (such as U+200C or U+FEFF).
-
-- **Trusted**: its `mode` beats the global mode, and its `disable_rules` and `allow_commands` apply.
-- **Untrusted** (tracked by git; below the repository root, for example inside a gitignored `node_modules/` or `.venv/`; outside any git work tree; reached through a symlink; or unverifiable because git is missing, fails or times out): it can only tighten. Its `mode` applies only when stricter than the global/default mode (`off` < `shadow` < `enforce` < `lockdown`), and its `disable_rules` and `allow_commands` are ignored. Each hook run prints one stderr warning naming the file and the reason, and pointing at `guard status`.
-
-`guard status`, `guard mode` and `guard allowlist list` show whether the project file is trusted, why, and how to fix it. To use a tracked file's entries, gitignore it and untrack it (`git rm --cached .claude/guard/allowlist.json`), or move them to your global allowlist with `--global`. A committed `{"mode": "lockdown"}` still works for a team that wants every clone locked down. When the working directory is your home directory, the project path is the global allowlist itself, and guard treats it as the global file.
-
-Guard asks git (one `git ls-files`) only when the project file would loosen something, and caches the answer in `project-trust-cache.json` next to the global allowlist, keyed on the file and the repo's git index. A tool call pays for git only after one of them changes. An unverifiable answer is cached for about a minute, so a slow or broken git isn't re-run on every tool call.
-
-### Schema
+One per-user file, `~/.claude/guard/allowlist.json` (`GUARD_DATA_DIR` moves it), with two keys:
 
 ```json
 {
-  "disable_rules": ["bash.disk_destruction"],
-  "allow_commands": [
-    {
-      "rule": "guard.protected_files",
-      "command": "/repo/src/guard/registry.py",
-      "reason": "intentional registry update for the release"
-    }
-  ]
+  "mode": "enforce",
+  "disable_rules": ["bash.disk_destruction"]
 }
 ```
 
-- `disable_rules` — list of rule ids that bypass entirely. Use `guard allowlist rules` to see all known ids. The bash hook uses ids like `bash.disk_destruction`, `bash.git_history_destruction`. Other hooks use the hook id itself (`guard.protected_files`, `guard.commit_message_validator`, etc.).
-- `allow_commands` — exact-string match. The `command` is matched against the bash command (for `bash_command_validator`) or the file path (for `protected_files`). `reason` is required and gets logged on every bypass.
+- `mode`: see [Modes](#modes).
+- `disable_rules`: rule ids that never deny. `guard allowlist rules` lists them. The bash hook uses ids like `bash.disk_destruction`; other hooks use the hook id itself (`guard.protected_files`, `guard.commit_message_validator`, etc.).
+
+There is no per-command exemption, and a repo can't change `mode` or `disable_rules`. A rule that blocks legitimate work is a bug in the rule: fix the rule, or report it, instead of exempting the command.
+
+### Retired keys
+
+Older versions also read `allow_commands` (exact-command exemptions) and a per-repo `.claude/guard/allowlist.json`. Guard ignores both now; they grant nothing. The first time a hook process meets one it prints a line to stderr naming it. Delete the key or the file to quiet it.
 
 ### CLI
 
 ```
-guard allowlist list                                 # show effective merged config
-guard allowlist rules                                # all known rule ids
+guard allowlist list                     # disabled rules and the file they come from
+guard allowlist rules                    # all known rule ids
 guard allowlist disable-rule <rule-id>
 guard allowlist enable-rule <rule-id>
-guard allowlist allow-command --rule <rule-id> --command "<cmd>" --reason "..."
-guard allowlist remove-command --rule <rule-id> --command "<cmd>"
 ```
 
-Mutation commands write to the project allowlist by default. Pass `--global` to write the per-user file at `~/.claude/guard/allowlist.json` instead (or `--project` to be explicit; the two flags are mutually exclusive). If the project file is untrusted (for example, tracked by git), `disable-rule` and `allow-command` still write the entry but warn that it won't take effect.
+Both mutations write the global file.
 
 ### Trust-root: un-overridable protections
 
-`.claude/guard/allowlist.json` is NOT allowlist-bypassable. Even with `disable_rules: ["guard.protected_files"]` or an exact-path `allow_commands` entry, agent edits to it are denied: an allowlist that lets agents edit the allowlist grants itself anything. Edit it yourself or through `guard allowlist`.
+`.claude/guard/allowlist.json` is NOT allowlist-bypassable. Even with `disable_rules: ["guard.protected_files"]`, agent edits to it are denied: an allowlist that lets agents edit the allowlist grants itself anything. Edit it yourself or through `guard allowlist` / `guard mode`.
 
-Guard's own hook code and `.claude/subagent-scope.json` stay protected in every mode, `off` included, but you can allowlist them like any other protected file.
+The running guard's code and `.claude/subagent-scope.json` stay protected in every mode, `off` included. `disable_rules: ["guard.protected_files"]` lifts that along with the rest of the hook.
 
 ### Audit trail
 
-Every allowlist bypass is logged as a `decision="pass"` record with the bypass reason, so you can grep the audit log to see which rules were silenced and why.
+Every disabled-rule bypass is logged with a reason naming the rule, so you can grep the audit log to see which rules were silenced.
 
 ## Disabling individual hooks entirely
 
-Prefer the allowlist (above) when you only need to silence a specific rule or command. To remove a whole hook from the harness, delete its entry from `~/.claude/settings.json` PreToolUse, or comment out the corresponding line in `<plugin>/hooks/hooks.json` if you forked.
+Prefer `disable_rules` (above) when you only need to silence one rule. To remove a whole hook from the harness, delete its entry from `~/.claude/settings.json` PreToolUse, or comment out the corresponding line in `<plugin>/hooks/hooks.json` if you forked.
 
 ## Log inspection
 

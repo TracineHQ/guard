@@ -1,4 +1,4 @@
-"""Tests for ``guard.allowlist`` — load + merge + match semantics."""
+"""Tests for ``guard.allowlist``: loading the global file and ignoring retired config."""
 
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TracineHQ contributors
@@ -9,30 +9,26 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from tests._helpers import init_git_repo
-
 if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _write(path: Path, doc: dict) -> None:
+def _write(path: Path, doc: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(doc), encoding="utf-8")
 
 
 @pytest.fixture
 def isolated_homes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
-    """Return ``(global_dir, project_cwd)`` — both clean, no existing allowlists.
+    """Return ``(global_dir, project_cwd)``, both clean, no existing allowlists.
 
-    Points ``GUARD_HOME`` at the temp global dir via env so the module-level
-    constant resolves there without re-importing. ``project_cwd`` is a git
-    work tree, so an untracked project file there is trusted (see
-    ``test_allowlist_trust.py`` for the untrusted cases).
+    Points ``GUARD_DATA_DIR`` at the temp global dir and reloads the module,
+    which also resets its once-per-process warnings.
     """
     global_dir = tmp_path / "global" / ".claude" / "guard"
-    project_cwd = init_git_repo(tmp_path / "project")
+    project_cwd = tmp_path / "project"
+    project_cwd.mkdir()
     monkeypatch.setenv("GUARD_DATA_DIR", str(global_dir))
-    # Re-import to pick up the env var.
     import importlib
 
     import guard._utils
@@ -49,61 +45,65 @@ def test_load_no_files(isolated_homes: tuple[Path, Path]) -> None:
     _, cwd = isolated_homes
     al = load_allowlist(cwd=cwd)
     assert al.disable_rules == frozenset()
-    assert al.allow_commands == ()
+    assert al.mode == "enforce"
     assert al.sources == ()
 
 
-def test_load_project_only(isolated_homes: tuple[Path, Path]) -> None:
+def test_load_global(isolated_homes: tuple[Path, Path]) -> None:
     from guard.allowlist import load_allowlist
 
-    _, cwd = isolated_homes
+    gdir, cwd = isolated_homes
+    _write(gdir / "allowlist.json", {"disable_rules": ["bash.npx_remote"], "mode": "shadow"})
+    al = load_allowlist(cwd=cwd)
+    assert al.disable_rules == {"bash.npx_remote"}
+    assert al.mode == "shadow"
+    assert al.is_rule_disabled("bash.npx_remote") is True
+    assert al.is_rule_disabled("bash.something_else") is False
+
+
+def test_project_file_is_ignored_and_reported_once(
+    isolated_homes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A project file grants nothing, whatever it holds, and says so once per process."""
+    from guard.allowlist import load_allowlist
+
+    gdir, cwd = isolated_homes
+    _write(gdir / "allowlist.json", {"disable_rules": ["bash.npx_remote"]})
+    project = cwd / ".claude" / "guard" / "allowlist.json"
     _write(
-        cwd / ".claude" / "guard" / "allowlist.json",
+        project,
         {
+            "mode": "off",
             "disable_rules": ["bash.disk_destruction"],
-            "allow_commands": [
-                {
-                    "rule": "bash.aws_s3_destruction",
-                    "command": "aws s3 rm s3://test-bucket/cleanup --recursive",
-                    "reason": "nightly cleanup job allowlist for test-bucket",
-                },
-            ],
+            "allow_commands": [{"rule": "bash.disk_destruction", "command": "x", "reason": "y"}],
         },
     )
     al = load_allowlist(cwd=cwd)
-    assert al.disable_rules == {"bash.disk_destruction"}
-    assert len(al.allow_commands) == 1
-    assert al.allow_commands[0].rule == "bash.aws_s3_destruction"
-    assert al.allow_commands[0].source == "project"
-
-
-def test_load_global_only(isolated_homes: tuple[Path, Path]) -> None:
-    from guard.allowlist import load_allowlist
-
-    gdir, cwd = isolated_homes
-    _write(
-        gdir / "allowlist.json",
-        {"disable_rules": ["bash.npx_remote"]},
-    )
-    al = load_allowlist(cwd=cwd)
     assert al.disable_rules == {"bash.npx_remote"}
+    assert al.mode == "enforce"
+    assert al.sources == (gdir / "allowlist.json",)
+    err = capsys.readouterr().err
+    assert err.splitlines() == [
+        f"guard: allowlist: project allowlist {project} is retired and ignored; "
+        "see guard's CHANGELOG"
+    ]
+    load_allowlist(cwd=cwd)
+    assert capsys.readouterr().err == ""
 
 
-def test_merge_unions_disable_rules(isolated_homes: tuple[Path, Path]) -> None:
+def test_lockdown_in_project_file_is_ignored_too(
+    isolated_homes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
     from guard.allowlist import load_allowlist
 
-    gdir, cwd = isolated_homes
-    _write(gdir / "allowlist.json", {"disable_rules": ["a", "b"]})
-    _write(
-        cwd / ".claude" / "guard" / "allowlist.json",
-        {"disable_rules": ["b", "c"]},
-    )
-    al = load_allowlist(cwd=cwd)
-    assert al.disable_rules == {"a", "b", "c"}
+    _, cwd = isolated_homes
+    _write(cwd / ".claude" / "guard" / "allowlist.json", {"mode": "lockdown"})
+    assert load_allowlist(cwd=cwd).mode == "enforce"
+    assert "retired" in capsys.readouterr().err
 
 
-def test_merge_concatenates_allow_commands_project_first(
-    isolated_homes: tuple[Path, Path],
+def test_global_allow_commands_are_ignored_and_reported_once(
+    isolated_homes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
 ) -> None:
     from guard.allowlist import load_allowlist
 
@@ -111,96 +111,46 @@ def test_merge_concatenates_allow_commands_project_first(
     _write(
         gdir / "allowlist.json",
         {
-            "allow_commands": [
-                {"rule": "r", "command": "global-cmd", "reason": "global"},
-            ]
-        },
-    )
-    _write(
-        cwd / ".claude" / "guard" / "allowlist.json",
-        {
-            "allow_commands": [
-                {"rule": "r", "command": "project-cmd", "reason": "project"},
-            ]
+            "disable_rules": ["bash.npx_remote"],
+            "allow_commands": [{"rule": "bash.disk_destruction", "command": "x", "reason": "y"}],
         },
     )
     al = load_allowlist(cwd=cwd)
-    sources_in_order = [e.source for e in al.allow_commands]
-    assert sources_in_order == ["project", "global"]
+    assert al.disable_rules == {"bash.npx_remote"}
+    assert not hasattr(al, "allow_commands")
+    err = capsys.readouterr().err
+    assert err.splitlines() == [
+        f"guard: allowlist: allow_commands in {gdir / 'allowlist.json'} is retired and "
+        "ignored; see guard's CHANGELOG"
+    ]
+    load_allowlist(cwd=cwd)
+    assert capsys.readouterr().err == ""
 
 
-def test_is_rule_disabled(isolated_homes: tuple[Path, Path]) -> None:
+def test_malformed_allow_commands_do_not_crash(
+    isolated_homes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
     from guard.allowlist import load_allowlist
 
-    _, cwd = isolated_homes
-    _write(
-        cwd / ".claude" / "guard" / "allowlist.json",
-        {"disable_rules": ["bash.iac_destruction"]},
-    )
-    al = load_allowlist(cwd=cwd)
-    assert al.is_rule_disabled("bash.iac_destruction") is True
-    assert al.is_rule_disabled("bash.something_else") is False
+    gdir, cwd = isolated_homes
+    _write(gdir / "allowlist.json", {"allow_commands": "not a list", "mode": "shadow"})
+    assert load_allowlist(cwd=cwd).mode == "shadow"
+    assert "allow_commands" in capsys.readouterr().err
 
 
-def test_find_command_exact_match(isolated_homes: tuple[Path, Path]) -> None:
-    from guard.allowlist import load_allowlist
+def test_global_file_is_not_reported_as_a_project_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With cwd = HOME the project path is the global file itself."""
+    import guard.allowlist
 
-    _, cwd = isolated_homes
-    _write(
-        cwd / ".claude" / "guard" / "allowlist.json",
-        {
-            "allow_commands": [
-                {
-                    "rule": "bash.disk_destruction",
-                    "command": "dd if=/dev/zero of=/tmp/bench bs=1M count=1",
-                    "reason": "perf bench fixture",
-                },
-            ]
-        },
-    )
-    al = load_allowlist(cwd=cwd)
-    e = al.find_command(
-        "bash.disk_destruction",
-        "dd if=/dev/zero of=/tmp/bench bs=1M count=1",
-    )
-    assert e is not None
-    assert e.reason == "perf bench fixture"
-
-
-def test_find_command_strips_whitespace(isolated_homes: tuple[Path, Path]) -> None:
-    from guard.allowlist import load_allowlist
-
-    _, cwd = isolated_homes
-    _write(
-        cwd / ".claude" / "guard" / "allowlist.json",
-        {"allow_commands": [{"rule": "r", "command": "ls -la", "reason": "ok"}]},
-    )
-    al = load_allowlist(cwd=cwd)
-    assert al.find_command("r", "  ls -la  ") is not None
-
-
-def test_find_command_rule_must_match(isolated_homes: tuple[Path, Path]) -> None:
-    from guard.allowlist import load_allowlist
-
-    _, cwd = isolated_homes
-    _write(
-        cwd / ".claude" / "guard" / "allowlist.json",
-        {"allow_commands": [{"rule": "rule.a", "command": "x", "reason": "y"}]},
-    )
-    al = load_allowlist(cwd=cwd)
-    assert al.find_command("rule.b", "x") is None
-
-
-def test_find_command_no_substring_match(isolated_homes: tuple[Path, Path]) -> None:
-    from guard.allowlist import load_allowlist
-
-    _, cwd = isolated_homes
-    _write(
-        cwd / ".claude" / "guard" / "allowlist.json",
-        {"allow_commands": [{"rule": "r", "command": "ls -la", "reason": "ok"}]},
-    )
-    al = load_allowlist(cwd=cwd)
-    assert al.find_command("r", "ls -la /tmp") is None
+    home = tmp_path / "home"
+    monkeypatch.setenv("GUARD_DATA_DIR", str(home / ".claude" / "guard"))
+    monkeypatch.setattr(guard.allowlist, "_WARNED_RETIRED", set())
+    _write(home / ".claude" / "guard" / "allowlist.json", {"disable_rules": ["a"]})
+    assert guard.allowlist.retired_project_file(home) is None
+    assert guard.allowlist.load_allowlist(cwd=home).disable_rules == {"a"}
+    assert capsys.readouterr().err == ""
 
 
 def test_malformed_json_emits_warning_and_skips(
@@ -208,14 +158,12 @@ def test_malformed_json_emits_warning_and_skips(
 ) -> None:
     from guard.allowlist import load_allowlist
 
-    _, cwd = isolated_homes
-    p = cwd / ".claude" / "guard" / "allowlist.json"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("{not valid json", encoding="utf-8")
+    gdir, cwd = isolated_homes
+    gdir.mkdir(parents=True)
+    (gdir / "allowlist.json").write_text("{not valid json", encoding="utf-8")
     al = load_allowlist(cwd=cwd)
     assert al.disable_rules == frozenset()
-    err = capsys.readouterr().err
-    assert "invalid JSON" in err
+    assert "invalid JSON" in capsys.readouterr().err
 
 
 def test_top_level_not_object_skipped(
@@ -223,10 +171,8 @@ def test_top_level_not_object_skipped(
 ) -> None:
     from guard.allowlist import load_allowlist
 
-    _, cwd = isolated_homes
-    p = cwd / ".claude" / "guard" / "allowlist.json"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("[]", encoding="utf-8")
+    gdir, cwd = isolated_homes
+    _write(gdir / "allowlist.json", [])
     al = load_allowlist(cwd=cwd)
     assert al.disable_rules == frozenset()
     assert "top-level must be an object" in capsys.readouterr().err
@@ -237,114 +183,59 @@ def test_disable_rules_wrong_type_warns(
 ) -> None:
     from guard.allowlist import load_allowlist
 
-    _, cwd = isolated_homes
-    _write(cwd / ".claude" / "guard" / "allowlist.json", {"disable_rules": "not a list"})
+    gdir, cwd = isolated_homes
+    _write(gdir / "allowlist.json", {"disable_rules": "not a list"})
     al = load_allowlist(cwd=cwd)
     assert al.disable_rules == frozenset()
     assert "must be a list" in capsys.readouterr().err
 
 
-def test_allow_commands_wrong_type_warns(
-    isolated_homes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Parallel coverage to disable_rules: a non-list ``allow_commands``
-    must warn and skip rather than crash."""
+def test_disable_rules_skips_non_string_entries(isolated_homes: tuple[Path, Path]) -> None:
     from guard.allowlist import load_allowlist
 
-    _, cwd = isolated_homes
-    _write(cwd / ".claude" / "guard" / "allowlist.json", {"allow_commands": "not a list"})
-    al = load_allowlist(cwd=cwd)
-    assert al.allow_commands == ()
-    assert "'allow_commands' must be a list of objects" in capsys.readouterr().err
-
-
-def test_allow_commands_missing_field_skips_entry(
-    isolated_homes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
-) -> None:
-    from guard.allowlist import load_allowlist
-
-    _, cwd = isolated_homes
-    _write(
-        cwd / ".claude" / "guard" / "allowlist.json",
-        {
-            "allow_commands": [
-                {"rule": "r", "command": "x"},  # missing reason
-                {"rule": "r", "command": "y", "reason": "z"},
-            ]
-        },
-    )
-    al = load_allowlist(cwd=cwd)
-    assert len(al.allow_commands) == 1
-    assert al.allow_commands[0].command == "y"
-    assert "missing 'reason'" in capsys.readouterr().err
-
-
-def test_disable_rules_skips_non_string_entries(
-    isolated_homes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
-) -> None:
-    from guard.allowlist import load_allowlist
-
-    _, cwd = isolated_homes
-    _write(
-        cwd / ".claude" / "guard" / "allowlist.json",
-        {"disable_rules": ["good.rule", 42, None, "another.rule"]},
-    )
+    gdir, cwd = isolated_homes
+    _write(gdir / "allowlist.json", {"disable_rules": ["good.rule", 42, None, "another.rule"]})
     al = load_allowlist(cwd=cwd)
     assert al.disable_rules == {"good.rule", "another.rule"}
 
 
-def test_sources_lists_present_files_only(isolated_homes: tuple[Path, Path]) -> None:
+def test_invalid_mode_warns_and_defaults(
+    isolated_homes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
     from guard.allowlist import load_allowlist
 
     gdir, cwd = isolated_homes
-    _write(gdir / "allowlist.json", {"disable_rules": ["x"]})
-    al = load_allowlist(cwd=cwd)
-    assert len(al.sources) == 1
-    assert al.sources[0].name == "allowlist.json"
+    _write(gdir / "allowlist.json", {"mode": "loose"})
+    assert load_allowlist(cwd=cwd).mode == "enforce"
+    assert "'mode' must be one of" in capsys.readouterr().err
 
 
-def test_mutation_preserves_mode_field(isolated_homes: tuple[Path, Path]) -> None:
-    """Adding/removing rules or commands must not strip a top-level ``mode`` field.
+def test_mutations_write_the_global_file_and_keep_other_keys(
+    isolated_homes: tuple[Path, Path],
+) -> None:
+    """Rule and mode writes go to the global file and leave every other key alone.
 
-    Regression: an earlier version of ``_read_raw`` normalised the doc to
-    only ``disable_rules`` and ``allow_commands``; calling
-    ``add_disable_rule`` on a file that had ``"mode": "shadow"`` set would
-    silently rewrite it without ``mode``, dropping the operator's
-    configured posture.
+    Regression: an earlier ``_read_raw`` normalised the doc to its known
+    lists, so ``add_disable_rule`` on a file with ``"mode": "shadow"``
+    silently dropped the operator's configured posture.
     """
-    from guard.allowlist import (
-        add_allow_command,
-        add_disable_rule,
-        load_allowlist,
-        remove_allow_command,
-        remove_disable_rule,
-        set_mode,
-    )
+    from guard.allowlist import add_disable_rule, load_allowlist, remove_disable_rule, set_mode
 
-    _, cwd = isolated_homes
-    project_path = cwd / ".claude" / "guard" / "allowlist.json"
+    gdir, cwd = isolated_homes
+    path = gdir / "allowlist.json"
+    _write(path, {"allow_commands": [{"rule": "r", "command": "c", "reason": "x"}]})
 
-    set_mode("shadow", scope="project", cwd=cwd)
-    assert json.loads(project_path.read_text())["mode"] == "shadow"
+    assert set_mode("shadow") is None
+    assert add_disable_rule("bash.disk_destruction") is True
+    assert add_disable_rule("bash.disk_destruction") is False
+    doc = json.loads(path.read_text())
+    assert doc["mode"] == "shadow"
+    assert doc["disable_rules"] == ["bash.disk_destruction"]
+    assert doc["allow_commands"] == [{"rule": "r", "command": "c", "reason": "x"}]
 
-    add_disable_rule("bash.disk_destruction", scope="project", cwd=cwd)
-    assert json.loads(project_path.read_text())["mode"] == "shadow"
-
-    add_allow_command(
-        rule="bash.disk_destruction",
-        command="dd if=/dev/zero of=/tmp/x bs=1 count=1",
-        reason="benign smoke test",
-        scope="project",
-        cwd=cwd,
-    )
-    assert json.loads(project_path.read_text())["mode"] == "shadow"
-
-    remove_disable_rule("bash.disk_destruction", scope="project", cwd=cwd)
-    remove_allow_command(
-        rule="bash.disk_destruction",
-        command="dd if=/dev/zero of=/tmp/x bs=1 count=1",
-        scope="project",
-        cwd=cwd,
-    )
-    assert json.loads(project_path.read_text())["mode"] == "shadow"
-    assert load_allowlist(cwd=cwd).mode == "shadow"
+    assert remove_disable_rule("bash.disk_destruction") is True
+    assert remove_disable_rule("bash.disk_destruction") is False
+    assert set_mode("enforce") == "shadow"
+    assert json.loads(path.read_text())["disable_rules"] == []
+    assert load_allowlist(cwd=cwd).mode == "enforce"
+    assert not (cwd / ".claude").exists()

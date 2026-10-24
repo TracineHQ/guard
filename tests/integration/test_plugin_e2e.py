@@ -240,12 +240,19 @@ CASES: list[tuple[str, str, dict[str, object], str]] = [
         "deny",
     ),
     ("read README", "agent_output_guard.py", _read_payload("/tmp/README.md"), "passthrough"),
-    # protected_files
+    # protected_files: guard's code is protected where the hook runs from
+    # (``<staged>`` is filled in per test), not in another copy of the source.
     (
         "guard registry",
         "protected_files.py",
-        _edit_payload("/repo/src/guard/registry.py"),
+        _edit_payload("<staged>/src/guard/registry.py"),
         "deny",
+    ),
+    (
+        "guard registry copy",
+        "protected_files.py",
+        _edit_payload(str(REPO / "src" / "guard" / "registry.py")),
+        "passthrough",
     ),
     ("ordinary file pf", "protected_files.py", _edit_payload("/tmp/foo.py"), "passthrough"),
     # credential_check — use patterns matched independent of user $HOME
@@ -415,6 +422,7 @@ def test_hook_behavior(  # noqa: PLR0913 -- pytest fixtures + matrix params unav
     log_path: Path,
 ) -> None:
     """Each representative payload produces the expected decision envelope."""
+    payload = json.loads(json.dumps(payload).replace("<staged>", str(staged)))
     rc, stdout, stderr = run_hook(staged, hook_filename, payload, log_path)
     assert rc in (0, 2), f"hook crashed: rc={rc} stderr={stderr[:500]}"
     assert "Traceback" not in stderr, f"hook raised: stderr={stderr[:500]}"

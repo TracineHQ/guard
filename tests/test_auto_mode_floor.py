@@ -335,16 +335,10 @@ def _write_global_allowlist(data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data), encoding="utf-8")
 
 
-def test_allowlisted_steer_rule_still_allows_in_auto() -> None:
-    """An exact allow_commands entry auto-approves, as in default mode."""
+def test_disabled_steer_rule_still_allows_in_auto() -> None:
+    """A disabled STEER rule auto-approves, as in default mode."""
     command = "echo hi > notes.txt"
-    _write_global_allowlist(
-        {
-            "allow_commands": [
-                {"rule": "bash.dangerous_construct", "command": command, "reason": "notes"}
-            ]
-        }
-    )
+    _write_global_allowlist({"disable_rules": ["bash.dangerous_construct"]})
     for mode in ("default", "auto"):
         envelope = bcv.decide(command, permission_mode=mode)
         assert envelope is not None
@@ -504,7 +498,7 @@ def test_agent_output_guard_is_floor(tmp_path: Path, permission_mode: str) -> No
 
 
 def test_protected_files_stays_on_the_floor_in_auto(tmp_path: Path) -> None:
-    command = "echo x > src/guard/registry.py"
+    command = f"echo x > {HOOKS_DIR.parent}/registry.py"
     rc, stdout, _ = run_hook(
         "protected_files", command, permission_mode="auto", env_extra=_hook_env(tmp_path)
     )

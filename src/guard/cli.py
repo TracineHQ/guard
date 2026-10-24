@@ -25,9 +25,8 @@ Subcommands:
   defaults only; the 3-way user/project/builtin merge view lands in a
   future task. The current command is useful for "what does guard see
   right now" debugging.
-- ``guard allowlist <list|rules|disable-rule|enable-rule|allow-command|remove-command>``
-  — manage the project + global allowlist (``disable_rules`` /
-  ``allow_commands``).
+- ``guard allowlist <list|rules|disable-rule|enable-rule>``: manage
+  ``disable_rules`` in the global allowlist.
 - ``guard migrate-log`` — one-shot rewrite of the JSONL log to schema v1.
 
 Output: structured JSON by default; pretty-printed when stdout is a TTY.
@@ -57,14 +56,9 @@ from guard._utils import (
 )
 from guard.allowlist import (
     KNOWN_RULE_IDS,
-    PROJECT_ALLOWLIST_RELPATH,
-    _resolve_scope_path,
-    add_allow_command,
     add_disable_rule,
+    global_allowlist_path,
     load_allowlist,
-    project_allowlist_path,
-    project_allowlist_trust,
-    remove_allow_command,
     remove_disable_rule,
 )
 
@@ -371,59 +365,6 @@ def _check_wiring(home: Path | None = None) -> dict[str, Any]:
     return signals
 
 
-def _project_trust_report(cwd: Path | None = None) -> dict[str, Any]:
-    """Where the project allowlist is and whether guard trusts it to loosen."""
-    trust = project_allowlist_trust(cwd)
-    return {
-        "path": str(project_allowlist_path(cwd)),
-        "exists": trust is not None,
-        "trusted": None if trust is None else trust.trusted,
-        "reason": None if trust is None else trust.reason,
-    }
-
-
-_TRUST_FIXES: dict[str, str] = {
-    "tracked by git": (
-        f"add it to .gitignore and untrack it (git rm --cached {PROJECT_ALLOWLIST_RELPATH})"
-    ),
-    "not at the repository root": (
-        f"keep it at {PROJECT_ALLOWLIST_RELPATH} in the git repository root, untracked"
-    ),
-    "not inside a git work tree": "keep it in a git repository, untracked",
-    "reached through a symlink": "make it a regular file, not a symlink",
-}
-
-
-def _project_trust_fix(report: dict[str, Any]) -> str:
-    """How to make an untrusted project file trusted. CLI output only, never the hooks."""
-    fix = _TRUST_FIXES.get(report["reason"], "check that git runs in this directory")
-    return f"to trust it, {fix}; or move its entries to your global allowlist with --global"
-
-
-def _project_trust_line(report: dict[str, Any]) -> str:
-    if not report["exists"]:
-        return "project allowlist: none"
-    if report["trusted"]:
-        return f"project allowlist: {report['path']} (trusted: {report['reason']})"
-    return (
-        f"project allowlist: {report['path']} "
-        f"(UNTRUSTED: {report['reason']}; it can only tighten guard)\n"
-        f"  {_project_trust_fix(report)}"
-    )
-
-
-def _warn_untrusted_project_write(report: dict[str, Any]) -> None:
-    """Tell the user an entry they just wrote to the project file is inert."""
-    if report["trusted"] is not False:
-        return
-    fix = _project_trust_fix(report)
-    sys.stderr.write(
-        f"guard: warning: {report['path']} is untrusted ({report['reason']}), so this entry "
-        "won't take effect: guard ignores disable_rules and allow_commands in a project "
-        f"allowlist it can't trust. {fix[0].upper()}{fix[1:]}.\n"
-    )
-
-
 def cmd_status() -> tuple[dict[str, Any], str]:
     """Effective config + wiring check + log location + line count + last record."""
     path = effective_log_path()
@@ -435,7 +376,6 @@ def cmd_status() -> tuple[dict[str, Any], str]:
 
     counters = reader.counters()
     allowlist = load_allowlist()
-    project = _project_trust_report()
     payload: dict[str, Any] = {
         "version": __version__,
         "active": wiring["active"],
@@ -445,7 +385,6 @@ def cmd_status() -> tuple[dict[str, Any], str]:
         "line_count": line_count,
         "last_record_timestamp": last_ts,
         "mode": allowlist.mode,
-        "project_allowlist": project,
         "schema_version": 1,
         "counters": counters,
     }
@@ -466,7 +405,6 @@ def cmd_status() -> tuple[dict[str, Any], str]:
         f"  settings reference:  {tick(ok=wiring['settings_references_guard'])}",
         f"  log has guard rec:   {tick(ok=wiring['log_has_guard_records'])}",
         f"mode: {allowlist.mode}  ({mode_hint})",
-        _project_trust_line(project),
         f"log: {path}",
         f"  exists: {tick(ok=reader.exists())}",
         f"  records: {line_count}",
@@ -505,7 +443,7 @@ def _run_healthcheck_probe(
     timeout_s: float = 2.0,
 ) -> dict[str, Any]:
     # Probe the hook code, not the user's config: a throwaway guard home
-    # pins the mode, and the temp cwd keeps project allowlists out.
+    # pins the mode.
     with tempfile.TemporaryDirectory(prefix="guard-healthcheck-") as tmp:
         (Path(tmp) / "allowlist.json").write_text(json.dumps({"mode": mode}), encoding="utf-8")
         payload = {
@@ -912,74 +850,52 @@ def _test_specs(command: str) -> Iterable[dict[str, Any]]:
         yield {"hook_id": spec.id, "decision": decision, "reason": reason}
 
 
-def cmd_mode(
-    value: str | None, *, scope: str, cwd: Path | None = None
-) -> tuple[dict[str, Any], str]:
-    """Print or set the effective guard mode (enforce|shadow|off|lockdown).
+def cmd_mode(value: str | None) -> tuple[dict[str, Any], str]:
+    """Print or set the guard mode (enforce|shadow|off|lockdown).
 
-    With no ``value``, prints the resolved mode plus the per-scope values so
-    operators can see why the resolved mode is what it is. With a value,
-    writes that mode to the chosen scope's allowlist file and reports both
-    the previous and new effective mode.
+    With no ``value``, prints the effective mode and where it comes from.
+    With a value, writes that mode to the global allowlist file and reports
+    the previous value.
     """
     from guard.allowlist import Mode, set_mode  # noqa: PLC0415 -- lazy: avoids circulars on import
 
+    path = global_allowlist_path()
     if value is not None:
         # Argparse choices on the subparser restrict ``value`` to a Mode literal at runtime.
-        mode_value = cast("Mode", value)
-        previous = set_mode(mode_value, scope=scope, cwd=cwd)
-        effective = load_allowlist(cwd).mode
+        previous = set_mode(cast("Mode", value))
         payload: dict[str, Any] = {
-            "scope": scope,
+            "path": str(path),
             "previous": previous,
             "written": value,
-            "effective_mode": effective,
+            "effective_mode": load_allowlist().mode,
         }
         lines = [
-            f"guard mode: {scope} <- {value}",
-            f"  previous ({scope}): {previous or '(default)'}",
-            f"  effective mode now: {effective}",
+            f"guard mode: {value} ({path})",
+            f"  previous: {previous or '(default: enforce)'}",
         ]
         return payload, "\n".join(lines) + "\n"
 
-    # Read-only path: show resolved + per-scope.
-    allow = load_allowlist(cwd)
-    project_doc = _scope_doc("project", cwd)
-    global_doc = _scope_doc("global", None)
-    project = _project_trust_report(cwd)
+    allow = load_allowlist()
+    global_mode = _global_doc().get("mode")
     payload = {
         "effective_mode": allow.mode,
-        "project_mode": project_doc.get("mode"),
-        "global_mode": global_doc.get("mode"),
+        "global_mode": global_mode,
         "default_mode": "enforce",
-        "project_allowlist": project,
+        "path": str(path),
     }
-    project_line = f"  project: {project_doc.get('mode') or '(unset)'}"
-    if project["exists"]:
-        trust = "trusted" if project["trusted"] else "untrusted"
-        project_line += f"  ({trust}: {project['reason']})"
     lines = [
         f"effective mode: {allow.mode}",
-        project_line,
-        f"  global:  {global_doc.get('mode') or '(unset)'}",
+        f"  global:  {global_mode or '(unset)'}  ({path})",
         "  default: enforce",
-        "(precedence: project > global > default; an untrusted project file can only tighten)",
     ]
-    if project["trusted"] is False:
-        lines.append(_project_trust_fix(project))
     return payload, "\n".join(lines) + "\n"
 
 
-def _scope_doc(scope: str, cwd: Path | None) -> dict[str, Any]:
-    """Return the raw JSON dict for a scope's allowlist file (or empty dict)."""
-    path = _resolve_scope_path(scope, cwd)
+def _global_doc() -> dict[str, Any]:
+    """Return the raw JSON dict of the global allowlist file (or empty dict)."""
     try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return {}
-    try:
-        data = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
+        data = json.loads(global_allowlist_path().read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -1086,53 +1002,35 @@ def _since_repr(since: timedelta | None) -> str:
 
 
 def cmd_allowlist_list() -> tuple[dict[str, Any], str]:
-    """Show effective merged allowlist (project + global)."""
+    """Show the global allowlist's ``disable_rules``."""
     al = load_allowlist()
-    project = _project_trust_report()
     payload = {
         "disable_rules": sorted(al.disable_rules),
-        "allow_commands": [
-            {"rule": e.rule, "command": e.command, "reason": e.reason, "source": e.source}
-            for e in al.allow_commands
-        ],
         "sources": [str(p) for p in al.sources],
-        "project_allowlist": project,
     }
-    if not al.disable_rules and not al.allow_commands:
+    if not al.disable_rules:
         lines = (
-            ["allowlist: empty (no effective entries)"]
+            ["allowlist: empty (no disabled rules)"]
             if al.sources
-            else ["allowlist: empty (no project or global allowlist file present)"]
+            else ["allowlist: empty (no global allowlist file present)"]
         )
     else:
-        lines = ["allowlist (effective merged view):"]
-        if al.disable_rules:
-            lines.append("  disable_rules:")
-            lines.extend(f"    - {r}" for r in sorted(al.disable_rules))
-        if al.allow_commands:
-            lines.append("  allow_commands:")
-            for e in al.allow_commands:
-                lines.append(f"    - rule:    {e.rule}")
-                lines.append(f"      command: {e.command}")
-                lines.append(f"      reason:  {e.reason}")
-                lines.append(f"      source:  {e.source}")
-        if al.sources:
-            lines.append("  sources:")
-            lines.extend(f"    - {p}" for p in al.sources)
-    if project["exists"]:
-        lines.append(_project_trust_line(project))
+        lines = ["allowlist:", "  disable_rules:"]
+        lines.extend(f"    - {r}" for r in sorted(al.disable_rules))
+        lines.append("  sources:")
+        lines.extend(f"    - {p}" for p in al.sources)
     return payload, "\n".join(lines) + "\n"
 
 
 def cmd_allowlist_rules() -> tuple[dict[str, Any], str]:
-    """List all known rule_ids you can put on disable_rules / allow_commands.rule."""
+    """List all known rule_ids you can put on disable_rules."""
     payload = {"rules": list(KNOWN_RULE_IDS)}
     pretty = "known rule_ids:\n" + "\n".join(f"  {r}" for r in KNOWN_RULE_IDS) + "\n"
     return payload, pretty
 
 
-def cmd_allowlist_disable_rule(rule_id: str, *, scope: str) -> tuple[dict[str, Any], str]:
-    """Add ``rule_id`` to ``disable_rules`` in the chosen scope. Idempotent."""
+def cmd_allowlist_disable_rule(rule_id: str) -> tuple[dict[str, Any], str]:
+    """Add ``rule_id`` to the global ``disable_rules``. Idempotent."""
     if rule_id not in KNOWN_RULE_IDS:
         msg = (
             f"unknown rule_id {rule_id!r}; run `guard allowlist rules` for the full list. "
@@ -1140,70 +1038,20 @@ def cmd_allowlist_disable_rule(rule_id: str, *, scope: str) -> tuple[dict[str, A
             "won't fire any matcher and you'll get false confidence.)"
         )
         sys.stderr.write(f"guard: warning: {msg}\n")
-    added = add_disable_rule(rule_id, scope=scope)
-    path = _resolve_scope_path(scope, None)
-    payload: dict[str, Any] = {
-        "rule_id": rule_id,
-        "scope": scope,
-        "added": added,
-        "path": str(path),
-    }
-    if scope == "project":
-        payload["project_allowlist"] = _project_trust_report()
-        _warn_untrusted_project_write(payload["project_allowlist"])
+    added = add_disable_rule(rule_id)
+    path = global_allowlist_path()
+    payload: dict[str, Any] = {"rule_id": rule_id, "added": added, "path": str(path)}
     verb = "added" if added else "already present"
-    pretty = f"disable_rules: {rule_id} {verb} ({scope}: {path})\n"
-    return payload, pretty
+    return payload, f"disable_rules: {rule_id} {verb} ({path})\n"
 
 
-def cmd_allowlist_enable_rule(rule_id: str, *, scope: str) -> tuple[dict[str, Any], str]:
-    """Remove ``rule_id`` from ``disable_rules`` in the chosen scope. Idempotent."""
-    removed = remove_disable_rule(rule_id, scope=scope)
-    path = _resolve_scope_path(scope, None)
-    payload = {"rule_id": rule_id, "scope": scope, "removed": removed, "path": str(path)}
+def cmd_allowlist_enable_rule(rule_id: str) -> tuple[dict[str, Any], str]:
+    """Remove ``rule_id`` from the global ``disable_rules``. Idempotent."""
+    removed = remove_disable_rule(rule_id)
+    path = global_allowlist_path()
+    payload = {"rule_id": rule_id, "removed": removed, "path": str(path)}
     verb = "removed" if removed else "not present"
-    pretty = f"disable_rules: {rule_id} {verb} ({scope}: {path})\n"
-    return payload, pretty
-
-
-def cmd_allowlist_allow_command(
-    *, rule: str, command: str, reason: str, scope: str
-) -> tuple[dict[str, Any], str]:
-    """Add an exact-command override entry to ``allow_commands``. Idempotent."""
-    added = add_allow_command(rule=rule, command=command, reason=reason, scope=scope)
-    path = _resolve_scope_path(scope, None)
-    payload: dict[str, Any] = {
-        "rule": rule,
-        "command": command,
-        "reason": reason,
-        "scope": scope,
-        "added": added,
-        "path": str(path),
-    }
-    if scope == "project":
-        payload["project_allowlist"] = _project_trust_report()
-        _warn_untrusted_project_write(payload["project_allowlist"])
-    verb = "added" if added else "already present"
-    pretty = f"allow_commands: {rule!r} + {command!r} {verb} ({scope}: {path})\n"
-    return payload, pretty
-
-
-def cmd_allowlist_remove_command(
-    *, rule: str, command: str, scope: str
-) -> tuple[dict[str, Any], str]:
-    """Remove the matching ``allow_commands`` entry. Idempotent."""
-    removed = remove_allow_command(rule=rule, command=command, scope=scope)
-    path = _resolve_scope_path(scope, None)
-    payload = {
-        "rule": rule,
-        "command": command,
-        "scope": scope,
-        "removed": removed,
-        "path": str(path),
-    }
-    verb = "removed" if removed else "not present"
-    pretty = f"allow_commands: {rule!r} + {command!r} {verb} ({scope}: {path})\n"
-    return payload, pretty
+    return payload, f"disable_rules: {rule_id} {verb} ({path})\n"
 
 
 _ALLOWLIST_DISPATCH: dict[str, str] = {
@@ -1217,20 +1065,13 @@ def _dispatch_allowlist(
 ) -> tuple[dict[str, Any], str] | None:
     """Dispatch the ``guard allowlist <sub>`` subcommands. ``None`` means help-shown."""
     allow_cmd = getattr(args, "allow_cmd", None)
-    scope = _resolve_scope(args)
     if allow_cmd in _ALLOWLIST_DISPATCH:
         fn = globals()[_ALLOWLIST_DISPATCH[allow_cmd]]
         return fn()  # type: ignore[no-any-return]  # -- globals() dispatch erases return type
     if allow_cmd == "disable-rule":
-        return cmd_allowlist_disable_rule(args.rule_id, scope=scope)
+        return cmd_allowlist_disable_rule(args.rule_id)
     if allow_cmd == "enable-rule":
-        return cmd_allowlist_enable_rule(args.rule_id, scope=scope)
-    if allow_cmd == "allow-command":
-        return cmd_allowlist_allow_command(
-            rule=args.rule, command=args.command, reason=args.reason, scope=scope
-        )
-    if allow_cmd == "remove-command":
-        return cmd_allowlist_remove_command(rule=args.rule, command=args.command, scope=scope)
+        return cmd_allowlist_enable_rule(args.rule_id)
     parser.parse_args(["allowlist", "--help"])
     return None
 
@@ -1305,31 +1146,12 @@ def _add_log_filter_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_scope_args(parser: argparse.ArgumentParser) -> None:
-    """Add a mutually-exclusive ``--global`` / ``--project`` flag pair (default: project)."""
-    g = parser.add_mutually_exclusive_group()
-    g.add_argument(
-        "--global",
-        dest="scope_global",
-        action="store_true",
-        help="Apply to ~/.claude/guard/allowlist.json (overridable via $GUARD_DATA_DIR).",
-    )
-    g.add_argument(
-        "--project",
-        dest="scope_project",
-        action="store_true",
-        help=(
-            "Apply to <cwd>/.claude/guard/allowlist.json (default). Entries that loosen "
-            "guard only take effect while git doesn't track that file."
-        ),
-    )
+def _add_global_flag(parser: argparse.ArgumentParser) -> None:
+    """Accept ``--global`` from older scripts: every write goes to the global file now."""
+    parser.add_argument("--global", action="store_true", help=argparse.SUPPRESS)
 
 
-def _resolve_scope(args: argparse.Namespace) -> str:
-    return "global" if getattr(args, "scope_global", False) else "project"
-
-
-def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915 -- flat subparser wiring, one block per subcommand
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="guard",
         description="guard read-side CLI: query the JSONL decision log.",
@@ -1490,47 +1312,27 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915 -- flat subpars
 
     p_allow = sub.add_parser(
         "allowlist",
-        help="Manage the project + global allowlist (disable_rules / allow_commands).",
+        help="Manage disable_rules in the global allowlist (~/.claude/guard/allowlist.json).",
         epilog=(
             "Examples:\n"
             "  guard allowlist list\n"
             "  guard allowlist rules\n"
-            "  guard allowlist disable-rule bash.disk_destruction --project\n"
-            "  guard allowlist enable-rule bash.disk_destruction --project\n"
-            "  guard allowlist allow-command --rule bash.disk_destruction \\\n"
-            '    --command "dd if=/dev/zero of=/tmp/x.qcow2 bs=1M count=1" \\\n'
-            '    --reason "build VM image fixture"\n'
-            "  guard allowlist remove-command --rule bash.disk_destruction \\\n"
-            '    --command "dd if=/dev/zero of=/tmp/x.qcow2 bs=1M count=1"'
+            "  guard allowlist disable-rule bash.disk_destruction\n"
+            "  guard allowlist enable-rule bash.disk_destruction"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_allow_sub = p_allow.add_subparsers(dest="allow_cmd")
-    p_allow_sub.add_parser("list", help="Show effective merged allowlist (project + global).")
-    p_allow_sub.add_parser("rules", help="List all known rule_ids you can put on the allowlist.")
+    p_allow_sub.add_parser("list", help="Show the disabled rules.")
+    p_allow_sub.add_parser("rules", help="List all known rule_ids you can disable.")
 
     p_disable = p_allow_sub.add_parser("disable-rule", help="Add a rule_id to disable_rules.")
     p_disable.add_argument("rule_id", help="The rule id to disable, e.g. 'bash.disk_destruction'.")
-    _add_scope_args(p_disable)
+    _add_global_flag(p_disable)
 
     p_enable = p_allow_sub.add_parser("enable-rule", help="Remove a rule_id from disable_rules.")
     p_enable.add_argument("rule_id", help="The rule id to re-enable.")
-    _add_scope_args(p_enable)
-
-    p_acmd = p_allow_sub.add_parser("allow-command", help="Add an exact-command override.")
-    p_acmd.add_argument("--rule", required=True, help="The rule_id this override targets.")
-    p_acmd.add_argument(
-        "--command",
-        required=True,
-        help="Exact command string (compared with .strip()-equality at decide time).",
-    )
-    p_acmd.add_argument("--reason", required=True, help="Written justification (audit-logged).")
-    _add_scope_args(p_acmd)
-
-    p_rcmd = p_allow_sub.add_parser("remove-command", help="Remove an exact-command override.")
-    p_rcmd.add_argument("--rule", required=True)
-    p_rcmd.add_argument("--command", required=True)
-    _add_scope_args(p_rcmd)
+    _add_global_flag(p_enable)
 
     p_migrate = sub.add_parser(
         "migrate-log",
@@ -1570,17 +1372,17 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915 -- flat subpars
     p_mode = sub.add_parser(
         "mode",
         help=(
-            "Print or set the effective guard mode (enforce|shadow|off|lockdown). "
-            "With no value, prints the resolved mode and the source file."
+            "Print or set the guard mode (enforce|shadow|off|lockdown). "
+            "With no value, prints the effective mode and the source file."
         ),
     )
     p_mode.add_argument(
         "value",
         nargs="?",
         choices=["enforce", "shadow", "off", "lockdown"],
-        help="If set, writes mode to the chosen scope's allowlist file.",
+        help="If set, writes mode to the global allowlist file.",
     )
-    _add_scope_args(p_mode)
+    _add_global_flag(p_mode)
 
     return parser
 
@@ -1662,7 +1464,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0911 
                 backup=bool(args.backup),
             )
         elif cmd == "mode":
-            payload, pretty = cmd_mode(args.value, scope=_resolve_scope(args))
+            payload, pretty = cmd_mode(args.value)
         elif cmd == "allowlist":
             dispatched = _dispatch_allowlist(args, parser)
             if dispatched is None:

@@ -153,10 +153,7 @@ def _defer_to_auto(rule_key: str) -> bool:
         return False
     allowlist: Allowlist | None = _REQUEST_CONTEXT.get("allowlist")
     rule_id = rule_key.split(":", 1)[0]  # tier sub-keys share their rule's allowlist id
-    if allowlist is not None and (
-        allowlist.is_rule_disabled(rule_id)
-        or allowlist.find_command(rule_id, _REQUEST_CONTEXT["original_command"]) is not None
-    ):
+    if allowlist is not None and allowlist.is_rule_disabled(rule_id):
         return False
     deferred: list[str] = _REQUEST_CONTEXT["deferred"]
     if rule_key not in deferred:
@@ -5820,8 +5817,7 @@ def _is_dns_exfil_candidate(normalized: str) -> bool:
 
 
 # 3-tuples: (matcher, label, rule_id). The rule_id is the stable string a
-# user puts in their allowlist's ``disable_rules`` (or in an
-# ``allow_commands`` ``rule`` field). Names are mechanical: the matcher
+# user puts in their allowlist's ``disable_rules``. Names are mechanical: the matcher
 # function name with the ``_is_`` / ``_has_`` prefix dropped, namespaced
 # under ``bash.``. Keep these stable across releases — changing one is a
 # breaking change for users who allowlisted under the old name.
@@ -7222,12 +7218,10 @@ _AGENT_GUIDANCE_STRICT = (
 def _format_deny_reason(rule_id: str, body: str) -> str:
     """Append the unified rule_id + override-path footer to a deny ``body``.
 
-    Every allowlist-routed deny surfaces the rule_id and the two CLI verbs
-    that turn it off, so a user hit by a false positive can act without
+    Every allowlist-routed deny surfaces the rule_id and the CLI verb that
+    turns it off, so a user hit by a false positive can act without
     grepping the source. The footer is identical across matchers: users
-    learn the shape once. ``<command>`` is a placeholder — substituting
-    quoted shell text into the printed message is error-prone, so the
-    user supplies the exact form they want when they invoke the CLI.
+    learn the shape once.
 
     An agent-guidance sentence is appended so agents know whether to take
     it to the user (enforce) or surface and stop (lockdown). The body is
@@ -7241,9 +7235,7 @@ def _format_deny_reason(rule_id: str, body: str) -> str:
     guidance = _AGENT_GUIDANCE_STRICT if lockdown else _AGENT_GUIDANCE_INTERACTIVE
     return (
         f"guard [permission_mode={mode}] denied: {rule_id}. {body}. "
-        f"Override: `guard allowlist allow-command --rule {rule_id} --command '<command>' "
-        "--reason '...'` "
-        f"or `guard allowlist disable-rule {rule_id}`. {guidance}"
+        f"Override: `guard allowlist disable-rule {rule_id}`. {guidance}"
     )
 
 
@@ -7253,30 +7245,18 @@ def _maybe_allow_via_allowlist(
     original_command: str,
     pending_decision: dict[str, str],
 ) -> dict[str, str] | None:
-    """Return an allow envelope if the user's allowlist permits this denial.
+    """Return an allow envelope if ``rule_id`` is in the user's ``disable_rules``.
 
-    The override applies in two cases:
-    - ``rule_id`` is in ``disable_rules`` — the entire matcher is muted.
-    - An ``allow_commands`` entry has the same ``rule`` and a ``command``
-      string equal (after .strip()) to ``original_command`` — exact-command
-      override with a written justification.
-
-    Both bypasses are logged via ``log_decision()`` so the audit trail
-    captures the rule_id, the reason, and the original command. Returns
-    ``None`` if no allowlist rule applies — the caller keeps
-    ``pending_decision`` and proceeds with the denial as written.
-    ``pending_decision`` is currently accepted but unused — reserved for a
-    future "shadow"-mode implementation that records what would have been
-    denied.
+    The bypass is logged via ``log_decision()`` so the audit trail captures
+    the rule_id and the original command. Returns ``None`` otherwise; the
+    caller keeps ``pending_decision`` and proceeds with the denial as
+    written. ``pending_decision`` is currently accepted but unused,
+    reserved for a future "shadow"-mode implementation that records what
+    would have been denied.
     """
     del pending_decision
     if allowlist.is_rule_disabled(rule_id):
         reason = f"allowlist: rule '{rule_id}' disabled by user config"
-        _log_local(original_command, "allow", reason)
-        return _allow(reason)
-    entry = allowlist.find_command(rule_id, original_command)
-    if entry is not None:
-        reason = f"allowlist: {entry.reason} (rule={rule_id})"
         _log_local(original_command, "allow", reason)
         return _allow(reason)
     return None
@@ -7455,8 +7435,8 @@ def decide(
 ) -> dict[str, str] | None:
     """Decide whether to allow a bash command. ``None`` means passthrough.
 
-    ``original_command`` is the unmodified user-typed command string used for
-    allowlist exact-match lookups. When ``None``, defaults to ``command``.
+    ``original_command`` is the unmodified user-typed command string, recorded
+    in the decision log. When ``None``, defaults to ``command``.
 
     ``permission_mode`` is the documented Claude Code permission mode. Outside
     ``auto`` it is recorded in deny reasons and the log for context only. In
@@ -9522,7 +9502,7 @@ def _evaluate_strict(
 
     Every strict-mode deny is routed through ``_maybe_allow_via_allowlist``
     so the override path that ``_format_deny_reason`` advertises (`guard
-    allowlist allow-command ...` / `disable-rule ...`) actually fires.
+    allowlist disable-rule ...`) actually fires.
     """
     for i, segment in enumerate(segments):
         is_piped = seg_ops[i] == "|"
