@@ -109,7 +109,7 @@ def test_uv_run_script_or_module_passes_through_enforce(cmd: str) -> None:
     assert decide(cmd) is None, cmd
 
 
-# === FP-6b: regression — uv-run non-interpreter tooling not denied ===
+# === FP-6b: regression: uv-run non-interpreter tooling not denied ===
 
 
 @pytest.mark.parametrize(

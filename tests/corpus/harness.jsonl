@@ -1,4 +1,4 @@
-{"command": "uv run guard corpus", "expected": "allow", "mode": "default", "source": "curated", "note": "the corpus harness itself -- the desired tool, never steered"}
+{"command": "uv run guard corpus", "expected": "allow", "mode": "default", "source": "curated", "note": "the corpus harness itself"}
 {"command": "guard corpus", "expected": "allow", "mode": "default", "source": "curated", "note": "bare corpus invocation, allowed unattended"}
 {"command": "guard test --help", "expected": "allow", "mode": "default", "source": "curated", "note": "no positional command => not a probe; help text is allowed"}
 {"command": "uv run guard healthcheck", "expected": "allow", "mode": "default", "source": "curated", "note": "healthcheck is a registered read-only guard subcommand, allowed unattended (not previously in fixture; covers a GUARD_READ_ONLY_SUBCOMMANDS member beyond status/corpus)"}
@@ -6,6 +6,6 @@
 {"command": "guard --json corpus", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: global --json normalized out by _strip_guard_global_flags then re-matched against the safe prefix => allow; --json must not be read as a probe arg"}
 {"command": "guard allowlist list", "expected": "allow", "mode": "default", "source": "curated", "note": "allowlist read-only sub-subcommand explicitly registered as a safe prefix (allowlist list / rules)"}
 {"command": "uv run guard test --help", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: uv-run form of 'guard test --help' has no positional => not a probe; help text allowed (fixture only had the bare form)"}
-{"command": "echo guard test foo", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: segment head is echo, not guard/uv/uvx, so _guard_test_probe returns False => literal words 'guard test' in echo args do not trigger the steer"}
+{"command": "echo guard test foo", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: the words 'guard test' in echo args are data"}
 {"command": "guard corpus --corpus-dir /tmp/x", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: the corpus runner with its --corpus-dir flag is still the desired tool (prefix match on 'guard corpus'), not a probe"}
 {"command": "guard test", "expected": "allow", "mode": "default", "source": "curated", "note": "anti-FP: bare 'guard test' with no positional command is not a probe and matches the registered read-only 'test' prefix => allow"}

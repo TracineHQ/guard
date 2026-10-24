@@ -290,7 +290,7 @@ def hook(payload: dict[str, Any]) -> None:
     if not isinstance(command, str) or not command:
         return
     # Token-aware gate: any `git` invocation with a `-C`/`-c` global option
-    # (in any of its argv shapes — bare, fused, equals, --config-env) reaches
+    # (in any of its argv shapes: bare, fused, equals, --config-env) reaches
     # `decide()`. A substring gate ("git -c " with trailing space) would skip
     # the fused form `git -ccore.hooksPath=...`.
     try:

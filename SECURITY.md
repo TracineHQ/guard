@@ -90,13 +90,12 @@ catalog.
 For `aws <service> <verb> [...]`:
 
 1. If the command contains an ALWAYS_DENY shape (pipe-to-shell,
-   glob-head, redirect to a block device), it is denied
-   regardless.
+   redirect to a block device), it is denied regardless.
 2. If `(service, verb)` appears in `GUARD_ADMIN_ALLOW_VERBS`, it
-   is allowed.
+   passes.
 3. If `(service, verb)` is in the read-only catalog
    (`_AWS_READ_ONLY_VERBS_BY_SERVICE` in
-   `src/guard/hooks/_admin_specs.py`), it is allowed.
+   `src/guard/hooks/_admin_specs.py`), it passes.
 4. Otherwise it is denied.
 
 ### What gets excluded from the catalog

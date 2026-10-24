@@ -110,7 +110,7 @@ checked against the rules. What guard denies is in
 | `GUARD_DEBUG` | Emit per-hook debug to stderr |
 | `GUARD_DATA_DIR` | Override guard's data directory |
 | `GUARD_PROTECTED_EXTRA` | Comma-separated extra protected glob patterns, added to any in `.claude/guard-protected.txt` (rooted at cwd) |
-| `GUARD_ADMIN_ALLOW_VERBS` | Per-verb allow for `bash.admin_default_deny`; format `<cli>:<verb.path>,<cli>:<verb.path>` (e.g. `aws:ec2.run-instances,gcloud:functions.deploy`) |
+| `GUARD_ADMIN_ALLOW_VERBS` | Verbs `bash.admin_default_deny` lets pass; format `<cli>:<verb.path>,<cli>:<verb.path>` (e.g. `aws:ec2.run-instances,gcloud:functions.deploy`) |
 
 **Turning a rule off:** `guard allowlist disable-rule <rule_id>` mutes one
 rule everywhere; every deny names its rule_id. There is no per-command

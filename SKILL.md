@@ -80,7 +80,7 @@ logged and never changes a decision. The rules are in
 | `GUARD_DEBUG` | Set to `1` to emit per-hook debug to stderr | unset |
 | `GUARD_DATA_DIR` | Override the directory containing guard's data files | `~/.claude/guard` |
 | `GUARD_PROTECTED_EXTRA` | Comma-separated extra patterns for `protected_files`. See below. | unset |
-| `GUARD_ADMIN_ALLOW_VERBS` | Per-verb allow for `bash.admin_default_deny`; format `<cli>:<service>.<verb>,<cli>:<service>.<verb>` (e.g. `aws:logs.tail,gcloud:functions.deploy`) | unset |
+| `GUARD_ADMIN_ALLOW_VERBS` | Verbs `bash.admin_default_deny` lets pass; format `<cli>:<service>.<verb>,<cli>:<service>.<verb>` (e.g. `aws:logs.tail,gcloud:functions.deploy`) | unset |
 
 ## Extending protected_files patterns
 

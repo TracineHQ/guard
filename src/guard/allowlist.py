@@ -5,9 +5,9 @@ One JSON file, ``~/.claude/guard/allowlist.json`` (overridable via
 
 1. **mode**: ``enforce`` (default), ``shadow`` or ``off``.
 2. **disable_rules**: a list of ``rule_id`` strings (e.g.
-   ``"bash.disk_destruction"``, ``"guard.protected_files"``). When a hook is
-   about to deny under one of these rule_ids, it falls through to allow
-   instead.
+   ``"bash.disk_destruction"``, ``"guard.protected_files"``). A hook skips
+   a rule named here and keeps checking the rest; with nothing else matching
+   it gives no decision.
 
 The file keeps its old name and stays part of guard's trust root, so agents
 can't write it.

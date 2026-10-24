@@ -4,7 +4,7 @@ This directory is the **single source of truth** for command shapes guard's bash
 matcher must classify a particular way. One row = one fixture. Two consumers read
 these same files through `guard._corpus`:
 
-- **`guard corpus`** — the CLI runner. It loads every `*.jsonl` here, runs
+- **`guard corpus`**: the CLI runner. It loads every `*.jsonl` here, runs
   `decide()` over each row in one process, and exits non-zero on any mismatch.
   Agents (and humans) run this instead of spraying ad-hoc `guard test '<cmd>'`
   strings, which are lost the moment the shell call returns.

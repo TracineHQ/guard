@@ -1,28 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TracineHQ contributors
-"""PreToolUse hook: validate Bash commands with comments and pipes.
-
-Handles two cases that glob-based permission patterns cannot:
-
-1. Commands prefixed with ``#`` comment lines (agents add these for clarity).
-2. Piped commands where each segment is individually safe.
+"""PreToolUse hook: deny dangerous Bash commands.
 
 Logic:
 
 - Strip leading comment lines from the command.
 - Split on pipes (``|``), logical operators (``&&``, ``||``), semicolons,
   and newlines.
-- Reject any segment with output redirects (``>``, ``>>``), command
-  substitution (``$()``, backticks), or dangerous flags
-  (``-exec``, ``system()``, ``/e``).
-- Check each segment against known-safe command prefixes.
-- If all segments are safe → allow. If any segment is unknown → pass through
-  (let normal permissions handle it). Returns deny only for known dangerous
-  patterns (credential leaks, corrupted tokens, dangerous alternatives).
+- Check every segment, and every payload a segment hides (substitution
+  bodies, ``-c`` strings, function bodies, ...), against the deny rules.
+- Deny on a match. Otherwise give no decision, so Claude Code's own
+  permission step decides.
 
 Exit codes:
-- ``0`` — allow (with JSON ``permissionDecision``) or pass through (no output)
-- ``2`` — hard deny (corrupted tokens, shell fragments, credential leaks)
+- ``0`` -- a deny (JSON ``permissionDecision``) or no decision (no output)
+- ``2`` -- hard deny (corrupted tokens, bare shell fragments)
 """
 
 from __future__ import annotations

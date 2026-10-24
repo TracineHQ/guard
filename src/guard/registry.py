@@ -639,9 +639,7 @@ def git_read_exec_violation(subcommand: str, args: list[str]) -> str | None:
     RCE-class (``git log --output=<path>`` writes anywhere, ``--ext-diff`` /
     ``git grep --open-files-in-pager`` run an external program). ``args`` are the
     tokens AFTER the subcommand. Shared by the bash matcher (hard-deny, both
-    modes) and git_c_validator so the two cannot drift. Distinct from
-    :func:`git_ref_violation` -- ref creation is a low-severity local write, not
-    an exec, and is gated separately.
+    modes) and git_c_validator so the two cannot drift.
     """
     if subcommand in _GIT_DIFFLIKE_SUBCOMMANDS:
         return _git_difflike_exec_violation(args)
