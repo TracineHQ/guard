@@ -4366,21 +4366,26 @@ def _check_admin_forbidden_subcommand(
     return None
 
 
+_FLAG_NAME_RE = re.compile(r"--[A-Za-z0-9-]+")
+
+
 def _collect_unknown_flags(spec: AdminCliSpec, tokens: list[str], cap: int = 8) -> list[str]:
     """Return long-flag names not in known_flags or forbidden_flags, capped.
 
-    Only ``--*`` tokens are collected; fused ``--foo=bar`` emits ``--foo`` only
-    (value stripped to avoid secret leakage).  Short flags (``-n``) are skipped.
+    Only ``--*`` tokens are collected, and only the ``--[A-Za-z0-9-]+`` name:
+    a fused value (``--foo=bar``, ``--token:SECRET``) is never kept, so it
+    can't leak into the log. Short flags (``-n``) are skipped.
     Deduplicates and caps at ``cap`` entries.
     """
     seen: list[str] = []
     i = 0
     while i < len(tokens) and len(seen) < cap:
         tok = tokens[i]
-        if not tok.startswith("--"):
+        name = _FLAG_NAME_RE.match(tok)
+        if name is None:
             i += 1
             continue
-        flag = tok.split("=", 1)[0]
+        flag = name.group(0)
         if flag not in spec.known_flags and flag not in spec.forbidden_flags:
             if flag not in seen:
                 seen.append(flag)

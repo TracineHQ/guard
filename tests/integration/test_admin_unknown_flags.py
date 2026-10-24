@@ -49,6 +49,20 @@ class TestUnknownFlagsTelemetry:
         flags = unknown_flag_records[0]["unknown_flags"]
         assert "--recursive" in flags or "--human-readable" in flags
 
+    def test_fused_value_never_reaches_unknown_flags(self, tmp_path: Path) -> None:
+        """``--token:VALUE`` logs the flag name, not the value after the colon."""
+        decisions_path = tmp_path / "decisions.jsonl"
+        run_hook(
+            "bash_command_validator",
+            "aws s3 ls --token:fakeTOKENvalue123456",
+            decisions_path=decisions_path,
+        )
+        records = [
+            json.loads(line) for line in decisions_path.read_text().splitlines() if line.strip()
+        ]
+        flags = [flag for r in records for flag in r.get("unknown_flags", [])]
+        assert flags == ["--token"], records
+
 
 class TestAdminForbiddenFlag:
     def test_forbidden_flag_denies(self) -> None:

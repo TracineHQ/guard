@@ -25,6 +25,10 @@ class TestCollectUnknownFlags:
         assert "--some-unknown-flag" in result
         assert "value" not in str(result)
 
+    def test_value_after_a_colon_not_captured(self) -> None:
+        result = _collect_unknown_flags(_AWS_SPEC, ["s3", "ls", "--token:fakeTOKENvalue123456"])
+        assert result == ["--token"]
+
     def test_value_consuming_flag_value_not_captured(self) -> None:
         # --region us-east-1: us-east-1 should not be captured
         result = _collect_unknown_flags(
