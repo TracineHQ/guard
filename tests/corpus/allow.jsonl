@@ -150,11 +150,3 @@
 {"command": "$(git tag -l)", "expected": "allow", "mode": "default", "source": "adversarial", "note": "git tag -l lists"}
 {"command": "$(git remote -v)", "expected": "allow", "mode": "default", "source": "adversarial", "note": "git remote -v lists"}
 {"command": "$(git worktree list)", "expected": "allow", "mode": "default", "source": "adversarial", "note": "git worktree list lists"}
-{"command": "echo $(( $(( $(( $((1)) )) )) ))", "expected": "allow", "mode": "default", "source": "adversarial", "note": "nested arithmetic with nothing that runs is plain math"}
-{"command": "echo $(( $(( $(( $(( $((1)) )) )) )) ))", "expected": "allow", "mode": "default", "source": "adversarial", "note": "five levels of arithmetic with nothing that runs"}
-{"command": "bash -c 'echo $(( $(( $((1)) )) ))'", "expected": "allow", "mode": "default", "source": "adversarial", "note": "nested arithmetic inside a -c string"}
-{"command": "f() { echo $(( $(( $(( $1 )) + 1 )) )); }; f 2", "expected": "allow", "mode": "default", "source": "adversarial", "note": "nested arithmetic in a function body"}
-{"command": "echo $(echo $(( $(( $((1)) )) )))", "expected": "allow", "mode": "default", "source": "adversarial", "note": "nested arithmetic inside a substitution"}
-{"command": "echo $(( $(( $(( $(( 1 )) )) )) ))", "expected": "allow", "mode": "default", "source": "adversarial", "note": "nested arithmetic at the end of a segment is still plain math"}
-{"command": "echo $(( $(( $(( $(date +%s) )) )) ))", "expected": "allow", "mode": "default", "source": "adversarial", "note": "a harmless substitution deep in arithmetic is checked once, by the innermost $(("}
-{"command": "echo $(( a > 0 ))", "expected": "allow", "mode": "default", "source": "adversarial", "note": "a comparison in arithmetic is no redirect into anything sensitive"}

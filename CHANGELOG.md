@@ -117,11 +117,6 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
-- What a `$((` holds is checked: a substitution inside arithmetic
-  (`echo $(( $(rm -rf /) + 1 ))`), or a `$((cd x; y) ; z)` that bash reads
-  as nested subshells (`echo $((cd /tmp; echo a) ; rm -rf ~ )`). Both passed
-  before. Arithmetic with nothing in it that runs (`$(( $(( 1 )) + 2 ))`)
-  passes at any depth.
 - A `trap` handler is checked as a command whatever else the line holds:
   `trap 'rm -rf ~; echo -p' EXIT` passed before.
 - Development dependencies pulled in by pre-commit move past published

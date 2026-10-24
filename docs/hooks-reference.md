@@ -45,7 +45,7 @@ matches gets no decision. The validator:
 - Checks the payloads a command hides as commands of their own: a
   `$(...)` / `<(...)` body, a `bash -c` string, a function body, a `trap`
   handler, a `find -exec` command, an `ssh` / container `exec` / `nsenter`
-  command, and what a `$((` holds. A `-c` string it cannot read (empty, a
+  command. A `-c` string it cannot read (empty, a
   `{}` placeholder, or a command named by an expansion such as
   `bash -c "$X"`) is denied.
 - Checks the commands an awk program runs (`system("...")`,

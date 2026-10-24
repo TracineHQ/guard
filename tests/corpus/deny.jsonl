@@ -242,7 +242,6 @@
 {"command": "script -t 0 /dev/null rm -rf ~", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: BSD script -t takes a value"}
 {"command": "script -q /dev/null sh -c 'echo a; rm -rf /'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "BSD script around sh -c"}
 {"command": "script -q /dev/null sh -c 'echo a; rm -rf /'", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: BSD script around sh -c"}
-{"command": "x=$((cd /tmp; echo 'a\nb') ; rm -rf / ) ; y=$((1)) # c", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a command substitution that starts with two parens is not arithmetic"}
 {"command": "$(git branch -D x)", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a substitution's output is the command and git branch -D is no list form"}
 {"command": "$(git branch feature-x)", "expected": "deny", "mode": "default", "source": "adversarial", "note": "branch creation run as the command is no list form"}
 {"command": "$(git branch -m a b)", "expected": "deny", "mode": "default", "source": "adversarial", "note": "branch rename run as the command is no list form"}
@@ -257,5 +256,3 @@
 {"command": "ls | $(git branch -D x)", "expected": "deny", "mode": "default", "source": "adversarial", "note": "branch delete run as the command after a pipe"}
 {"command": "$(echo $(git branch -D x))", "expected": "deny", "mode": "default", "source": "adversarial", "note": "nested substitution still holds a branch delete run as the command"}
 {"command": "$(git -C /tmp branch -D x)", "expected": "deny", "mode": "default", "source": "adversarial", "note": "git -C does not make a branch delete a list form"}
-{"command": "echo $((echo hi > ~/.zshrc) )", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a $(( that is a subshell substitution redirects into a shell rc file"}
-{"command": "echo $(( 1 + $(( 2 )) + $(rm -rf ~) ))", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a substitution beside nested arithmetic is still checked"}

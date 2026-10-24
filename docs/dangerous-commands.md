@@ -14,15 +14,13 @@ and never changes a decision. Where this is headed is in
 
 Every segment of a command (split on `;`, `&&`, `||`, `|` and newlines) is
 checked, not only the first. Guard also checks the payloads a command hides,
-each as a command of its own: a `$(...)`
-or `<(...)` body, a `bash -c` string, a function body, a `trap` handler, a
-`find -exec` command, and the command an `ssh` / container `exec` / `nsenter`
-runs elsewhere. A substitution is also re-checked with `/` in its place, so
-`rm -rf $(echo /)` still denies, and what a `$((` holds is checked too: a
-substitution inside arithmetic, or a `$((cd x; y) ; z)` that isn't arithmetic
-at all. Wrapper options are peeled first (`env -i`, `env -u NAME`,
-`bash -o pipefail -c`, `ssh host --`), so a wrapper never hides the command it
-runs. A `-c` string guard cannot read (empty, an `xargs -I{}` placeholder, or a
+each as a command of its own: a `$(...)` or `<(...)` body, a `bash -c`
+string, a function body, a `trap` handler, a `find -exec` command, and the
+command an `ssh` / container `exec` / `nsenter` runs elsewhere. A
+substitution is also re-checked with `/` in its place, so `rm -rf $(echo /)`
+still denies. Wrapper options are peeled first (`env -i`, `env -u NAME`,
+`bash -o pipefail -c`, `ssh host --`), so a wrapper never hides the command
+it runs. A `-c` string guard cannot read (empty, an `xargs -I{}` placeholder, or a
 command named by an expansion such as `bash -c "$X"`) is denied; `$` in an
 argument (`bash -c 'echo $HOME'`) is fine. awk is checked too: a command in
 `system()`, `print | cmd` or `cmd | getline` that opens with a literal
