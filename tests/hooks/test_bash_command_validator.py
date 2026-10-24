@@ -15,10 +15,13 @@ import pytest
 from guard.hooks.bash_command_validator import (
     _QUOTED_NEWLINE,
     _arithmetic_end,
+    _candidate_forms,
     _canonicalize,
     _get_alternative_feedback,
     _joined_readings,
     _mark_quoted_newlines,
+    _normalize_segment,
+    _space_glued_redirects,
     _strip_exec_wrapper,
     _strip_runner_prefix,
     decide,
@@ -837,6 +840,158 @@ class TestShellRunWrappers:
     @pytest.mark.parametrize("mode", ["default", "auto"])
     def test_harmless_command_is_not_denied(self, command, mode):
         assert not _is_deny(decide(command, permission_mode=mode)), command
+
+
+class TestGluedRedirects:
+    """A redirect glued to a word is not part of the word, so ``rm -rf ~>x`` removes ``~``."""
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            pytest.param("rm -rf ~>/dev/null", "rm -rf ~ >/dev/null", id="output"),
+            pytest.param("rm -rf ~</dev/null", "rm -rf ~ </dev/null", id="input"),
+            pytest.param("rm -rf ~>>log", "rm -rf ~ >>log", id="append"),
+            pytest.param("rm -rf ~>|out", "rm -rf ~ >|out", id="clobber"),
+            pytest.param("rm -rf ~<>f", "rm -rf ~ <>f", id="read-write"),
+            pytest.param("rm -rf ~>&2", "rm -rf ~ >&2", id="dup"),
+            pytest.param("rm -rf ~&>/dev/null", "rm -rf ~ &>/dev/null", id="both"),
+            pytest.param("rm -rf ~&>>log", "rm -rf ~ &>>log", id="both-append"),
+            pytest.param("rm -rf ~<<EOF", "rm -rf ~ <<EOF", id="heredoc"),
+            pytest.param("rm -rf ~<<-EOF", "rm -rf ~ <<-EOF", id="heredoc-dash"),
+            pytest.param("rm -rf /<<'END-X'", "rm -rf / <<'END-X'", id="heredoc-quoted"),
+            pytest.param("rm -rf ~<<<x", "rm -rf ~ <<<x", id="here-string"),
+            pytest.param("rm -rf a>b>c", "rm -rf a >b >c", id="two"),
+            pytest.param("rm -rf ~2>x", "rm -rf ~2 >x", id="digits-in-the-word"),
+            pytest.param("rm -rf ~ 2>x", "rm -rf ~ 2>x", id="descriptor"),
+            pytest.param("rm -rf ~ 2>&1>x", "rm -rf ~ 2>&1 >x", id="descriptor-then-glued"),
+            pytest.param("rm -rf ~ >/dev/null", "rm -rf ~ >/dev/null", id="already-spaced"),
+            pytest.param("exec 3>&-", "exec 3>&-", id="close-descriptor"),
+        ],
+    )
+    def test_operator_is_split_off_the_word(self, command, expected):
+        assert _space_glued_redirects(command) == expected
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param("echo 'a>b'", id="single-quoted"),
+            pytest.param('echo "a<b"', id="double-quoted"),
+            pytest.param("rm -rf '~>x'", id="quoted-operand"),
+            pytest.param("echo a\\>b", id="escaped"),
+            pytest.param("echo $'a>b'", id="ansi-c"),
+            pytest.param('echo "${x:-a>b}"', id="parameter-default"),
+            pytest.param("echo ${x:-a>b}", id="parameter-default-bare"),
+            pytest.param("echo $(ls>x)", id="substitution"),
+            pytest.param("echo `ls>x`", id="backticks"),
+            pytest.param("diff <(sort a) <(sort b)", id="process-substitution"),
+            pytest.param("echo $((1<<2))", id="arithmetic"),
+            pytest.param("ls", id="no-operator"),
+        ],
+    )
+    def test_quoted_and_nested_text_is_left_alone(self, command):
+        assert _space_glued_redirects(command) == command
+
+    def test_candidate_forms_split_a_raw_segment_only(self):
+        assert _candidate_forms("rm -rf ~>/dev/null")[0] == "rm -rf ~ >/dev/null"
+        assert _candidate_forms("rm -rf '~>x'")[0] == "rm -rf ~>x"
+        # A normalized form has lost its quotes; splitting it again would undo them.
+        assert _candidate_forms("rm -rf ~>x", raw=False)[0] == "rm -rf ~>x"
+
+    def test_the_allow_side_normalization_is_unchanged(self):
+        assert _normalize_segment("git status>out") == "git status>out"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param("rm -rf ~>/dev/null", id="home-out"),
+            pytest.param("rm -rf ~</dev/null", id="home-in"),
+            pytest.param("rm -rf .>/dev/null", id="cwd-out"),
+            pytest.param("rm -rf *>/dev/null", id="glob-out"),
+            pytest.param("rm -rf /*>/dev/null", id="root-glob-out"),
+            pytest.param("rm -rf />/dev/null", id="root-out"),
+            pytest.param("rm -rf /</dev/null", id="root-in"),
+            pytest.param("rm -rf ~&>/dev/null", id="home-both"),
+            pytest.param("rm -rf /&>>log", id="root-both-append"),
+            pytest.param("rm -rf ~>>log", id="home-append"),
+            pytest.param("rm -rf ~>|out", id="home-clobber"),
+            pytest.param("rm -rf ~<>f", id="home-read-write"),
+            pytest.param("rm -rf ~>&2", id="home-dup"),
+            pytest.param("rm -rf ~<<<x", id="home-here-string"),
+            pytest.param("rm -rf /<<<x", id="root-here-string"),
+            pytest.param("rm -rf ~<<EOF\nx\nEOF", id="home-heredoc"),
+            pytest.param("rm -rf /<<'END-X'\nx\nEND-X", id="root-heredoc-quoted"),
+            pytest.param("rm -rf /<<'END-X'\nx", id="root-heredoc-unterminated"),
+            pytest.param('rm -rf ~<<"EOF"\nx\nEOF', id="home-heredoc-double-quoted"),
+            pytest.param("rm -rf ~<<-EOF\nx\nEOF", id="home-heredoc-dash"),
+            pytest.param("rm -rf build ~>/dev/null", id="second-operand"),
+            pytest.param("rm -rf ~>/dev/null 2>&1", id="then-descriptor"),
+            pytest.param("rm -rf $HOME>/dev/null", id="home-variable"),
+            pytest.param("rm -rf ~/.ssh>/dev/null", id="ssh-dir"),
+            pytest.param("rm -r ~>/dev/null", id="recursive-only"),
+            pytest.param("rm --recursive --force ~>/dev/null", id="long-flags"),
+            pytest.param("echo ok && rm -rf ~>/dev/null", id="after-and"),
+            pytest.param("echo a\nrm -rf ~>/dev/null", id="after-newline"),
+            pytest.param("(rm -rf ~>/dev/null)", id="subshell"),
+            pytest.param("{ rm -rf ~>/dev/null; }", id="brace-group"),
+            pytest.param("if true; then rm -rf ~>/dev/null; fi", id="then-branch"),
+            pytest.param("sudo rm -rf ~>/dev/null", id="sudo"),
+            pytest.param("nohup rm -rf ~>/dev/null", id="nohup"),
+            pytest.param("timeout 5 rm -rf ~>/dev/null", id="timeout"),
+            pytest.param("FOO=1 rm -rf ~>/dev/null", id="env-prefix"),
+            pytest.param("env -i rm -rf ~>/dev/null", id="env"),
+            pytest.param("flock lock rm -rf ~>/dev/null", id="flock"),
+            pytest.param("stdbuf -o0 rm -rf ~>/dev/null", id="stdbuf"),
+            pytest.param("echo x | xargs rm -rf ~>/dev/null", id="xargs"),
+            pytest.param("bash -c 'rm -rf ~>/dev/null'", id="bash-c"),
+            pytest.param('sudo bash -c "rm -rf ~>/dev/null"', id="sudo-bash-c"),
+            pytest.param("chmod -R 777 />/dev/null", id="chmod-root"),
+            pytest.param("find / -delete>/dev/null", id="find-delete-root"),
+        ],
+    )
+    @pytest.mark.parametrize("mode", ["default", "auto"])
+    def test_dangerous_command_with_a_glued_redirect_is_denied(self, command, mode):
+        assert _is_deny(decide(command, permission_mode=mode)), command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param("rm -rf build>/dev/null", id="out"),
+            pytest.param("rm -rf build</dev/null", id="in"),
+            pytest.param("rm -rf build&>/dev/null", id="both"),
+            pytest.param("rm -rf build<<EOF\nx\nEOF", id="heredoc"),
+            pytest.param("rm -rf build<in.txt", id="input-file"),
+            pytest.param("rm -rf ./out>/dev/null", id="relative"),
+            pytest.param("rm -rf node_modules/.cache>/dev/null", id="cache"),
+            pytest.param("rm -rf 'a b'>/dev/null", id="quoted-name"),
+            pytest.param("rm -rf /tmp/x 2>/dev/null", id="descriptor"),
+            pytest.param("rm -rf build 2>&1", id="descriptor-dup"),
+            pytest.param("make test 2>&1", id="make-dup"),
+            pytest.param("rm -rf '~>x'", id="quoted-home"),
+            pytest.param('rm -rf "/>x"', id="quoted-root"),
+            pytest.param("rm -rf ~\\>x", id="escaped-home"),
+            pytest.param("rm -rf ~2>/dev/null", id="digit-ends-the-word"),
+            pytest.param("rm -rf /2>/dev/null", id="digit-ends-the-root-word"),
+            pytest.param("sudo rm -rf '~>x'", id="sudo-quoted-home"),
+            pytest.param("nohup rm -rf '~>x'", id="nohup-quoted-home"),
+            pytest.param("flock lock rm -rf '~>x'", id="flock-quoted-home"),
+            pytest.param("stdbuf -o0 rm -rf '/>x'", id="stdbuf-quoted-root"),
+            pytest.param("sudo rm -rf build>/dev/null", id="sudo-build"),
+            pytest.param("echo x | xargs rm -rf build>/dev/null", id="xargs-build"),
+            pytest.param("echo 'a>b'", id="quoted-echo"),
+            pytest.param("grep -E 'a>b' f", id="quoted-grep"),
+            pytest.param("ls>/dev/null", id="ls"),
+            pytest.param("cat a<b", id="cat-in"),
+            pytest.param("echo a\\>b", id="escaped-echo"),
+            pytest.param('echo "${x:-a>b}"', id="parameter-default"),
+        ],
+    )
+    @pytest.mark.parametrize("mode", ["default", "auto"])
+    def test_harmless_command_with_a_redirect_is_not_denied(self, command, mode):
+        assert not _is_deny(decide(command, permission_mode=mode)), command
+
+    def test_a_redirect_to_a_file_still_passes_in_auto(self):
+        # Default mode steers ``echo x>file`` to the Write tool, as on main.
+        assert not _is_deny(decide("echo x>file", permission_mode="auto"))
 
 
 class TestStripComments:

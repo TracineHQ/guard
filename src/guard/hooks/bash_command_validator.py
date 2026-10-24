@@ -2861,7 +2861,67 @@ def _exceeds_unwrap_cap(segment: str) -> bool:
     return nxt_norm != current and nxt_norm not in seen
 
 
-def _candidate_forms(segment: str) -> list[str]:
+_GLUED_REDIRECT_OP_RE = re.compile(r"&>>?|<<<|<<-?|<>|<&|>&|>>|>\||<|>")
+# Where the text of a quote, ``$'...'`` or ``${...}`` ends.
+_GLUED_QUOTE_END = {"'": "'", "$'": "'", '"': '"', "`": "`", "${": "}"}
+
+
+def _space_glued_redirects(segment: str) -> str:
+    r"""Put a space before each unquoted redirect operator that is glued to a word.
+
+    Bash ends a word at ``<`` and ``>``: ``rm -rf ~>/dev/null`` is ``rm -rf ~``
+    with its output redirected, so ``~`` is the operand. A word of only digits
+    before the operator is its file descriptor (``2>&1``) and stays attached.
+    Quotes, ``$'...'``, ``${...}`` and ``$(...)`` / ``<(...)`` bodies are left alone.
+    """
+    if "<" not in segment and ">" not in segment:
+        return segment
+    out: list[str] = []
+    quote = ""
+    depth = 0
+    i = 0
+    while i < len(segment):
+        c = segment[i]
+        if quote:
+            if c == "\\" and quote != "'":
+                out.append(segment[i : i + 2])
+                i += 2
+                continue
+            if c == _GLUED_QUOTE_END[quote]:
+                quote = ""
+        elif c == "\\":
+            out.append(segment[i : i + 2])
+            i += 2
+            continue
+        elif c in "'\"`":
+            quote = c
+        elif segment.startswith(("$'", "${"), i):
+            quote = segment[i : i + 2]
+            out.append(quote)
+            i += 2
+            continue
+        elif segment.startswith(("$(", "<(", ">("), i):
+            depth += 1
+            out.append(segment[i : i + 2])
+            i += 2
+            continue
+        elif depth and c in "()":
+            depth += 1 if c == "(" else -1
+        elif c in "<>&" and not depth:
+            op = _GLUED_REDIRECT_OP_RE.match(segment, i)
+            if op:
+                word = re.search(r"\S+$", "".join(out))
+                if word and not word.group().isdigit():
+                    out.append(" ")
+                out.append(op.group())
+                i = op.end()
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _candidate_forms(segment: str, *, raw: bool = True) -> list[str]:
     """Return all canonical forms of ``segment`` that matchers should consider.
 
     A single attacker-supplied segment may need to be evaluated under several
@@ -2880,6 +2940,11 @@ def _candidate_forms(segment: str) -> list[str]:
     so every matcher sees every peel layer.
     """
     forms: list[str] = []
+    if raw:
+        # A redirect glued to a word (``rm -rf ~>/dev/null``) is split off it, as
+        # bash does, so the deny matchers see ``~`` as the operand. Only raw text
+        # still has its quotes: a normalized form's ``'~>x'`` is a bare ``~>x``.
+        segment = _space_glued_redirects(segment)
     normalized = _normalize_segment(segment)
     forms.append(normalized)
     # Runner strip operates on the raw segment so ``bash -c "rm -rf /"``
@@ -6462,7 +6527,7 @@ def _exec_wrapper_candidates(seg: str) -> list[str]:
         # find`` -> ``sudo find`` -> ``find``), which _candidate_forms strips but
         # _strip_exec_wrapper does not. Without this, stacked exec-wrapper +
         # runner combos hide the inner command from every floor matcher.
-        nexts.extend(_normalize_segment(cf) for cf in _candidate_forms(item))
+        nexts.extend(_normalize_segment(cf) for cf in _candidate_forms(item, raw=False))
         for norm in nexts:
             if norm and norm not in seen:
                 seen.add(norm)

@@ -319,3 +319,51 @@
 {"command": "script -t 0 /dev/null rm -rf ~", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: BSD script -t takes a value"}
 {"command": "script -q /dev/null sh -c 'echo a; rm -rf /'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "BSD script around sh -c"}
 {"command": "script -q /dev/null sh -c 'echo a; rm -rf /'", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: BSD script around sh -c"}
+{"command": "rm -rf ~>/dev/null", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a redirect glued to the operand does not make it a different path"}
+{"command": "rm -rf ~>/dev/null", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: a redirect glued to the operand does not make it a different path"}
+{"command": "rm -rf .>/dev/null", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued output redirect after the current directory"}
+{"command": "rm -rf .>/dev/null", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued output redirect after the current directory"}
+{"command": "rm -rf *>/dev/null", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued output redirect after a glob"}
+{"command": "rm -rf *>/dev/null", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued output redirect after a glob"}
+{"command": "rm -rf />/dev/null", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued output redirect after the root"}
+{"command": "rm -rf />/dev/null", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued output redirect after the root"}
+{"command": "rm -rf ~</dev/null", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued input redirect"}
+{"command": "rm -rf ~</dev/null", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued input redirect"}
+{"command": "rm -rf /</dev/null", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued input redirect after the root"}
+{"command": "rm -rf /</dev/null", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued input redirect after the root"}
+{"command": "rm -rf ~&>/dev/null", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued &> redirect"}
+{"command": "rm -rf ~&>/dev/null", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued &> redirect"}
+{"command": "rm -rf /&>>log", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued &>> redirect"}
+{"command": "rm -rf /&>>log", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued &>> redirect"}
+{"command": "rm -rf ~>>log", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued append redirect"}
+{"command": "rm -rf ~>>log", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued append redirect"}
+{"command": "rm -rf ~>|out", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued noclobber-override redirect"}
+{"command": "rm -rf ~>|out", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued noclobber-override redirect"}
+{"command": "rm -rf ~>&2", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued descriptor duplication"}
+{"command": "rm -rf ~>&2", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued descriptor duplication"}
+{"command": "rm -rf ~<<<x", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued here-string"}
+{"command": "rm -rf ~<<<x", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued here-string"}
+{"command": "rm -rf /<<<x", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued here-string after the root"}
+{"command": "rm -rf /<<<x", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued here-string after the root"}
+{"command": "rm -rf ~<<EOF\nx\nEOF", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued heredoc operator"}
+{"command": "rm -rf ~<<EOF\nx\nEOF", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued heredoc operator"}
+{"command": "rm -rf /<<'END-X'\nx\nEND-X", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued heredoc operator with a quoted hyphenated delimiter"}
+{"command": "rm -rf /<<'END-X'\nx\nEND-X", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued heredoc operator with a quoted hyphenated delimiter"}
+{"command": "rm -rf ~<<-EOF\nx\nEOF", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued <<- heredoc operator"}
+{"command": "rm -rf ~<<-EOF\nx\nEOF", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued <<- heredoc operator"}
+{"command": "rm -rf build ~>/dev/null", "expected": "deny", "mode": "default", "source": "adversarial", "note": "the glued operand is the second one"}
+{"command": "rm -rf build ~>/dev/null", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: the glued operand is the second one"}
+{"command": "rm -rf ~>/dev/null 2>&1", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued redirect followed by a descriptor redirect"}
+{"command": "rm -rf ~>/dev/null 2>&1", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued redirect followed by a descriptor redirect"}
+{"command": "echo ok && rm -rf ~>/dev/null", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued redirect in the second command of a list"}
+{"command": "echo ok && rm -rf ~>/dev/null", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued redirect in the second command of a list"}
+{"command": "sudo rm -rf ~>/dev/null", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued redirect behind sudo"}
+{"command": "sudo rm -rf ~>/dev/null", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued redirect behind sudo"}
+{"command": "nohup rm -rf ~>/dev/null", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued redirect behind nohup"}
+{"command": "nohup rm -rf ~>/dev/null", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued redirect behind nohup"}
+{"command": "echo x | xargs rm -rf ~>/dev/null", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued redirect behind xargs"}
+{"command": "echo x | xargs rm -rf ~>/dev/null", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued redirect behind xargs"}
+{"command": "bash -c 'rm -rf ~>/dev/null'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued redirect inside a bash -c string"}
+{"command": "bash -c 'rm -rf ~>/dev/null'", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued redirect inside a bash -c string"}
+{"command": "chmod -R 777 />/dev/null", "expected": "deny", "mode": "default", "source": "adversarial", "note": "glued redirect after another floor command's operand"}
+{"command": "chmod -R 777 />/dev/null", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: glued redirect after another floor command's operand"}
