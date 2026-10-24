@@ -243,3 +243,17 @@
 {"command": "script -q /dev/null sh -c 'echo a; rm -rf /'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "BSD script around sh -c"}
 {"command": "script -q /dev/null sh -c 'echo a; rm -rf /'", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: BSD script around sh -c"}
 {"command": "x=$((cd /tmp; echo 'a\nb') ; rm -rf / ) ; y=$((1)) # c", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a command substitution that starts with two parens is not arithmetic"}
+{"command": "$(git branch -D x)", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a substitution's output is the command and git branch -D is no list form"}
+{"command": "$(git branch feature-x)", "expected": "deny", "mode": "default", "source": "adversarial", "note": "branch creation run as the command is no list form"}
+{"command": "$(git branch -m a b)", "expected": "deny", "mode": "default", "source": "adversarial", "note": "branch rename run as the command is no list form"}
+{"command": "$(git tag -d v1)", "expected": "deny", "mode": "default", "source": "adversarial", "note": "tag delete run as the command is no list form"}
+{"command": "$(git tag v9)", "expected": "deny", "mode": "default", "source": "adversarial", "note": "tag creation run as the command is no list form"}
+{"command": "$(git remote add o https://x/y.git)", "expected": "deny", "mode": "default", "source": "adversarial", "note": "remote add run as the command is no list form"}
+{"command": "$(git remote set-url origin https://x/y.git)", "expected": "deny", "mode": "default", "source": "adversarial", "note": "remote set-url run as the command is no list form"}
+{"command": "$(git remote rm origin)", "expected": "deny", "mode": "default", "source": "adversarial", "note": "remote rm run as the command is no list form"}
+{"command": "$(git worktree add -b b ../w)", "expected": "deny", "mode": "default", "source": "adversarial", "note": "worktree add run as the command is no list form"}
+{"command": "$(git worktree add ../w)", "expected": "deny", "mode": "default", "source": "adversarial", "note": "worktree add without -b is no list form either"}
+{"command": "`git branch -D x`", "expected": "deny", "mode": "default", "source": "adversarial", "note": "backtick form of a branch delete run as the command"}
+{"command": "ls | $(git branch -D x)", "expected": "deny", "mode": "default", "source": "adversarial", "note": "branch delete run as the command after a pipe"}
+{"command": "$(echo $(git branch -D x))", "expected": "deny", "mode": "default", "source": "adversarial", "note": "nested substitution still holds a branch delete run as the command"}
+{"command": "$(git -C /tmp branch -D x)", "expected": "deny", "mode": "default", "source": "adversarial", "note": "git -C does not make a branch delete a list form"}

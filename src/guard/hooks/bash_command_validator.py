@@ -718,10 +718,47 @@ def _is_safe_interpreter(segment: str) -> bool:
     return len(rest) == 1 and rest[0] in version_flags_node
 
 
+# The arguments each git subcommand may carry and still only list.
+_GIT_LIST_FORM_ARGS: dict[str, frozenset[str]] = {
+    "branch": frozenset(
+        {
+            "-a",
+            "--all",
+            "-r",
+            "--remotes",
+            "-l",
+            "--list",
+            "-v",
+            "-vv",
+            "--verbose",
+            "--show-current",
+        }
+    ),
+    "tag": frozenset({"-l", "--list"}),
+    "remote": frozenset({"-v", "--verbose"}),
+    "worktree": frozenset({"list", "--porcelain"}),
+}
+
+
+def _is_git_list_form(segment: str) -> bool:
+    """True for ``git branch`` / ``tag`` / ``remote`` / ``worktree`` that only lists.
+
+    Any other argument creates, deletes, renames or repoints a ref, a remote or
+    a worktree (``git branch -D x``, ``git tag v9``, ``git remote add o u``).
+    """
+    tokens = segment.split()
+    if len(tokens) < 2 or tokens[0] != "git":
+        return False
+    allowed = _GIT_LIST_FORM_ARGS.get(tokens[1])
+    return allowed is not None and all(tok in allowed for tok in tokens[2:])
+
+
 def _is_safe_base_cmd(segment: str) -> bool:
     """Check if ``segment``'s base command is conditionally or specially safe."""
     tokens = segment.split()
     base_cmd = tokens[0] if tokens else ""
+    if base_cmd == "git":
+        return _is_git_list_form(segment)
     if base_cmd in CONDITIONAL_SAFE:
         return _is_conditional_safe(segment, base_cmd)
     if base_cmd == "sqlite3":
@@ -882,7 +919,9 @@ def is_safe_command(segment: str, *, is_piped: bool = False, strict: bool = Fals
     # _strip_git_safe_globals).
     if strict:
         git_canon = _strip_git_safe_globals(segment)
-        if git_canon is not None and _matches_prefix(git_canon, SAFE_PREFIXES):
+        if git_canon is not None and (
+            _matches_prefix(git_canon, SAFE_PREFIXES) or _is_git_list_form(git_canon)
+        ):
             return True
     return _is_safe_base_cmd(segment)
 

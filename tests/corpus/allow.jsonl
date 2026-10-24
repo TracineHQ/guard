@@ -144,3 +144,9 @@
 {"command": "script -F /dev/null make test", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: BSD script -F around a harmless command"}
 {"command": "script -a session.log", "expected": "allow", "mode": "default", "source": "curated", "note": "script with only an output file"}
 {"command": "script -a session.log", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: script with only an output file"}
+{"command": "$(git branch)", "expected": "allow", "mode": "default", "source": "adversarial", "note": "bare git branch lists"}
+{"command": "$(git branch --show-current)", "expected": "allow", "mode": "default", "source": "adversarial", "note": "a list flag keeps git branch read-only"}
+{"command": "$(git -C /tmp branch -a)", "expected": "allow", "mode": "default", "source": "adversarial", "note": "git -C with a list flag is still a list"}
+{"command": "$(git tag -l)", "expected": "allow", "mode": "default", "source": "adversarial", "note": "git tag -l lists"}
+{"command": "$(git remote -v)", "expected": "allow", "mode": "default", "source": "adversarial", "note": "git remote -v lists"}
+{"command": "$(git worktree list)", "expected": "allow", "mode": "default", "source": "adversarial", "note": "git worktree list lists"}

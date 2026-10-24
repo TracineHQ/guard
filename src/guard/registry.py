@@ -45,12 +45,16 @@ COMMANDS: list[CommandRule] = [
     CommandRule("git log", Safety.ALLOW, "Read-only git", "git-read"),
     CommandRule("git diff", Safety.ALLOW, "Read-only git", "git-read"),
     CommandRule("git show", Safety.ALLOW, "Read-only git", "git-read"),
-    CommandRule("git branch", Safety.ALLOW, "Read-only git", "git-read"),
-    CommandRule("git remote", Safety.ALLOW, "Read-only git", "git-read"),
+    # branch / remote / tag / worktree read only in their list forms; any other
+    # argument writes a ref or a remote, so ``_is_git_list_form`` decides.
+    CommandRule("git branch", Safety.ALLOW, "Read-only git", "git-read", requires_classifier=True),
+    CommandRule("git remote", Safety.ALLOW, "Read-only git", "git-read", requires_classifier=True),
     CommandRule("git blame", Safety.ALLOW, "Read-only git", "git-read"),
     CommandRule("git rev-parse", Safety.ALLOW, "Read-only git", "git-read"),
     CommandRule("git describe", Safety.ALLOW, "Read-only git", "git-read"),
-    CommandRule("git tag", Safety.ALLOW, "Read-only git (listing)", "git-read"),
+    CommandRule(
+        "git tag", Safety.ALLOW, "Read-only git (listing)", "git-read", requires_classifier=True
+    ),
     CommandRule("git ls-files", Safety.ALLOW, "Read-only git", "git-read"),
     CommandRule("git grep", Safety.ALLOW, "Read-only git", "git-read"),
     CommandRule("git stash list", Safety.ALLOW, "Read-only git", "git-read"),
@@ -61,7 +65,13 @@ COMMANDS: list[CommandRule] = [
     CommandRule("git rev-list", Safety.ALLOW, "Read-only git", "git-read"),
     CommandRule("git name-rev", Safety.ALLOW, "Read-only git", "git-read"),
     CommandRule("git mv", Safety.ALLOW, "Renames files (safe)", "git-write-safe"),
-    CommandRule("git worktree", Safety.ALLOW, "Worktree management for agents", "git-write-safe"),
+    CommandRule(
+        "git worktree",
+        Safety.ALLOW,
+        "Worktree listing",
+        "git-read",
+        requires_classifier=True,
+    ),
     # --- Git history destruction (DENY) ---
     # ``filter-branch`` / ``filter-repo`` rewrite every commit and force-push
     # the result. ``reflog expire --expire=now --all`` + ``gc --prune=now``
