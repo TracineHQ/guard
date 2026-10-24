@@ -127,3 +127,22 @@
 {"command": "parallel 'echo a ; echo {} # x' ::: b", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a placeholder before a comment"}
 {"command": "script --command 'ls' /dev/null", "expected": "allow", "mode": "default", "source": "curated", "note": "script --command around a harmless command"}
 {"command": "script --command 'ls' /dev/null", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: script --command around a harmless command"}
+{"command": "n=$((a << 2)) # shift\ngit commit -m 'Title\n\nIt mentions rm and watch.'", "expected": "allow", "mode": "auto", "source": "curated", "note": "a shift in arithmetic before a multi-line commit message (default mode denies $((...)) on main too)"}
+{"command": "(( n <<= 1 )) # double\ngit commit -m 'Title\n\nbody'", "expected": "allow", "mode": "default", "source": "curated", "note": "an arithmetic command before a multi-line commit message"}
+{"command": "(( n <<= 1 )) # double\ngit commit -m 'Title\n\nbody'", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: an arithmetic command before a multi-line commit message"}
+{"command": "echo $[1<<2] # c\necho 'a\nb'", "expected": "allow", "mode": "default", "source": "curated", "note": "the old bracket arithmetic form with a shift"}
+{"command": "echo $[1<<2] # c\necho 'a\nb'", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: the old bracket arithmetic form with a shift"}
+{"command": "parallel 'rm -rf {}/node_modules' ::: packages/a packages/b", "expected": "allow", "mode": "default", "source": "curated", "note": "a placeholder with a suffix, over harmless arguments"}
+{"command": "parallel 'rm -rf {}/node_modules' ::: packages/a packages/b", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a placeholder with a suffix, over harmless arguments"}
+{"command": "parallel -j8 'rm -rf {}' ::: build dist .cache", "expected": "allow", "mode": "default", "source": "curated", "note": "rm -rf over build directories"}
+{"command": "parallel -j8 'rm -rf {}' ::: build dist .cache", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: rm -rf over build directories"}
+{"command": "parallel 'convert {} {.}.png' ::: a.jpg b.jpg", "expected": "allow", "mode": "default", "source": "curated", "note": "{.} is the argument without its extension"}
+{"command": "parallel 'convert {} {.}.png' ::: a.jpg b.jpg", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: {.} is the argument without its extension"}
+{"command": "parallel 'cp {} out/{/}' ::: src/a.txt src/b.txt", "expected": "allow", "mode": "default", "source": "curated", "note": "{/} is the basename"}
+{"command": "parallel 'cp {} out/{/}' ::: src/a.txt src/b.txt", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: {/} is the basename"}
+{"command": "parallel 'mkdir -p out/{//}' ::: a/b/c.txt", "expected": "allow", "mode": "default", "source": "curated", "note": "{//} is the dirname"}
+{"command": "parallel 'mkdir -p out/{//}' ::: a/b/c.txt", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: {//} is the dirname"}
+{"command": "script -q /dev/null make test", "expected": "allow", "mode": "default", "source": "curated", "note": "BSD script around a harmless command"}
+{"command": "script -q /dev/null make test", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: BSD script around a harmless command"}
+{"command": "script -a session.log", "expected": "allow", "mode": "default", "source": "curated", "note": "script with only an output file"}
+{"command": "script -a session.log", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: script with only an output file"}

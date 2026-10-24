@@ -290,3 +290,28 @@
 {"command": "script -q --command='echo a; rm -rf /' /dev/null", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: script --command=<cmd>"}
 {"command": "script --comm='rm -rf /'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "script accepts an abbreviated --command"}
 {"command": "script --comm='rm -rf /'", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: script accepts an abbreviated --command"}
+{"command": "((echo 'a\nb') ; rm -rf /) ; ((n++)) # c", "expected": "deny", "mode": "default", "source": "adversarial", "note": "nested subshells are not arithmetic: the quote in them is still read"}
+{"command": "((echo 'a\nb') ; rm -rf /) ; ((n++)) # c", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: nested subshells are not arithmetic: the quote in them is still read"}
+{"command": "((echo 'a\nb') ; rm -rf /) # c", "expected": "deny", "mode": "default", "source": "adversarial", "note": "nested subshells with a quoted newline and a trailing comment"}
+{"command": "((echo 'a\nb') ; rm -rf /) # c", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: nested subshells with a quoted newline and a trailing comment"}
+{"command": "x=$((cd /tmp; echo 'a\nb') ; rm -rf / ) ; y=$((1)) # c", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a command substitution that starts with two parens is not arithmetic"}
+{"command": "n=$((x<<y)) ; echo 'a\nb' ; rm -rf / # c", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a shift in arithmetic is not a heredoc, so the quote after it is read"}
+{"command": "n=$((x<<y)) ; echo 'a\nb' ; rm -rf / # c", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: a shift in arithmetic is not a heredoc, so the quote after it is read"}
+{"command": "(( n <<= 2 )) ; echo 'a\nb' ; rm -rf / # c", "expected": "deny", "mode": "default", "source": "adversarial", "note": "an arithmetic command with a shift assignment"}
+{"command": "(( n <<= 2 )) ; echo 'a\nb' ; rm -rf / # c", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: an arithmetic command with a shift assignment"}
+{"command": "parallel 'rm -rf {//}' ::: ./build", "expected": "deny", "mode": "default", "source": "adversarial", "note": "{//} is the dirname of the argument, here the current directory"}
+{"command": "parallel 'rm -rf {//}' ::: ./build", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: {//} is the dirname of the argument, here the current directory"}
+{"command": "parallel 'rm -rf {//}' ::: /etc", "expected": "deny", "mode": "default", "source": "adversarial", "note": "{//} of a top-level path is the root"}
+{"command": "parallel 'rm -rf {//}' ::: /etc", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: {//} of a top-level path is the root"}
+{"command": "parallel 'rm -rf {1//}' ::: ./build", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a numbered placeholder with a modifier"}
+{"command": "parallel 'rm -rf {1//}' ::: ./build", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: a numbered placeholder with a modifier"}
+{"command": "script -q /dev/null rm -rf /", "expected": "deny", "mode": "default", "source": "adversarial", "note": "BSD script runs the words after the output file as the command"}
+{"command": "script -q /dev/null rm -rf /", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: BSD script runs the words after the output file as the command"}
+{"command": "script /dev/null rm -rf /", "expected": "deny", "mode": "default", "source": "adversarial", "note": "BSD script with no options"}
+{"command": "script /dev/null rm -rf /", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: BSD script with no options"}
+{"command": "script -F pipe /dev/null rm -rf /", "expected": "deny", "mode": "default", "source": "adversarial", "note": "BSD script -F takes a value"}
+{"command": "script -F pipe /dev/null rm -rf /", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: BSD script -F takes a value"}
+{"command": "script -t 0 /dev/null rm -rf ~", "expected": "deny", "mode": "default", "source": "adversarial", "note": "BSD script -t takes a value"}
+{"command": "script -t 0 /dev/null rm -rf ~", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: BSD script -t takes a value"}
+{"command": "script -q /dev/null sh -c 'echo a; rm -rf /'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "BSD script around sh -c"}
+{"command": "script -q /dev/null sh -c 'echo a; rm -rf /'", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: BSD script around sh -c"}

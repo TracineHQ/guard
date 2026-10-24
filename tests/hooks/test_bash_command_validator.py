@@ -14,6 +14,7 @@ import pytest
 
 from guard.hooks.bash_command_validator import (
     _QUOTED_NEWLINE,
+    _arithmetic_end,
     _canonicalize,
     _get_alternative_feedback,
     _joined_readings,
@@ -251,6 +252,52 @@ class TestMarkQuotedNewlines:
     def test_best_effort_reading_does_not_take_a_shift_for_a_heredoc(self, command):
         marked = _mark_quoted_newlines(command, comments=True)
         assert marked == command.replace("'a\nb'", f"'a{_QUOTED_NEWLINE}b'")
+
+    @pytest.mark.parametrize(
+        ("text", "end"),
+        [
+            pytest.param("((n++)) # c", 7, id="command"),
+            pytest.param("$((1<<n)) x", 9, id="expansion"),
+            pytest.param("(( (a)+(b) )) x", 13, id="inner-parens-balance"),
+            pytest.param("x ((n++))", -1, id="not-a-command-start"),
+            pytest.param("((echo a) ; ls)", -1, id="subshells"),
+            pytest.param("$((echo a) ; ls)", -1, id="expansion-that-is-a-substitution"),
+            pytest.param("((echo 'a)) b'))", -1, id="quote"),
+            pytest.param("((echo `x`))", -1, id="backtick"),
+            pytest.param("((echo a\nb))", -1, id="newline"),
+            pytest.param("((n++)", -1, id="unclosed"),
+        ],
+    )
+    def test_arithmetic_end_follows_bash_on_where_the_parens_close(self, text, end):
+        assert _arithmetic_end(text, 0) == end
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param(
+                "((echo 'a\nb') ; rm -rf /) ; ((n++)) # c", id="subshells-then-arithmetic"
+            ),
+            pytest.param("((echo 'a\nb') ; rm -rf /) # c", id="subshells"),
+            pytest.param("n=$((x<<y)) ; echo 'a\nb' ; rm -rf / # c", id="shift-then-quote"),
+            pytest.param(
+                "(( n <<= 2 )) ; echo 'a\nb' ; rm -rf / # c", id="shift-command-then-quote"
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("mode", ["default", "auto"])
+    def test_command_after_parens_and_a_quote_is_denied(self, command, mode):
+        assert _is_deny(decide(command, permission_mode=mode)), command
+
+    def test_a_substitution_read_as_arithmetic_is_denied_in_default(self):
+        # Auto mode leaves a command inside ``$(...)`` to the classifier, as on main.
+        command = "x=$((cd /tmp; echo 'a\nb') ; rm -rf / ) ; y=$((1)) # c"
+        assert _is_deny(decide(command))
+
+    def test_best_effort_reading_marks_a_newline_inside_nested_subshells(self):
+        command = "((echo 'a\nb') ; ls) ; ((n++)) # c"
+        assert _mark_quoted_newlines(command, comments=True) == (
+            f"((echo 'a{_QUOTED_NEWLINE}b') ; ls) ; ((n++)) # c"
+        )
 
     @pytest.mark.parametrize("comments", [True, False])
     def test_best_effort_reading_still_needs_a_quoted_newline(self, comments):
@@ -612,13 +659,44 @@ class TestShellRunWrappers:
             pytest.param("script --command='rm -rf /'", "rm -rf /", id="long-equals-last"),
             pytest.param("script --comm 'rm -rf /' /dev/null", "rm -rf /", id="long-abbreviated"),
             pytest.param("script --c='rm -rf /'", "rm -rf /", id="long-shortest"),
+            pytest.param("script -q /dev/null rm -rf /", "rm -rf /", id="bsd"),
+            pytest.param("script /dev/null rm -rf /", "rm -rf /", id="bsd-no-options"),
+            pytest.param("script -F pipe /dev/null rm -rf /", "rm -rf /", id="bsd-pipe"),
+            pytest.param("script -t 0 /dev/null rm -rf ~", "rm -rf ~", id="bsd-time"),
+            pytest.param("script -qF pipe /dev/null ls -l", "ls -l", id="bsd-cluster-ending-in-F"),
+            pytest.param("script -t0 /dev/null ls", "ls", id="bsd-time-attached"),
+            pytest.param("script /dev/null echo 'a b'", "echo 'a b'", id="bsd-quoted-word"),
+            pytest.param("script /dev/null echo *", "echo *", id="bsd-glob-stays-bare"),
+            pytest.param("script -q /dev/null make test", "make test", id="bsd-harmless"),
             pytest.param("parallel -j 2 'rm -rf {}' ::: /", "rm -rf /", id="jobs-separate"),
             pytest.param("parallel -j2 'rm -rf {}' ::: /", "rm -rf /", id="jobs-attached"),
             pytest.param("parallel --jobs 2 -k 'rm -rf {}' ::: /", "rm -rf /", id="long-and-bare"),
             pytest.param("parallel rm -rf {} ::: /", "rm -rf /", id="placeholder-word"),
             pytest.param("parallel rm -rf ::: /", "rm -rf /", id="args-appended"),
             pytest.param("parallel 'rm -rf {1}' ::: /", "rm -rf /", id="numbered-placeholder"),
-            pytest.param("parallel 'rm -rf {.}{/}' ::: /", "rm -rf //", id="two-placeholders"),
+            pytest.param(
+                "parallel 'mv {} {//}/{/.}.bak' ::: a/b.txt",
+                "mv a/b.txt a/b.bak",
+                id="every-placeholder-kind",
+            ),
+            pytest.param("parallel 'rm -rf {//}' ::: ./build", "rm -rf .", id="dirname-dot"),
+            pytest.param("parallel 'rm -rf {//}' ::: /etc", "rm -rf /", id="dirname-root"),
+            pytest.param("parallel 'rm -rf {1//}' ::: ./build", "rm -rf .", id="dirname-numbered"),
+            pytest.param("parallel 'mkdir {//}' ::: file", "mkdir .", id="dirname-no-slash"),
+            pytest.param("parallel 'echo {//}' ::: a/b/", "echo a", id="dirname-trailing-slash"),
+            pytest.param(
+                "parallel 'cp {} out/{/}' ::: src/a.txt", "cp src/a.txt out/a.txt", id="basename"
+            ),
+            pytest.param(
+                "parallel 'convert {} {.}.png' ::: a.jpg", "convert a.jpg a.png", id="no-extension"
+            ),
+            pytest.param("parallel 'rm -rf {.}' ::: /", "rm -rf /", id="no-extension-root"),
+            pytest.param(
+                "parallel 'echo {2/.}' ::: d/a.b.c", "echo a.b", id="numbered-basename-no-ext"
+            ),
+            pytest.param(
+                "parallel 'echo {#}' ::: a", "echo {#} a", id="job-number-is-not-an-argument"
+            ),
             pytest.param(
                 "parallel -j 2 'echo a ; rm -rf {} # x' ::: /",
                 "echo a ; rm -rf / # x",
@@ -654,7 +732,18 @@ class TestShellRunWrappers:
     def test_script_and_parallel_commands_are_found(self, command, inner):
         assert _strip_runner_prefix(command) == inner
 
-    @pytest.mark.parametrize("command", ["parallel :::", "parallel -j 2", "script -q"])
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "parallel :::",
+            "parallel -j 2",
+            "script -q",
+            "script -a session.log",
+            "script -q /dev/null",
+            "script -F pipe /dev/null",
+            "script session.log -x",
+        ],
+    )
     def test_nothing_to_run(self, command):
         assert _strip_runner_prefix(command) is None
 
@@ -691,6 +780,15 @@ class TestShellRunWrappers:
             pytest.param("parallel -j 2 'echo a ; rm -rf {} # x' ::: /", id="parallel-comment"),
             pytest.param("parallel \"bash -c 'rm -rf {}'\" ::: /", id="parallel-nested-bash-c"),
             pytest.param("parallel 'rm -rf {}' ::: a /", id="parallel-every-arg"),
+            pytest.param("parallel 'rm -rf {//}' ::: ./build", id="parallel-dirname-dot"),
+            pytest.param("parallel 'rm -rf {//}' ::: /etc", id="parallel-dirname-root"),
+            pytest.param("parallel 'rm -rf {1//}' ::: ./build", id="parallel-dirname-numbered"),
+            pytest.param("script -q /dev/null rm -rf /", id="script-bsd"),
+            pytest.param("script /dev/null rm -rf /", id="script-bsd-no-options"),
+            pytest.param("script -F pipe /dev/null rm -rf /", id="script-bsd-pipe"),
+            pytest.param("script -t 0 /dev/null rm -rf ~", id="script-bsd-time"),
+            pytest.param("script -q /dev/null sh -c 'echo a; rm -rf /'", id="script-bsd-sh-c"),
+            pytest.param("script -q /dev/null bash -c 'rm -rf /'", id="script-bsd-bash-c"),
             pytest.param("parallel 'echo \"a\nb\" ; rm -rf {} # x' ::: /", id="parallel-newline"),
         ],
     )
@@ -713,6 +811,14 @@ class TestShellRunWrappers:
             "parallel --newflag gzip {} ::: a b",
             "parallel -kj 2 echo {} ::: a b",
             "parallel 'echo a ; echo {} # x' ::: b",
+            "parallel 'rm -rf {}/node_modules' ::: packages/a packages/b",
+            "parallel -j8 'rm -rf {}' ::: build dist .cache",
+            "parallel 'convert {} {.}.png' ::: a.jpg b.jpg",
+            "parallel 'cp {} out/{/}' ::: src/a.txt src/b.txt",
+            "parallel 'mkdir -p out/{//}' ::: a/b/c.txt",
+            "script -q /dev/null make test",
+            "script -a session.log",
+            "script -q session.log",
         ],
     )
     @pytest.mark.parametrize("mode", ["default", "auto"])

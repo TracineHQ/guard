@@ -1478,16 +1478,35 @@ def _mark_quoted_newlines(command: str, *, comments: bool | None = None) -> str 
 
 
 def _arithmetic_end(command: str, start: int) -> int:
-    """Index just past the ``))`` of an arithmetic ``$((...))`` / ``((...))`` at ``start``, else ``-1``."""
+    """Index just past the ``))`` of an arithmetic ``$((...))`` / ``((...))`` at ``start``, else ``-1``.
+
+    Bash reads ``((`` as arithmetic only when the paren that balances the
+    opening pair is immediately followed by another ``)``; otherwise it is
+    nested subshells (``((echo 'a'; b) ; c)``) and everything in it is
+    commands. A quote, backtick or newline before the close is not arithmetic
+    guard needs to see through, so it counts as not arithmetic too.
+    """
     if command.startswith("$((", start):
-        end = command.find("))", start + 3)
+        i = start + 3
     elif command.startswith("((", start) and (
         start == 0 or command[start - 1] in _WORD_START_CHARS
     ):
-        end = command.find("))", start + 2)
+        i = start + 2
     else:
         return -1
-    return end + 2 if end >= 0 else -1
+    depth = 0
+    while i < len(command):
+        c = command[i]
+        if c in "'\"`\n":
+            return -1
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            if depth == 0:
+                return i + 2 if command.startswith("))", i) else -1
+            depth -= 1
+        i += 1
+    return -1
 
 
 def _heredoc_bodies_end(command: str, start: int, heredocs: list[tuple[str, bool]]) -> int:
@@ -2079,9 +2098,10 @@ _PARALLEL_VALUE_LETTERS = frozenset("aCdEIjJLnNPsS")
 # Most command starts ``_parallel_command_starts`` follows, one per way of
 # reading the options it can't classify.
 _PARALLEL_MAX_STARTS = 4
-# Placeholders parallel replaces with an argument: ``{}``, ``{.}``, ``{/}``,
-# ``{//}``, ``{/.}`` and ``{2}``.
-_PARALLEL_PLACEHOLDER_RE = re.compile(r"\{(?:[0-9]+|\.|/|//|/\.)?\}")
+# Placeholders parallel replaces with an argument: ``{}``, ``{.}`` (no
+# extension), ``{/}`` (basename), ``{//}`` (dirname) and ``{/.}``, each with an
+# optional input-source number (``{2}``, ``{1//}``). Group 1 is the modifier.
+_PARALLEL_PLACEHOLDER_RE = re.compile(r"\{[0-9]*(\.|//|/\.|/)?\}")
 
 
 def _parallel_flag_takes_value(flag: str) -> bool | None:
@@ -2122,9 +2142,24 @@ def _parallel_command_starts(tokens: list[str]) -> list[int]:
     return starts
 
 
+def _parallel_placeholder_value(arg: str, modifier: str) -> str:
+    """What a placeholder with ``modifier`` (``""``, ``.``, ``/``, ``//``, ``/.``) stands for on ``arg``."""
+    if modifier == "//":
+        stripped = arg.rstrip("/") or arg[:1]
+        head, slash, _tail = stripped.rpartition("/")
+        return head or ("/" if slash else ".")
+    if modifier.startswith("/"):
+        arg = arg.rstrip("/").rsplit("/", 1)[-1]
+    if modifier.endswith("."):
+        arg = re.sub(r"\.[^/.]+$", "", arg)
+    return arg
+
+
 def _fill_placeholders(word: str, arg: str) -> str:
-    """``word`` with each of ``parallel``'s placeholders replaced by ``arg``."""
-    return _PARALLEL_PLACEHOLDER_RE.sub(lambda _match: arg, word)
+    """``word`` with each of ``parallel``'s placeholders replaced by what it stands for on ``arg``."""
+    return _PARALLEL_PLACEHOLDER_RE.sub(
+        lambda match: _parallel_placeholder_value(arg, match.group(1) or ""), word
+    )
 
 
 def _parallel_command(tokens: list[str], start: int) -> str | None:
@@ -2149,9 +2184,10 @@ def _strip_parallel(tokens: list[str]) -> str | None:
     """Strip ``parallel [flags] <cmd> ::: <args>``.
 
     Args after ``:::`` are the operands the command runs against. Each
-    replaces the placeholders (``{}``) wherever they sit in a word, and with
-    no placeholder they're appended, so the deny matchers see the real shape
-    (``rm -rf /``, not ``rm -rf {}``). With no command before ``:::``,
+    replaces the placeholders wherever they sit in a word (``{}`` is the
+    argument, ``{//}`` its dirname, ``{/}`` its basename, ``{.}`` the argument
+    without its extension), and with no placeholder they're appended, so the
+    deny matchers see the real shape (``rm -rf /``, not ``rm -rf {}``). With no command before ``:::``,
     parallel runs each arg as a command, so they are returned as a sequence.
     When an option's arity is unknown, each reading of where the command
     starts is returned, as a sequence.
@@ -2166,11 +2202,33 @@ def _strip_parallel(tokens: list[str]) -> str | None:
     return " ; ".join(commands) or None
 
 
+# BSD/macOS ``script`` options that take the next word (``-F pipe``, ``-t time``).
+_SCRIPT_BSD_VALUE_FLAGS = frozenset({"-F", "-t"})
+# A word with one of these needs its quotes back when words are joined into a command.
+_SHELL_META_RE = re.compile(r"[\s;&|<>()$`\\'\"]")
+
+
+def _bsd_script_command(tokens: list[str]) -> str | None:
+    """The command in BSD/macOS ``script [-aeFkqrt] [file [command ...]]``, which has no ``-c``."""
+    i = 1
+    while i < len(tokens) and tokens[i].startswith("-") and tokens[i] != "-":
+        flag = tokens[i]
+        takes_value = flag in _SCRIPT_BSD_VALUE_FLAGS or (
+            not flag.startswith("--") and len(flag) > len("-F") and flag[-1] in "Ft"
+        )
+        i += 2 if takes_value else 1
+    command = tokens[i + 1 :]  # tokens[i] is the output file
+    if not command or command[0].startswith("-"):
+        return None
+    return " ".join(shlex.quote(t) if _SHELL_META_RE.search(t) else t for t in command)
+
+
 def _strip_script(tokens: list[str]) -> str | None:
     """Strip ``script [-qc] -c "<cmd>" [<output>]`` and ``script --command=<cmd>``.
 
     The output file may sit on either side, and ``--command`` may be
-    abbreviated, as ``getopt`` allows.
+    abbreviated, as ``getopt`` allows. With no such option, it is the BSD form,
+    where the words after the output file are the command.
     """
     if _basename(tokens[0]) != "script":
         return None
@@ -2182,7 +2240,7 @@ def _strip_script(tokens: list[str]) -> str | None:
                 return value
         elif i + 1 < len(tokens) and (is_long or _SHELL_C_FLAGS_RE.match(flag)):
             return tokens[i + 1]
-    return None
+    return _bsd_script_command(tokens)
 
 
 # Helpers are mutually exclusive on head-token basename, so dispatch order
