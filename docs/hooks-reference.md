@@ -59,9 +59,9 @@ guard mode:
 In both modes the validator:
 
 - Strips leading `#` comment lines.
-- Splits on `|`, `&&`, `||`, `;`, and newlines -- quote- and
+- Splits on `|`, `|&`, `&&`, `||`, `&`, `;`, and newlines -- quote- and
   substitution-aware, so operators inside `$(...)`, backticks, and quoted
-  literals do not split. `>|` is a redirect, not a pipe.
+  literals do not split. `>|`, `>&`, `<&` and `&>` are redirects, not operators.
 - Peels wrappers before matching, options included: `env -i` / `-u NAME` /
   `-C DIR` / `--`, `bash -o pipefail -c`, `ssh host --`, so the wrapped
   command meets its own rule.

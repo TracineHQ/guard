@@ -201,6 +201,13 @@ adheres to [Semantic Versioning](https://semver.org/).
   a descriptor such as `2>&1`, and a digit that belongs to the word (`~2>x`)
   are read as before. A `$'...'` string is decoded first, so an operator
   inside one is split like a bare one.
+- A background `&` now separates commands. Guard split a command line on
+  `|`, `||`, `&&` and `;` only, so `a & b` was one segment and the deny rules
+  looked at `a` alone. A lone unquoted `&` now starts a new segment, as in
+  bash, and `|&` is a pipe. Each segment gets the same rules it gets after a
+  `;`. `&&`, `&>`, `&>>`, `>&`, `<&`, an `&` in quotes, after a backslash, in
+  `$(...)`, `${...}` or arithmetic, and a descriptor such as `2>&1` are not
+  separators.
 - Read-only guard CLI calls (`guard status`, `guard allowlist list`,
   `guard mode --help`, `guard allowlist --help`) no longer trip
   `protected_files`.
