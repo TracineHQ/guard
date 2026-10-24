@@ -137,7 +137,7 @@ def test_find_without_exec_does_not_emit_root() -> None:
 def test_find_exec_on_dot_git_hooks_root_flagged() -> None:
     cmd = "find /repo/.git/hooks -exec rm {} \\;"
     matched = _bash_first_protected_match(cmd, _LOCKDOWN)
-    assert matched == ".git/hooks"
+    assert matched == (".git/hooks", "/repo/.git/hooks")
 
 
 # === find -fprint / -fprintf / -fls write flags ===
@@ -166,7 +166,7 @@ def test_find_fprint0_emits_file_target() -> None:
 def test_find_fprint_on_protected_path_flagged() -> None:
     """Real bypass: ``find . -fprint .git/config`` overwrites the protected file."""
     matched = _bash_first_protected_match("find . -fprint /repo/.git/config", _LOCKDOWN)
-    assert matched == ".git/config"
+    assert matched == (".git/config", "/repo/.git/config")
 
 
 # === nvim --headless batch mode ===
@@ -184,7 +184,7 @@ def test_nvim_headless_plus_command_extracts_target() -> None:
 
 def test_nvim_headless_on_protected_path_flagged() -> None:
     matched = _bash_first_protected_match("nvim --headless -c 'wq' /repo/CLAUDE.md", _LOCKDOWN)
-    assert matched == "CLAUDE.md"
+    assert matched == ("CLAUDE.md", "/repo/CLAUDE.md")
 
 
 # === Per-interpreter eval-flag map ===

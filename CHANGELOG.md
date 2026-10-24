@@ -90,6 +90,8 @@ adheres to [Semantic Versioning](https://semver.org/).
   anything else it is data), and `find -exec` with a read-only program. A
   command it can't read for sure (an unterminated quote, substitution or
   heredoc) denies when it names a protected path.
+- The `protected_files` deny reason names the text that matched (a path in a
+  script body, a relative target) next to the protected path it reaches.
 - `GUARD_PROTECTED_EXTRA` and `.claude/guard-protected.txt` add up; a repo's
   file no longer replaces your environment variable.
 - Deny reasons offer `guard allowlist disable-rule <rule_id>` as the only

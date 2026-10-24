@@ -310,8 +310,12 @@ tool passes (`Read`, `Grep`, `Glob`, `WebFetch`, `Agent`, `AskUserQuestion`,
 
 ### Example deny
 
+The reason names the protected path and, when they differ, the text in the
+tool input that matched it.
+
 ```
-Protected path: /home/me/.claude/plugins/cache/tracine/guard/1.5.0/src.
+Protected path: /home/me/.claude/plugins/cache/tracine/guard/1.5.0/src,
+matched by `/home/me/.claude/plugins/cache/tracine/guard/1.5.0/src/guard/_utils.py`.
 guard blocks agent writes to the install it is running from and to the
 subagent scope file, so a session can't rewrite its own guardrails. Don't
 retry or route around it. Tell the user what you want to change and why;

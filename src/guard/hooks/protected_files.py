@@ -32,7 +32,7 @@ import sys
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from guard._bash_lex import (
     _EXPANSION_LIMIT,
@@ -458,6 +458,13 @@ def is_protected_parent_dir(dir_path: str, patterns: Sequence[str] | None = None
     return None
 
 
+class _Hit(NamedTuple):
+    """A protected pattern, and the text in the tool input that matched it."""
+
+    pattern: str
+    text: str
+
+
 # Bash redirect / file-write commands and their target-extracting regex / token
 # index. Used by ``bash_write_targets`` as a best-effort second line of
 # defense — the primary path is the Edit/Write tool guard above.
@@ -553,20 +560,16 @@ def bash_write_targets(command: str, patterns: Sequence[str] | None = None) -> l
     targets: list[str] = []
     for segment, tokens in commands:
         targets.extend(_regex_write_targets(segment))
-        targets.extend(_command_write_targets(tokens, segment, patterns))
+        targets.extend(_command_write_targets(tokens, segment))
+        targets.extend(hit.pattern for hit in _interpreter_eval_targets(tokens, patterns))
     return targets
 
 
-def _command_write_targets(
-    tokens: list[str],
-    command: str,
-    patterns: Sequence[str] | None,
-    dirs: Sequence[Path] | None = None,
-) -> list[str]:
+def _command_write_targets(tokens: list[str], command: str) -> list[str]:
     """Write targets for one command's tokens (no control operators inside).
 
-    ``dirs`` are the directories the command may run in, for relative paths
-    in an interpreter body (defaults to the working directory).
+    An interpreter's eval body is scanned on its own
+    (``_interpreter_eval_targets``).
     """
     tokens, targets = _split_redirects(tokens)
 
@@ -616,12 +619,6 @@ def _command_write_targets(
     # rule: emit ``<root>`` as a candidate target. ``is_protected`` then
     # decides if the whole command is denied.
     targets.extend(_find_exec_targets(tokens))
-
-    # Per-interpreter eval-flag map: ``python -c '...'``, ``php -r '...'``,
-    # etc. Scan a write-shaped eval-string body for literal protected-pattern
-    # substrings (best-effort; dynamically-constructed paths cannot be
-    # resolved statically and fall through to the Edit/Write tool guard).
-    targets.extend(_interpreter_eval_targets(tokens, patterns, dirs))
     return targets
 
 
@@ -944,13 +941,13 @@ _EVAL_WRITE_INTENT_RE = re.compile(
 )
 
 
-def _eval_body_targets(body: str, active: Sequence[str], dirs: Sequence[Path]) -> list[str]:
-    """Protected patterns a write-shaped interpreter body names."""
+def _eval_body_targets(body: str, active: Sequence[str], dirs: Sequence[Path]) -> list[_Hit]:
+    """Protected patterns a write-shaped interpreter body names, with the text naming each."""
     if len(body) > _EVAL_BODY_SCAN_MAX_BYTES:
-        return [_EVAL_BODY_OVERFLOW_SENTINEL]
+        return [_Hit(_EVAL_BODY_OVERFLOW_SENTINEL, "")]
     if not _EVAL_WRITE_INTENT_RE.search(body):
         return []
-    out = [pat for pat in active if pat not in _LIVE_TREE and pat in body]
+    out = [_Hit(pat, pat) for pat in active if pat not in _LIVE_TREE and pat in body]
     live = _text_names_live(body, dirs) if _has_live(active) else None
     return out if live is None else [*out, live]
 
@@ -959,7 +956,7 @@ def _interpreter_eval_targets(
     tokens: list[str],
     patterns: Sequence[str] | None = None,
     dirs: Sequence[Path] | None = None,
-) -> list[str]:
+) -> list[_Hit]:
     """Scan an interpreter's ``-c`` / ``-e`` / ``-r`` eval body for literal protected paths.
 
     Best-effort static scan. When the body shows write intent
@@ -978,8 +975,10 @@ def _interpreter_eval_targets(
     end-to-end; over that we emit ``_EVAL_BODY_OVERFLOW_SENTINEL`` so
     ``protected_files`` denies instead of silently dropping content past
     the cap.
+
+    Each target comes with the body text that named it, for the deny reason.
     """
-    out: list[str] = []
+    out: list[_Hit] = []
     active = patterns if patterns is not None else _effective_patterns()
     where = list(dirs) if dirs else [Path.cwd()]
     for i, tok in enumerate(tokens):
@@ -1161,8 +1160,8 @@ def _word_names_live(word: str, dirs: Sequence[Path], *, whole_dirs: bool) -> st
     return next((live for tail in tails if (live := _tail_names_live(tail)) is not None), None)
 
 
-def _text_names_live(text: str, dirs: Sequence[Path], *, strict: bool = False) -> str | None:
-    """Return the live entry a script body or unparsed text names, else ``None``.
+def _text_names_live(text: str, dirs: Sequence[Path], *, strict: bool = False) -> _Hit | None:
+    """Return the live entry a script body or unparsed text names, and the word naming it.
 
     Every path-like word is checked (``_word_names_live``); bare words only
     from inside the live tree, where they resolve into it. A live directory
@@ -1177,11 +1176,11 @@ def _text_names_live(text: str, dirs: Sequence[Path], *, strict: bool = False) -
         if inside or "/" in word or word.startswith("~"):
             live = _word_names_live(word, dirs, whole_dirs=whole_dirs)
             if live is not None:
-                return live
+                return _Hit(live, word)
     return None
 
 
-def _text_match(text: str, patterns: Sequence[str], dirs: Sequence[Path]) -> str | None:
+def _text_match(text: str, patterns: Sequence[str], dirs: Sequence[Path]) -> _Hit | None:
     """Return a trust-root pattern ``text`` names anywhere (fail closed)."""
     if _has_live(patterns):
         live = _text_names_live(text, dirs, strict=True)
@@ -1190,7 +1189,7 @@ def _text_match(text: str, patterns: Sequence[str], dirs: Sequence[Path]) -> str
     folded = _normcase(text)
     return next(
         (
-            p
+            _Hit(p, p)
             for p in patterns
             if p in PROTECTED_PATTERNS and p not in _LIVE_TREE and _normcase(p) in folded
         ),
@@ -1447,38 +1446,44 @@ def _target_match(target: str, scan: _Scan, kind: str) -> str | None:
     return None
 
 
-def _segment_targets(segment: str, tokens: list[str], scan: _Scan) -> Iterator[tuple[str, str]]:
+def _segment_targets(
+    segment: str, tokens: list[str], scan: _Scan
+) -> Iterator[tuple[str, str, str]]:
+    """Yield ``(target, kind, text)``: ``text`` is what the command says for it."""
     for target in _regex_write_targets(segment):
-        yield target, "file"
-    for target in _command_write_targets(tokens, segment, scan.patterns, scan.dirs):
-        yield target, "file"
+        yield target, "file", target
+    for target in _command_write_targets(tokens, segment):
+        yield target, "file", target
+    # Interpreter bodies: ``python -c '...'``, ``php -r '...'``, etc.
+    for target, text in _interpreter_eval_targets(tokens, scan.patterns, scan.dirs):
+        yield target, "file", text
     # An extraction anywhere on a protected file's directory chain could
     # overwrite it.
     for target in _tar_extract_dirs(tokens):
-        yield target, "dir"
+        yield target, "dir", target
     args = _split_redirects(tokens)[0]
     copied_into = _copy_into_targets(args)
     for target in copied_into:
-        yield target, "file"
+        yield target, "file", target
     # Removing, moving or copying over a directory that holds the live tree
     # reaches it too.
     if _has_live(scan.patterns):
         for target in (*_tree_targets(args), *copied_into):
-            yield target, "tree"
+            yield target, "tree", target
 
 
-def _segment_match(segment: str, tokens: list[str], scan: _Scan) -> str | None:
+def _segment_match(segment: str, tokens: list[str], scan: _Scan) -> _Hit | None:
     """Return the first protected pattern one command writes, else ``None``."""
     if _guard_cli_writes_allowlist(tokens):
-        return _GUARD_ALLOWLIST_FILE
-    for target, kind in _segment_targets(segment, tokens, scan):
+        return _Hit(_GUARD_ALLOWLIST_FILE, _GUARD_ALLOWLIST_FILE)
+    for target, kind, text in _segment_targets(segment, tokens, scan):
         matched = _target_match(target, scan, kind)
         if matched is not None:
-            return matched
+            return _Hit(matched, text)
     for payload in _shell_payloads(tokens):
-        matched = _scan_command(payload, scan.nested())
-        if matched is not None:
-            return matched
+        hit = _scan_command(payload, scan.nested())
+        if hit is not None:
+            return hit
     return None
 
 
@@ -1489,7 +1494,7 @@ _PROGRAM_READER_RE = re.compile(
 )
 
 
-def _heredoc_match(heredoc: _Heredoc, scan: _Scan) -> str | None:
+def _heredoc_match(heredoc: _Heredoc, scan: _Scan) -> _Hit | None:
     """Match a heredoc by what reads it.
 
     A shell runs it as commands, an interpreter as a program; anything else
@@ -1499,13 +1504,15 @@ def _heredoc_match(heredoc: _Heredoc, scan: _Scan) -> str | None:
         return _scan_command(heredoc.body, scan.nested())
     if _PROGRAM_READER_RE.search(heredoc.line):
         targets = _eval_body_targets(heredoc.body, scan.patterns, scan.dirs)
-        return next((m for t in targets if (m := _target_match(t, scan, "file"))), None)
+        return next(
+            (_Hit(m, text) for t, text in targets if (m := _target_match(t, scan, "file"))), None
+        )
     if heredoc.quoted:
         return None
     for inner in _expanded_substitutions(heredoc.body):
-        matched = _scan_command(inner, scan.nested())
-        if matched is not None:
-            return matched
+        hit = _scan_command(inner, scan.nested())
+        if hit is not None:
+            return hit
     return None
 
 
@@ -1514,7 +1521,7 @@ def _loose_tokens(segment: str) -> list[str]:
     return [w for w in (_unbracket(x.strip("'\"")) for x in segment.split()) if w]
 
 
-def _scan_segments(flat: str, scan: _Scan) -> str | None:
+def _scan_segments(flat: str, scan: _Scan) -> _Hit | None:
     for segment in _split_segments(flat):
         try:
             tokens = _tokens(segment)
@@ -1524,14 +1531,14 @@ def _scan_segments(flat: str, scan: _Scan) -> str | None:
         moved, lost = _cd_moves(tokens, scan.dirs, scan.env)
         scan.dirs.extend(moved)
         scan.cd_unknown = scan.cd_unknown or lost
-        matched = _segment_match(segment, tokens, scan)
-        if matched is not None:
-            return matched
+        hit = _segment_match(segment, tokens, scan)
+        if hit is not None:
+            return hit
     return None
 
 
-def _scan_command(command: str, scan: _Scan) -> str | None:
-    """Return the first protected pattern ``command`` writes, else ``None``.
+def _scan_command(command: str, scan: _Scan) -> _Hit | None:
+    """Return the first protected pattern ``command`` writes and the text naming it.
 
     Commands handed to another shell (``bash -c``, ``eval``, ``$(...)``,
     backticks, a heredoc a shell reads) are scanned the same way, from every
@@ -1563,8 +1570,8 @@ def _scan_command(command: str, scan: _Scan) -> str | None:
 
 def _bash_first_protected_match(
     command: str, patterns: Sequence[str], dirs: Sequence[Path] = ()
-) -> str | None:
-    """Return the first protected pattern a bash command writes, else ``None``.
+) -> _Hit | None:
+    """Return the first protected pattern a bash command writes and the text naming it.
 
     ``dirs`` are the directories the command may start in (the working
     directory by default).
@@ -1577,12 +1584,12 @@ _FILE_PATH_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "Not
 
 def _match_for_tool(
     tool_name: str, tool_input: dict[str, Any], patterns: Sequence[str], cwd: object = None
-) -> tuple[str | None, str]:
-    """Return ``(matched_pattern, excerpt)`` for the given Claude Code tool payload.
+) -> tuple[_Hit | None, str]:
+    """Return ``(hit, excerpt)`` for the given Claude Code tool payload.
 
-    Pure: no allowlist consultation. ``matched_pattern`` is ``None`` when
-    nothing protected is written; ``excerpt`` is the human-readable string
-    used in audit-log records.
+    Pure: no allowlist consultation. ``hit`` is ``None`` when nothing
+    protected is written; ``excerpt`` is the human-readable string used in
+    audit-log records.
 
     * ``Write`` / ``Edit`` / ``MultiEdit`` / ``NotebookEdit``: run
       ``is_protected`` on the ``file_path`` (or ``notebook_path``).
@@ -1595,7 +1602,8 @@ def _match_for_tool(
         # NotebookEdit uses ``notebook_path``; the others use ``file_path``.
         target = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
         target = target if isinstance(target, str) else ""
-        return is_protected(target, patterns), target
+        matched = is_protected(target, patterns)
+        return (None if matched is None else _Hit(matched, target)), target
     if tool_name == "Bash":
         command = tool_input.get("command", "")
         command = command if isinstance(command, str) else ""
@@ -1609,30 +1617,35 @@ def _match_for_tool(
 _TELL_THE_USER = "Don't retry or route around it. Tell the user what you want to change and why"
 
 
-def deny_reason(matched: str) -> str:
-    """Return the steering deny reason for a protected-pattern match."""
+def deny_reason(matched: str, text: str = "") -> str:
+    """Return the steering deny reason for a protected-pattern match.
+
+    ``text`` is what the tool input said that matched, named when it isn't
+    the pattern itself.
+    """
+    named = f"{matched}, matched by `{text}`" if text and text != matched else matched
     if matched in _UN_OVERRIDABLE_PATTERNS:
         return (
-            f"Protected file: {matched}. The allowlist decides what guard lets "
+            f"Protected file: {named}. The allowlist decides what guard lets "
             "through, so agents never change it, by editing the file or by "
             f"running `guard allowlist` or `guard mode`. {_TELL_THE_USER}; they "
             "can run the guard command themselves with `! guard ...`."
         )
     if matched in PROTECTED_PATTERNS:
         return (
-            f"Protected path: {matched}. guard blocks agent writes to the install it "
+            f"Protected path: {named}. guard blocks agent writes to the install it "
             "is running from and to the subagent scope file, so a session can't rewrite "
             f"its own guardrails. {_TELL_THE_USER}; they can make the edit."
         )
     if matched in LOCKDOWN_PATTERNS:
         return (
-            f"Protected file: {matched} (guard lockdown). Lockdown keeps agents off "
+            f"Protected file: {named} (guard lockdown). Lockdown keeps agents off "
             "git hooks and config, agent instruction files, MCP registrations and "
             f"cloud profiles. {_TELL_THE_USER}; they can make the edit, or leave "
             "lockdown with `guard mode enforce`."
         )
     return (
-        f"Protected file: {matched} (project protected list). {_TELL_THE_USER}; "
+        f"Protected file: {named} (project protected list). {_TELL_THE_USER}; "
         "they can make the edit."
     )
 
@@ -1647,10 +1660,10 @@ def decide(
     ``hook()`` shares ``_match_for_tool`` so the two can't drift.
     """
     patterns = _effective_patterns(mode="lockdown" if lockdown else "enforce")
-    matched, _ = _match_for_tool(tool_name, tool_input, patterns)
-    if matched is None:
+    hit, _ = _match_for_tool(tool_name, tool_input, patterns)
+    if hit is None:
         return None
-    return emit_pretooluse_decision("deny", deny_reason(matched))
+    return emit_pretooluse_decision("deny", deny_reason(*hit))
 
 
 def hook(payload: dict[str, Any]) -> None:
@@ -1660,16 +1673,16 @@ def hook(payload: dict[str, Any]) -> None:
     if not isinstance(tool_name, str) or not isinstance(tool_input, dict):
         return
     patterns = _effective_patterns(mode=load_allowlist().mode)
-    matched, excerpt = _match_for_tool(tool_name, tool_input, patterns, payload.get("cwd"))
-    if matched is None:
+    hit, excerpt = _match_for_tool(tool_name, tool_input, patterns, payload.get("cwd"))
+    if hit is None:
         return
     apply_decision(
         _HOOK_ID,
         payload,
-        emit_pretooluse_decision("deny", deny_reason(matched)),
+        emit_pretooluse_decision("deny", deny_reason(*hit)),
         excerpt,
-        trust_root=matched in PROTECTED_PATTERNS,
-        overridable=matched not in _UN_OVERRIDABLE_PATTERNS,
+        trust_root=hit.pattern in PROTECTED_PATTERNS,
+        overridable=hit.pattern not in _UN_OVERRIDABLE_PATTERNS,
     )
 
 

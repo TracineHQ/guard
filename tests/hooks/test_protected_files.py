@@ -419,6 +419,34 @@ def test_unresolved_shapes(
     assert (decide("Bash", {"command": command}) is not None) is denied
 
 
+# The deny reason names what matched when it isn't the pattern itself.
+_FRAGMENT = f"/nope/{_REL}/registry.py"
+_REASONS: list[tuple[str, dict[str, Any], str]] = [
+    ("Edit", {"file_path": f"{_GUARD}/_utils.py"}, f"{_LIVE}, matched by `{_GUARD}/_utils.py`."),
+    ("Bash", {"command": f"echo x >> {_GUARD}/_utils.py"}, f"matched by `{_GUARD}/_utils.py`."),
+    (
+        "Bash",
+        {"command": f"python3 - <<'EOF'\nopen('{_FRAGMENT}', 'w')\nEOF"},
+        f"{_LIVE}, matched by `{_FRAGMENT}`.",
+    ),
+    ("Bash", {"command": f"python3 -c \"open('{_FRAGMENT}', 'w')\""}, f"by `{_FRAGMENT}`."),
+    (
+        "Bash",
+        {"command": "echo {} > .claude/guard/allowlist.json"},
+        "Protected file: .claude/guard/allowlist.json. ",
+    ),
+]
+
+
+@pytest.mark.parametrize(("tool_name", "tool_input", "expected"), _REASONS)
+def test_reason_names_matched_text(
+    tool_name: str, tool_input: dict[str, Any], expected: str
+) -> None:
+    result = decide(tool_name, tool_input)
+    assert result is not None
+    assert expected in result["hookSpecificOutput"]["permissionDecisionReason"]
+
+
 class TestInodes:
     """A hard link or a spelling the volume folds is the same file."""
 
