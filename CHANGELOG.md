@@ -192,6 +192,15 @@ adheres to [Semantic Versioning](https://semver.org/).
   double quotes) or an ANSI-C quote decodes to a quote or backslash
   (`$'\x27'`), every brace is expanded as before. A `$` ending a quoted regex
   (`'[Tt]ask$'`) is not an ANSI-C quote.
+- A redirect glued to a word is no longer read as part of the word. The
+  floor missed `rm -rf ~>/dev/null`, `rm -rf .>/dev/null`, `rm -rf ~</dev/null`,
+  `rm -rf ~&>/dev/null` and `rm -rf /<<'END-X'` because the operand it saw
+  was `~>/dev/null`, not `~`. An unquoted `>`, `>>`, `>|`, `<`, `<<`, `<<<`,
+  `&>` or `>&` now ends the word before the deny rules look at it, as it does
+  in bash. An operator inside single or double quotes or after a backslash,
+  a descriptor such as `2>&1`, and a digit that belongs to the word (`~2>x`)
+  are read as before. A `$'...'` string is decoded first, so an operator
+  inside one is split like a bare one.
 - Read-only guard CLI calls (`guard status`, `guard allowlist list`,
   `guard mode --help`, `guard allowlist --help`) no longer trip
   `protected_files`.
