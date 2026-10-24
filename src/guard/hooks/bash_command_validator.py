@@ -6878,8 +6878,8 @@ def decide(
 ) -> dict[str, str] | None:
     """Decide whether to allow a bash command. ``None`` means passthrough.
 
-    ``original_command`` is the unmodified user-typed command string used for
-    allowlist exact-match lookups. When ``None``, defaults to ``command``.
+    ``original_command`` is the unmodified user-typed command string, recorded
+    in the decision log. When ``None``, defaults to ``command``.
 
     ``permission_mode`` is the documented Claude Code permission mode. Outside
     ``auto`` it is recorded in deny reasons and the log for context only. In
