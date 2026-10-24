@@ -76,6 +76,9 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- Development dependencies pulled in by pre-commit move past published
+  advisories: `filelock` 4.2.4 and `virtualenv` 21.14.13. Installed guard
+  doesn't use either.
 - A project allowlist (`.claude/guard/allowlist.json`) that git tracks can
   no longer loosen guard. Any repo could ship one with `"mode": "off"` or
   disabled rules and switch guard off for every agent working in it. The
