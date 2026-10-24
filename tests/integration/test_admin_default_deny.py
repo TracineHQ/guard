@@ -16,9 +16,9 @@ def _is_deny(result: dict[str, Any] | None) -> bool:
     return result is not None and result.get("permissionDecision") == "deny"
 
 
-def _is_allow(result: dict[str, Any] | None) -> bool:
-    """Passthrough (None) or explicit allow both count as allow."""
-    return result is None or result.get("permissionDecision") == "allow"
+def _passes(result: dict[str, Any] | None) -> bool:
+    """Guard gave no decision."""
+    return result is None
 
 
 @pytest.fixture
@@ -165,7 +165,7 @@ CLOUD_ADMIN_ALLOW = [
 @pytest.mark.parametrize("command", CLOUD_ADMIN_ALLOW)
 def test_admin_default_deny_allows(command: str) -> None:
     result = decide(command)
-    assert _is_allow(result), f"expected allow, got: {result}"
+    assert _passes(result), f"expected a pass, got: {result}"
 
 
 AWS_CATALOG_ALLOW = [
@@ -218,7 +218,7 @@ AWS_CATALOG_ALLOW = [
 def test_aws_catalog_allow(command: str) -> None:
     """Every enumerated service has at least one representative read verb that allows."""
     result = decide(command)
-    assert _is_allow(result), f"Expected allow for {command}; got {result}"
+    assert _passes(result), f"Expected a pass for {command}; got {result}"
 
 
 AWS_CATALOG_DENY = [
@@ -338,7 +338,7 @@ S3_WRAPPER_DENY = [
 
 @pytest.mark.parametrize("command", S3_WRAPPER_ALLOW)
 def test_s3_wrapper_allow(command: str) -> None:
-    assert _is_allow(decide(command))
+    assert _passes(decide(command))
 
 
 @pytest.mark.parametrize("command", S3_WRAPPER_DENY)
@@ -366,7 +366,7 @@ def test_override_rescue_allows(
 ) -> None:
     """GUARD_ADMIN_ALLOW_VERBS adds a (service, verb) tuple to the allowlist at runtime."""
     monkeypatch.setenv("GUARD_ADMIN_ALLOW_VERBS", override)
-    assert _is_allow(decide(command))
+    assert _passes(decide(command))
 
 
 def test_retired_allow_commands_do_not_override(
@@ -394,7 +394,7 @@ def test_override_disable_rule(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -
     (tmp_path / "allowlist.json").write_text(json.dumps(allowlist_data))
     monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path))
     result = decide("aws iam create-user --user-name evil")
-    assert _is_allow(result), f"expected allow via disable_rules, got: {result}"
+    assert _passes(result), f"expected a pass via disable_rules, got: {result}"
 
 
 @pytest.mark.usefixtures("_bust_allow_verbs_cache")
@@ -402,7 +402,7 @@ def test_override_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
     """Path 2: GUARD_ADMIN_ALLOW_VERBS adds per-verb allow."""
     monkeypatch.setenv("GUARD_ADMIN_ALLOW_VERBS", "aws:ec2.run-instances")
     result = decide("aws ec2 run-instances --image-id ami-xyz")
-    assert _is_allow(result), f"expected allow via env var, got: {result}"
+    assert _passes(result), f"expected a pass via env var, got: {result}"
 
 
 @pytest.mark.usefixtures("_bust_allow_verbs_cache")
@@ -410,7 +410,7 @@ def test_override_env_var_malformed(monkeypatch: pytest.MonkeyPatch) -> None:
     """Malformed entries in GUARD_ADMIN_ALLOW_VERBS are skipped silently."""
     monkeypatch.setenv("GUARD_ADMIN_ALLOW_VERBS", "malformed,,aws:ec2.run-instances,")
     result = decide("aws ec2 run-instances --image-id ami-xyz")
-    assert _is_allow(result)
+    assert _passes(result)
     result2 = decide("aws iam create-user --user-name x")
     assert _is_deny(result2), "command not allowed by env var should still deny"
 
@@ -420,7 +420,7 @@ def test_override_env_var_empty_cli_skipped(monkeypatch: pytest.MonkeyPatch) -> 
     """Entries with an empty CLI half (``:verb``, ``  :verb``) are dropped."""
     monkeypatch.setenv("GUARD_ADMIN_ALLOW_VERBS", ":get,  :list,aws:ec2.run-instances")
     result = decide("aws ec2 run-instances --image-id ami-xyz")
-    assert _is_allow(result), "valid entry after empty-CLI entries should still parse"
+    assert _passes(result), "valid entry after empty-CLI entries should still parse"
     # The bare ``:get`` / ``:list`` should not allow anything; an
     # otherwise-denied command must still deny.
     result2 = decide("aws iam delete-user --user-name x")

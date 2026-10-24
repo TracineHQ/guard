@@ -21,10 +21,6 @@ def _is_deny(decision: dict | None) -> bool:
     return decision is not None and decision.get("permissionDecision") == "deny"
 
 
-def _is_allow(decision: dict | None) -> bool:
-    return decision is not None and decision.get("permissionDecision") == "allow"
-
-
 # === FP-6a: sequence operators allow safe RHS ===
 
 

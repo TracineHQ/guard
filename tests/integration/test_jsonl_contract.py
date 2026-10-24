@@ -37,7 +37,7 @@ _REQUIRED_FIELDS = (
     "session_id",
 )
 
-_VALID_DECISIONS = {"allow", "deny", "pass", "defer"}
+_VALID_DECISIONS = {"deny", "pass"}
 
 
 def _run_hook(
