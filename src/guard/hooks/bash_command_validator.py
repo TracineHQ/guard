@@ -340,15 +340,31 @@ def strip_inline_comment(line: str) -> str:
 
 
 def _parameter_end(line: str, start: int) -> int:
-    """Index just past the ``}`` that closes the ``${`` at ``start``, else ``-1``."""
+    """Index just past the ``}`` that closes the ``${`` at ``start``, else ``-1``.
+
+    Bash closes ``${`` at the first ``}`` and nests only on another ``${``. A
+    ``${`` that is escaped or single-quoted is text, not a nest, and a quoted or
+    escaped ``}`` closes early: a short end splits more, so it fails closed.
+    """
     depth = 0
-    for i in range(start + 1, len(line)):
-        if line[i] == "{":
-            depth += 1
-        elif line[i] == "}":
+    quoted = False
+    i = start
+    while i < len(line):
+        c = line[i]
+        if c == "}":
             depth -= 1
             if depth == 0:
                 return i + 1
+        elif quoted:
+            quoted = c != "'"
+        elif c == "\\" and line[i + 1 : i + 2] != "}":
+            i += 1
+        elif c == "'":
+            quoted = True
+        elif c == "$" and line[i + 1 : i + 2] == "{":
+            depth += 1
+            i += 1
+        i += 1
     return -1
 
 

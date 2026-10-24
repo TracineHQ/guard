@@ -182,3 +182,7 @@
 {"command": "rm -rf build & rm -rf dist", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: two build directory removals"}
 {"command": "cd /tmp && sleep 1 &", "expected": "allow", "mode": "default", "source": "curated", "note": "a backgrounded command after cd"}
 {"command": "cd /tmp && sleep 1 &", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a backgrounded command after cd"}
+{"command": "echo ${x:-${y:-a&b}}", "expected": "allow", "mode": "default", "source": "curated", "note": "an & inside a nested parameter default"}
+{"command": "echo ${x:-${y:-a&b}}", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: an & inside a nested parameter default"}
+{"command": "echo ${x:-{} & sleep 1", "expected": "allow", "mode": "default", "source": "curated", "note": "a lone { in a parameter default and a harmless background command"}
+{"command": "echo ${x:-{} & sleep 1", "expected": "allow", "mode": "auto", "source": "curated", "note": "auto-mode counterpart: a lone { in a parameter default and a harmless background command"}

