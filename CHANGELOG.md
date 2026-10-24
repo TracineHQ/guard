@@ -78,11 +78,13 @@ adheres to [Semantic Versioning](https://semver.org/).
   `src/`, `bin/run-hook` and `hooks/hooks.json` for a source checkout, the
   package directory for a wheel. A clone or worktree of guard's source is
   ordinary code an agent may edit; the live install stays protected in every
-  mode. It matches the file, not the spelling: `~`, `$HOME`, `cd`, `pushd`
-  and `git -C` are resolved, a hard link or a spelling the volume folds is
-  the same file, and removing, moving, hard-linking or copying into a
-  directory that holds the install counts. The legacy hook-script patterns
-  match only under `.claude/hooks/`.
+  mode. It matches the file, not the spelling: `~`, `$HOME`, variables the
+  command sets (`F=...`, `for f in ...`), `cd`, `pushd` and `git -C` are
+  resolved, a hard link or a spelling the volume folds is the same file, and
+  removing, moving, hard-linking or copying into a directory that holds the
+  install counts. A name it can't know (`$X`, `$(...)`) inside the install,
+  or right beside it in a directory the command names, denies. The legacy
+  hook-script patterns match only under `.claude/hooks/`.
 - `protected_files` reads Bash the way bash does: comments, `$'...'`, line
   continuations, heredocs (a shell or interpreter reading one runs it; for
   anything else it is data), and `find -exec` with a read-only program. A

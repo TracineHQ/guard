@@ -41,7 +41,7 @@ from guard._utils import emit_pretooluse_decision, safe_main
 from guard.allowlist import apply_decision, load_allowlist
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Sequence
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
 
 _HOOK_ID = "guard.protected_files"
 
@@ -1173,25 +1173,64 @@ def _glob_matches(paths: Sequence[Path]) -> list[Path]:
     return found
 
 
+_VAR_RE = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
+
+
+def _substitute(word: str, env: Mapping[str, Sequence[str]]) -> list[str]:
+    """Expand the variables in ``word`` that the command itself set (capped)."""
+    pending, done = [word], list[str]()
+    for _ in range(_EXPANSION_LIMIT * 4):
+        if not pending or len(done) >= _EXPANSION_LIMIT:
+            break
+        current = pending.pop()
+        match = next((m for m in _VAR_RE.finditer(current) if (m[1] or m[2]) in env), None)
+        if match is None:
+            done.append(current)
+            continue
+        head, tail = current[: match.start()], current[match.end() :]
+        pending.extend(head + value + tail for value in env[match[1] or match[2]])
+    return [*done, *pending][:_EXPANSION_LIMIT]
+
+
+@dataclass
+class _Where:
+    """Where a target word can land."""
+
+    paths: list[Path] = field(default_factory=list)  # the absolute paths it names
+    tails: list[list[str]] = field(default_factory=list)  # known ends after an unknown part
+    # Where its unknown part starts, and whether the word named that directory
+    # (``$X`` alone starts in the working directory without naming it).
+    under: list[tuple[Path, bool]] = field(default_factory=list)
+
+
 def _target_paths(
-    target: str, dirs: Sequence[Path], *, cd_unknown: bool
-) -> tuple[list[Path], list[list[str]]]:
-    """Return the absolute paths ``target`` can name, and the tails guard can't place."""
-    paths: list[Path] = []
-    tails: list[list[str]] = []
-    for word in _expand_braces(_expand_word(target)):
+    target: str,
+    dirs: Sequence[Path],
+    *,
+    cd_unknown: bool,
+    env: Mapping[str, Sequence[str]] | None = None,
+) -> _Where:
+    """Return where ``target`` can land, from any of ``dirs``."""
+    where = _Where()
+    words = _substitute(target, env) if env else [target]
+    for word in itertools.chain.from_iterable(_expand_braces(_expand_word(w)) for w in words):
         parts = word.split("/")
         unknown = [i for i, part in enumerate(parts) if "$" in part or "`" in part]
         if unknown:
-            tails.append(parts[unknown[-1] + 1 :])
+            where.tails.append(parts[unknown[-1] + 1 :])
+            prefix = "/".join(parts[: unknown[0]])
+            if word.startswith("/"):
+                where.under.append((Path(prefix or "/"), True))
+            elif not cd_unknown:
+                where.under.extend((d / prefix, bool(prefix)) for d in dirs)
             continue
         if not word:
             continue
         found = [Path(word)] if word.startswith("/") else [d / word for d in dirs]
         if cd_unknown and not word.startswith("/"):
-            tails.append(parts)
-        paths.extend([*found, *_glob_matches(found)])
-    return paths, tails
+            where.tails.append(parts)
+        where.paths.extend([*found, *_glob_matches(found)])
+    return where
 
 
 def _normalize_tail(tail: Sequence[str]) -> list[str]:
@@ -1284,8 +1323,9 @@ def _word_names_live(word: str, dirs: Sequence[Path], *, whole_dirs: bool) -> st
     such as ``/guard/_utils.py`` (code can join it onto anything), is
     checked as a tail.
     """
-    paths, tails = _target_paths(word, dirs, cd_unknown=False)
-    for path in paths:
+    where = _target_paths(word, dirs, cd_unknown=False)
+    tails = where.tails
+    for path in where.paths:
         resolved = _resolve(path)
         if resolved is None:
             continue
@@ -1365,7 +1405,37 @@ def _short_flag_has(token: str, letter: str) -> bool:
     return token.startswith("-") and not token.startswith("--") and letter in token[1:]
 
 
-def _cd_moves(tokens: list[str], dirs: Sequence[Path]) -> tuple[list[Path], bool]:
+_DECLARE_WORDS = frozenset({"export", "declare", "local", "readonly", "typeset"})
+
+
+def _assignments(tokens: list[str]) -> list[tuple[str, list[str]]]:
+    """Return the variables a command sets and the words each can hold.
+
+    ``X=v`` before the command or after ``export`` and the like, and the
+    words of ``for X in ...``.
+    """
+    if len(tokens) > 2 and tokens[0] == "for" and tokens[2] == "in":  # noqa: PLR2004 -- for X in
+        return [(tokens[1], tokens[3:])]
+    found: list[tuple[str, list[str]]] = []
+    for tok in tokens:
+        if _ASSIGN_RE.match(tok):
+            name, _, value = tok.partition("=")
+            found.append((name, [value]))
+        elif not (tok in _DECLARE_WORDS or tok in _LEAD_WORDS or tok.startswith("-")):
+            break
+    return found
+
+
+def _record_assignments(tokens: list[str], env: dict[str, list[str]]) -> None:
+    """Add what ``tokens`` assign to ``env``, keeping earlier values too (branches)."""
+    for name, words in _assignments(tokens):
+        values = [v for word in words for v in _substitute(word, env)]
+        env[name] = list(dict.fromkeys([*env.get(name, []), *values]))[:_EXPANSION_LIMIT]
+
+
+def _cd_moves(
+    tokens: list[str], dirs: Sequence[Path], env: Mapping[str, Sequence[str]] | None = None
+) -> tuple[list[Path], bool]:
     """Return where a ``cd``/``pushd`` in ``tokens`` can move, and whether one is unknown.
 
     ``git -C <dir>`` and ``env -C <dir>`` count too: the command they run
@@ -1387,9 +1457,9 @@ def _cd_moves(tokens: list[str], dirs: Sequence[Path]) -> tuple[list[Path], bool
         if arg is None:
             moved.append(Path.home())
             continue
-        paths, tails = _target_paths(arg, dirs, cd_unknown=False)
-        moved.extend(paths)
-        lost = lost or bool(tails) or arg == "-" or arg.startswith("+")
+        where = _target_paths(arg, dirs, cd_unknown=False, env=env)
+        moved.extend(where.paths)
+        lost = lost or bool(where.tails) or arg == "-" or arg.startswith("+")
     return moved, lost
 
 
@@ -1696,22 +1766,52 @@ class _Scan:
     ``dirs`` are the directories the command may be in: where it started,
     plus every directory a literal ``cd`` or ``pushd`` can move it to.
     ``cd_unknown`` is set once a ``cd`` goes somewhere guard can't follow.
+    ``env`` holds the variables the command has set so far.
     """
 
     patterns: Sequence[str]
     dirs: list[Path]
     cd_unknown: bool = False
     depth: int = 0
+    env: dict[str, list[str]] = field(default_factory=dict)
 
     def nested(self) -> _Scan:
         """Return the scan for a command this one hands to a shell."""
-        return _Scan(self.patterns, [*self.dirs], self.cd_unknown, self.depth + 1)
+        return _Scan(self.patterns, [*self.dirs], self.cd_unknown, self.depth + 1, {**self.env})
+
+
+def _under_match(where: Path, patterns: Sequence[str], *, named: bool) -> str | None:
+    """Return the trust root a name guard can't know, starting at ``where``, could reach.
+
+    That is any name inside the live tree, one right beside a live entry
+    when the command named that directory (``<checkout>/$X`` could be
+    ``src``), or a trust-root file's name in its own directory.
+    """
+    resolved = _resolve(where)
+    if resolved is None:
+        return None
+    if _has_live(patterns):
+        folded = _normcase(str(resolved))
+        beside = (e for e in _LIVE_TREE if named and _normcase(str(Path(e).parent)) == folded)
+        live = _live_entry(resolved) or next(beside, None)
+        if live is not None:
+            return live
+    roots = (p for p in patterns if p in PROTECTED_PATTERNS and p not in _LIVE_TREE)
+    return next(
+        (m for p in roots if (m := is_protected(str(resolved / PurePosixPath(p).name), patterns))),
+        None,
+    )
 
 
 def _target_match(target: str, scan: _Scan, kind: str) -> str | None:
     """Match one target: ``kind`` is ``file``, ``dir`` (tar -C) or ``tree``."""
-    paths, tails = _target_paths(target, scan.dirs, cd_unknown=scan.cd_unknown)
-    for path in paths:
+    where = _target_paths(target, scan.dirs, cd_unknown=scan.cd_unknown, env=scan.env)
+    for under, named in where.under:
+        matched = _under_match(under, scan.patterns, named=named)
+        if matched is not None:
+            return matched
+    tails = where.tails
+    for path in where.paths:
         if kind == "file":
             matched = is_protected(str(path), scan.patterns)
         elif kind == "dir":
@@ -1826,7 +1926,8 @@ def _scan_segments(flat: str, scan: _Scan) -> str | None:
             tokens = _tokens(segment)
         except ValueError:
             tokens = _loose_tokens(segment)
-        moved, lost = _cd_moves(tokens, scan.dirs)
+        _record_assignments(tokens, scan.env)
+        moved, lost = _cd_moves(tokens, scan.dirs, scan.env)
         scan.dirs.extend(moved)
         scan.cd_unknown = scan.cd_unknown or lost
         matched = _segment_match(segment, tokens, scan)

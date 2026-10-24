@@ -71,10 +71,10 @@ The validators are written with that in mind:
   path: everything under its `src/` (a module dropped there would shadow an
   import), `bin/run-hook` and `hooks/hooks.json` for a source checkout, the
   package directory for a wheel. It matches the file, not the spelling:
-  `~`, `$HOME`, `cd` and `git -C` are resolved, a hard link or a spelling
-  the volume folds is the same inode, and removing, moving, hard-linking or
-  copying into a directory that holds the install counts. A clone or
-  worktree of the source is ordinary code.
+  `~`, `$HOME`, variables the command sets, `cd` and `git -C` are
+  resolved, a hard link or a spelling the volume folds is the same inode,
+  and removing, moving, hard-linking or copying into a directory that holds
+  the install counts. A clone or worktree of the source is ordinary code.
 
 ## AWS allow/deny policy
 

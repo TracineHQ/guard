@@ -390,6 +390,19 @@ _UNRESOLVED_SHAPES: list[tuple[str, bool]] = [
     ('cd "$GUARD_TEST_UNSET" && echo {} > allowlist.json', True),
     ("cp /tmp/x $GUARD_TEST_UNSET/out/report.txt", False),
     ('cd "$GUARD_TEST_UNSET" && echo x > notes.txt', False),
+    # A name guard can't know, inside the install or beside a live entry.
+    (f"cp /tmp/x {_GUARD}/$GUARD_TEST_UNSET", True),
+    (f"cp /tmp/x {_PARENT}/$GUARD_TEST_UNSET", True),
+    (f'cd {_GUARD} && cp /tmp/x "$GUARD_TEST_UNSET"', True),
+    ("cp /tmp/x /tmp/x/.claude/guard/$GUARD_TEST_UNSET", True),
+    ("cp /tmp/x /tmp/$GUARD_TEST_UNSET", False),
+    ('cp /tmp/x "$GUARD_TEST_UNSET"', False),
+    # Variables the command sets are followed.
+    (f'F={_GUARD}/_utils.py; cp /tmp/x "$F"', True),
+    (f'for f in {_GUARD}/*.py; do cp /tmp/x "$f"; done', True),
+    (f'export D={_GUARD}; cd "$D" && touch x.py', True),
+    (f'G={_ROOT}; F="$G/{_REL}/_utils.py"; echo x > "$F"', True),
+    (f'F=/tmp/out.txt; cp {_GUARD}/_utils.py "$F"', False),
     # Names every package has don't place an unknown path in guard.
     ('rm -rf "$GUARD_TEST_UNSET/__pycache__"', False),
     ('cd "$GUARD_TEST_UNSET" && mv __pycache__ /tmp/old', False),
