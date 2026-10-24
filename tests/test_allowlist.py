@@ -102,6 +102,23 @@ def test_lockdown_in_project_file_is_ignored_too(
     assert "retired" in capsys.readouterr().err
 
 
+def test_global_lockdown_mode_is_retired_and_reported_once(
+    isolated_homes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    from guard.allowlist import load_allowlist
+
+    gdir, cwd = isolated_homes
+    _write(gdir / "allowlist.json", {"mode": "lockdown", "disable_rules": ["bash.npx_remote"]})
+    al = load_allowlist(cwd=cwd)
+    assert al.mode == "enforce"
+    assert al.disable_rules == {"bash.npx_remote"}
+    assert capsys.readouterr().err.splitlines() == [
+        "guard: allowlist: mode lockdown is retired and ignored; see guard's CHANGELOG"
+    ]
+    load_allowlist(cwd=cwd)
+    assert capsys.readouterr().err == ""
+
+
 def test_global_allow_commands_are_ignored_and_reported_once(
     isolated_homes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -8,7 +8,6 @@ from guard.registry import (
     ALWAYS_DENY,
     COMMANDS,
     SAFE_PREFIXES,
-    STRICT_FEEDBACK,
     CommandRule,
     Safety,
     get_rules_by_category,
@@ -35,7 +34,6 @@ def test_registry_imports_ok() -> None:
 
 def test_safety_enum_values() -> None:
     assert Safety.ALLOW.value == "allow"
-    assert Safety.ASK.value == "ask"
     assert Safety.DENY.value == "deny"
 
 
@@ -69,13 +67,6 @@ def test_always_deny_contains_git_add_all() -> None:
 def test_safe_prefixes_contains_git_read() -> None:
     assert "git status" in SAFE_PREFIXES
     assert "git log" in SAFE_PREFIXES
-
-
-def test_strict_feedback_only_for_ask_rules() -> None:
-    for prefix, msg in STRICT_FEEDBACK.items():
-        rule = next(r for r in COMMANDS if r.prefix == prefix)
-        assert rule.safety is Safety.ASK
-        assert msg, f"feedback for {prefix!r} must be non-empty"
 
 
 def test_get_rules_by_safety() -> None:

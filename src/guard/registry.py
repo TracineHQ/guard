@@ -2,14 +2,14 @@
 # Copyright 2026 TracineHQ contributors
 """Single source of truth for command safety classifications.
 
-Imported by ``bash_command_validator`` for ``SAFE_PREFIXES``,
-``STRICT_FEEDBACK`` and the synthetic-deny lookup tables.
+Imported by ``bash_command_validator`` for ``SAFE_PREFIXES`` and the
+synthetic-deny lookup tables.
 """
 # The COMMANDS table is the contract for this module. Lints that would force
 # restructuring it are silenced:
 #   D101: Safety/CommandRule are self-describing; docstrings would just restate names.
-#   E501: a few strict_feedback strings are slightly over 100 chars; rewriting
-#         them changes the user-visible message.
+#   E501: a few reason strings are slightly over 100 chars; rewriting them
+#         changes the user-visible message.
 # ruff: noqa: D101, E501
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from enum import Enum
 
 class Safety(Enum):
     ALLOW = "allow"
-    ASK = "ask"
     DENY = "deny"
 
 
@@ -31,7 +30,6 @@ class CommandRule:
     reason: str
     category: str
     pipe_safe: bool = False
-    strict_feedback: str = ""
     # When True, the command is documented as ALLOW for permission generation
     # but is NOT exported via SAFE_PREFIXES. Bash command validation must route
     # the prefix through a custom classifier (e.g. `_is_safe_env`,
@@ -66,126 +64,6 @@ COMMANDS: list[CommandRule] = [
     CommandRule("git name-rev", Safety.ALLOW, "Read-only git", "git-read"),
     CommandRule("git mv", Safety.ALLOW, "Renames files (safe)", "git-write-safe"),
     CommandRule("git worktree", Safety.ALLOW, "Worktree management for agents", "git-write-safe"),
-    # --- Git Write (ASK) ---
-    CommandRule(
-        "git add",
-        Safety.ASK,
-        "Stages files",
-        "git-write",
-        strict_feedback="Queue git add for session end. Continue implementing.",
-    ),
-    CommandRule(
-        "git commit",
-        Safety.ASK,
-        "Creates commit",
-        "git-write",
-        strict_feedback="Queue git commit for session end. Continue implementing.",
-    ),
-    CommandRule(
-        "git push",
-        Safety.ASK,
-        "Pushes to remote",
-        "git-write",
-        strict_feedback="Queue git push for session end. Complete all work first.",
-    ),
-    CommandRule(
-        "git pull",
-        Safety.ASK,
-        "Pulls from remote",
-        "git-write",
-        strict_feedback="Git pull requires confirmation. Note it for session end.",
-    ),
-    CommandRule(
-        "git fetch",
-        Safety.ASK,
-        "Fetches from remote",
-        "git-write",
-        strict_feedback="Queue git fetch for session end.",
-    ),
-    CommandRule(
-        "git checkout",
-        Safety.ASK,
-        "Switches branches",
-        "git-write",
-        strict_feedback="Use 'git branch' to check branches. Queue checkout for session end.",
-    ),
-    CommandRule(
-        "git switch",
-        Safety.ASK,
-        "Switches branches",
-        "git-write",
-        strict_feedback="Queue branch switch for session end.",
-    ),
-    CommandRule(
-        "git merge",
-        Safety.ASK,
-        "Merges branches",
-        "git-write",
-        strict_feedback="Queue merge for session end.",
-    ),
-    CommandRule(
-        "git rebase",
-        Safety.ASK,
-        "Rebases commits",
-        "git-write",
-        strict_feedback="Queue rebase for session end.",
-    ),
-    CommandRule(
-        "git reset",
-        Safety.ASK,
-        "Resets state",
-        "git-write",
-        strict_feedback="Git reset is destructive. Flag for human review.",
-    ),
-    CommandRule(
-        "git revert",
-        Safety.ASK,
-        "Reverts commits",
-        "git-write",
-        strict_feedback="Queue revert for session end.",
-    ),
-    CommandRule(
-        "git stash",
-        Safety.ASK,
-        "Stashes changes",
-        "git-write",
-        strict_feedback="Use Write tool to save state to a file instead.",
-    ),
-    CommandRule(
-        "git stash pop",
-        Safety.ASK,
-        "Pops stash",
-        "git-write",
-        strict_feedback="Queue stash pop for session end.",
-    ),
-    CommandRule(
-        "git stash drop",
-        Safety.ASK,
-        "Drops stash",
-        "git-write",
-        strict_feedback="Queue stash drop for session end.",
-    ),
-    CommandRule(
-        "git clean",
-        Safety.ASK,
-        "Removes untracked files",
-        "git-write",
-        strict_feedback="Git clean is destructive. Flag for human review.",
-    ),
-    CommandRule(
-        "git restore",
-        Safety.ASK,
-        "Discards changes",
-        "git-write",
-        strict_feedback="Git restore discards work. Flag for human review.",
-    ),
-    CommandRule(
-        "git cherry-pick",
-        Safety.ASK,
-        "Cherry-picks commits",
-        "git-write",
-        strict_feedback="Queue cherry-pick for session end.",
-    ),
     # git branch -d/-m and git tag -a/-d (and bare ``tag/branch <name>`` creation,
     # remote write-actions) are denied in BOTH modes by the ``git_ref_violation``
     # predicate via the ``bash.git_ref_mutation`` synthetic matcher -- a ref
@@ -405,340 +283,6 @@ COMMANDS: list[CommandRule] = [
     CommandRule("docker logs", Safety.ALLOW, "Container logs", "docker-read"),
     CommandRule("docker images", Safety.ALLOW, "List images", "docker-read"),
     CommandRule("docker inspect", Safety.ALLOW, "Inspect container", "docker-read"),
-    # --- Destructive File Ops (ASK) ---
-    CommandRule(
-        "rm",
-        Safety.ASK,
-        "Delete files",
-        "file-write",
-        strict_feedback="File deletion requires confirmation. Flag files for deletion at session end.",
-    ),
-    CommandRule(
-        "rm -rf",
-        Safety.ASK,
-        "Force delete files",
-        "file-write",
-        strict_feedback="Recursive deletion requires confirmation. Flag for session end.",
-    ),
-    CommandRule(
-        "rmdir",
-        Safety.ASK,
-        "Delete directory",
-        "file-write",
-        strict_feedback="Directory deletion requires confirmation. Flag for session end.",
-    ),
-    CommandRule(
-        "mv",
-        Safety.ASK,
-        "Move/rename files",
-        "file-write",
-        strict_feedback="Use Write tool to create new file, flag old for deletion at session end.",
-    ),
-    # --- GitHub CLI Write (ASK) ---
-    CommandRule(
-        "gh pr create",
-        Safety.ASK,
-        "Create PR",
-        "gh-write",
-        strict_feedback="Queue PR creation for session end.",
-    ),
-    CommandRule(
-        "gh pr merge",
-        Safety.ASK,
-        "Merge PR",
-        "gh-write",
-        strict_feedback="Queue PR merge for session end.",
-    ),
-    CommandRule(
-        "gh pr close",
-        Safety.ASK,
-        "Close PR",
-        "gh-write",
-        strict_feedback="Queue PR close for session end.",
-    ),
-    CommandRule(
-        "gh pr comment",
-        Safety.ASK,
-        "Comment on PR",
-        "gh-write",
-        strict_feedback="Queue PR comment for session end.",
-    ),
-    CommandRule(
-        "gh pr review",
-        Safety.ASK,
-        "Review PR",
-        "gh-write",
-        strict_feedback="Queue PR review for session end.",
-    ),
-    CommandRule(
-        "gh pr edit",
-        Safety.ASK,
-        "Edit PR",
-        "gh-write",
-        strict_feedback="Queue PR edit for session end.",
-    ),
-    CommandRule(
-        "gh pr reopen",
-        Safety.ASK,
-        "Reopen PR",
-        "gh-write",
-        strict_feedback="Queue PR reopen for session end.",
-    ),
-    CommandRule(
-        "gh issue create",
-        Safety.ASK,
-        "Create issue",
-        "gh-write",
-        strict_feedback="Queue issue creation for session end.",
-    ),
-    CommandRule(
-        "gh issue close",
-        Safety.ASK,
-        "Close issue",
-        "gh-write",
-        strict_feedback="Queue issue close for session end.",
-    ),
-    CommandRule(
-        "gh issue comment",
-        Safety.ASK,
-        "Comment on issue",
-        "gh-write",
-        strict_feedback="Queue issue comment for session end.",
-    ),
-    CommandRule(
-        "gh issue edit",
-        Safety.ASK,
-        "Edit issue",
-        "gh-write",
-        strict_feedback="Queue issue edit for session end.",
-    ),
-    CommandRule(
-        "gh release create",
-        Safety.ASK,
-        "Create release",
-        "gh-write",
-        strict_feedback="Queue release creation for session end.",
-    ),
-    CommandRule(
-        "gh run cancel",
-        Safety.ASK,
-        "Cancel workflow run",
-        "gh-write",
-        strict_feedback="Queue run cancellation for session end.",
-    ),
-    CommandRule(
-        "gh run rerun",
-        Safety.ASK,
-        "Rerun workflow",
-        "gh-write",
-        strict_feedback="Queue workflow rerun for session end.",
-    ),
-    CommandRule(
-        "gh workflow run",
-        Safety.ASK,
-        "Trigger workflow",
-        "gh-write",
-        strict_feedback="Queue workflow trigger for session end.",
-    ),
-    # --- Docker Write (ASK) ---
-    CommandRule(
-        "docker run",
-        Safety.ASK,
-        "Run container",
-        "docker-write",
-        strict_feedback="Container execution requires confirmation. Queue for session end.",
-    ),
-    CommandRule(
-        "docker stop",
-        Safety.ASK,
-        "Stop container",
-        "docker-write",
-        strict_feedback="Queue container stop for session end.",
-    ),
-    CommandRule(
-        "docker rm",
-        Safety.ASK,
-        "Remove container",
-        "docker-write",
-        strict_feedback="Queue container removal for session end.",
-    ),
-    CommandRule(
-        "docker rmi",
-        Safety.ASK,
-        "Remove image",
-        "docker-write",
-        strict_feedback="Queue image removal for session end.",
-    ),
-    CommandRule(
-        "docker build",
-        Safety.ASK,
-        "Build image",
-        "docker-write",
-        strict_feedback="Queue docker build for session end.",
-    ),
-    CommandRule(
-        "docker push",
-        Safety.ASK,
-        "Push image",
-        "docker-write",
-        strict_feedback="Queue image push for session end.",
-    ),
-    CommandRule(
-        "docker pull",
-        Safety.ASK,
-        "Pull image",
-        "docker-write",
-        strict_feedback="Queue image pull for session end.",
-    ),
-    CommandRule(
-        "docker compose up",
-        Safety.ASK,
-        "Start compose",
-        "docker-write",
-        strict_feedback="Queue compose up for session end.",
-    ),
-    CommandRule(
-        "docker compose down",
-        Safety.ASK,
-        "Stop compose",
-        "docker-write",
-        strict_feedback="Queue compose down for session end.",
-    ),
-    CommandRule(
-        "docker system prune",
-        Safety.ASK,
-        "Prune docker",
-        "docker-write",
-        strict_feedback="Docker prune is destructive. Flag for human review.",
-    ),
-    # --- Cloud Write (ASK) ---
-    CommandRule(
-        "gcloud secrets versions access",
-        Safety.ASK,
-        "Access secret",
-        "cloud-write",
-        strict_feedback="Secret access requires confirmation. Queue for session end.",
-    ),
-    CommandRule(
-        "gcloud secrets create",
-        Safety.ASK,
-        "Create secret",
-        "cloud-write",
-        strict_feedback="Queue secret creation for session end.",
-    ),
-    CommandRule(
-        "gcloud secrets versions add",
-        Safety.ASK,
-        "Add secret version",
-        "cloud-write",
-        strict_feedback="Queue secret version add for session end.",
-    ),
-    CommandRule(
-        "gcloud services enable",
-        Safety.ASK,
-        "Enable service",
-        "cloud-write",
-        strict_feedback="Queue service enable for session end.",
-    ),
-    CommandRule(
-        "gcloud iam",
-        Safety.ASK,
-        "IAM operations",
-        "cloud-write",
-        strict_feedback="IAM changes require confirmation. Queue for session end.",
-    ),
-    CommandRule(
-        "gcloud auth print-access-token",
-        Safety.ASK,
-        "Print access token",
-        "cloud-write",
-        strict_feedback="Token access requires confirmation. Queue for session end.",
-    ),
-    CommandRule(
-        "gcloud auth print-identity-token",
-        Safety.ASK,
-        "Print identity token",
-        "cloud-write",
-        strict_feedback="Token access requires confirmation. Queue for session end.",
-    ),
-    CommandRule(
-        "gcloud run deploy",
-        Safety.ASK,
-        "Deploy Cloud Run",
-        "cloud-write",
-        strict_feedback="Deployment requires confirmation. Queue for session end.",
-    ),
-    CommandRule(
-        "gcloud app deploy",
-        Safety.ASK,
-        "Deploy App Engine",
-        "cloud-write",
-        strict_feedback="Deployment requires confirmation. Queue for session end.",
-    ),
-    # --- Terraform Write (ASK) ---
-    CommandRule(
-        "terraform apply",
-        Safety.ASK,
-        "Apply terraform",
-        "terraform-write",
-        strict_feedback="Terraform apply requires confirmation. Queue for session end.",
-    ),
-    CommandRule(
-        "terraform import",
-        Safety.ASK,
-        "Import resource",
-        "terraform-write",
-        strict_feedback="Queue terraform import for session end.",
-    ),
-    CommandRule(
-        "terraform state mv",
-        Safety.ASK,
-        "Move state",
-        "terraform-write",
-        strict_feedback="Queue state move for session end.",
-    ),
-    CommandRule(
-        "terraform state rm",
-        Safety.ASK,
-        "Remove from state",
-        "terraform-write",
-        strict_feedback="Queue state removal for session end.",
-    ),
-    CommandRule(
-        "terraform taint",
-        Safety.ASK,
-        "Taint resource",
-        "terraform-write",
-        strict_feedback="Queue taint for session end.",
-    ),
-    CommandRule(
-        "terraform untaint",
-        Safety.ASK,
-        "Untaint resource",
-        "terraform-write",
-        strict_feedback="Queue untaint for session end.",
-    ),
-    CommandRule(
-        "terraform workspace new",
-        Safety.ASK,
-        "New workspace",
-        "terraform-write",
-        strict_feedback="Queue workspace creation for session end.",
-    ),
-    CommandRule(
-        "terraform workspace select",
-        Safety.ASK,
-        "Select workspace",
-        "terraform-write",
-        strict_feedback="Queue workspace switch for session end.",
-    ),
-    CommandRule(
-        "terraform workspace delete",
-        Safety.ASK,
-        "Delete workspace",
-        "terraform-write",
-        strict_feedback="Queue workspace deletion for session end.",
-    ),
     # --- Terraform DENY ---
     CommandRule("terraform destroy", Safety.DENY, "Destroys infrastructure", "terraform-deny"),
     # --- Catastrophic-deletion DENY ---
@@ -789,9 +333,7 @@ COMMANDS: list[CommandRule] = [
     ),
     # --- Interpreter RCE DENY ---
     # `python -c`, `python3 -c`, `node -e`, `node --eval` are canonical RCE
-    # primitives — denied under enforce and lockdown. Note:
-    # `_is_safe_interpreter` further restricts ANY flagged form in lockdown;
-    # these entries exist so enforce denies them too.
+    # primitives.
     CommandRule(
         "python -c",
         Safety.DENY,
@@ -825,35 +367,6 @@ COMMANDS: list[CommandRule] = [
         Safety.DENY,
         "env -i clears the environment and is commonly used to wrap RCE; not allowed.",
         "env-deny",
-    ),
-    # --- Python Package Install (ASK) ---
-    CommandRule(
-        "pip install",
-        Safety.ASK,
-        "Install package",
-        "package-mgmt",
-        strict_feedback="Package install requires confirmation. Queue for session end.",
-    ),
-    CommandRule(
-        "pip uninstall",
-        Safety.ASK,
-        "Uninstall package",
-        "package-mgmt",
-        strict_feedback="Package uninstall requires confirmation. Queue for session end.",
-    ),
-    CommandRule(
-        "uv pip install",
-        Safety.ASK,
-        "UV install package",
-        "package-mgmt",
-        strict_feedback="Package install requires confirmation. Queue for session end.",
-    ),
-    CommandRule(
-        "make install",
-        Safety.ASK,
-        "Make install",
-        "package-mgmt",
-        strict_feedback="Package install requires confirmation. Queue for session end.",
     ),
     # --- Orchestration Destruction (DENY) ---
     # Each shape below has no legitimate dev-time variant. The literal-prefix
@@ -920,43 +433,14 @@ COMMANDS: list[CommandRule] = [
         "World-writable recursion against /* is catastrophic.",
         "chmod-deny",
     ),
-    # --- Orchestration Destruction (ASK) ---
-    # Documented for permission generation; have legitimate variants but
-    # warrant explicit user confirmation. (Runtime ASK behavior in interactive
-    # mode falls through to passthrough; these entries primarily document
-    # intent for the marketplace permission manifest.)
-    CommandRule(
-        "docker container prune",
-        Safety.ASK,
-        "Prunes stopped containers",
-        "docker-mgmt",
-        strict_feedback="Docker prune is destructive. Flag for human review.",
-    ),
-    CommandRule(
-        "docker volume prune",
-        Safety.ASK,
-        "Prunes unused volumes (data loss risk)",
-        "docker-mgmt",
-        strict_feedback="Docker volume prune deletes data. Flag for human review.",
-    ),
-    CommandRule(
-        "aws s3 rm",
-        Safety.ASK,
-        "S3 object removal",
-        "aws-mgmt",
-        strict_feedback="S3 deletion requires confirmation. Queue for session end.",
-    ),
 ]
 
 
 # === Guard's own read-only CLI subcommands (auto-registered, drift-tested) ===
 # These guard subcommands are dry-run / read-only by construction: they print or
 # inspect state, and ``guard test <cmd>`` analyzes a command string WITHOUT
-# executing it. Registering them keeps lockdown's default-deny from blocking
-# guard's own diagnostic tooling -- the friction that made
-# ``uv run guard test`` itself undeniable in an unattended session. WRITE
-# subcommands (``mode``, ``migrate-log``, and the ``allowlist`` mutators) are
-# excluded: they change guard's config and must not be blanket-allowed. The
+# executing it. WRITE subcommands (``mode``, ``migrate-log``, and the
+# ``allowlist`` mutators) are excluded: they change guard's config. The
 # allowlist's read-only sub-subcommands (``list`` / ``rules``) are registered
 # explicitly. Drift-proof: a CLI-introspection test asserts every subcommand is
 # classified in exactly one of the read-only / write sets, so a new subcommand
@@ -980,17 +464,12 @@ _GUARD_SAFE_PREFIXES: frozenset[str] = frozenset(
 # === convo: first-party read-only conversation-history CLI ===
 # convo (TracineHQ/convo) is guard's sibling diagnostic -- it queries an index of
 # Claude Code transcripts. Its query subcommands print analytics and mutate no
-# repo or system state, so registering them keeps lockdown from default-denying
-# the agent's (and the control plane's) own introspection tooling -- the same
-# friction guard's own ``test`` / ``corpus`` subcommands hit before they were
-# registered. Unlike GUARD_READ_ONLY_SUBCOMMANDS, this list is NOT drift-tested
-# against a live parser (guard cannot import convo's CLI), so it is deliberately
-# fail-safe: write-side subcommands (``backup`` / ``restore`` / ``index`` /
+# repo or system state. Unlike GUARD_READ_ONLY_SUBCOMMANDS, this list is NOT
+# drift-tested against a live parser (guard cannot import convo's CLI), so
+# write-side subcommands (``backup`` / ``restore`` / ``index`` /
 # ``index-guard``, which rebuild or restore convo's local DB cache) and any
-# future convo subcommand are simply
-# absent, which means lockdown still denies them (enforce passes them through) --
-# drift can only under-permit, never silently auto-allow something new. The
-# behavior is pinned by tests/corpus/convo.jsonl.
+# future convo subcommand are simply absent. The behavior is pinned by
+# tests/corpus/convo.jsonl.
 CONVO_READ_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
     {
         "summary",
@@ -1022,12 +501,6 @@ SAFE_PREFIXES: frozenset[str] = (
 )
 
 SAFE_PIPE_COMMANDS: frozenset[str] = frozenset(cmd.prefix for cmd in COMMANDS if cmd.pipe_safe)
-
-STRICT_FEEDBACK: dict[str, str] = {
-    cmd.prefix: cmd.strict_feedback
-    for cmd in COMMANDS
-    if cmd.safety == Safety.ASK and cmd.strict_feedback
-}
 
 ALWAYS_DENY: frozenset[str] = frozenset(cmd.prefix for cmd in COMMANDS if cmd.safety == Safety.DENY)
 
@@ -1458,8 +931,7 @@ def get_rules_by_category(category: str) -> list[CommandRule]:
 # full conversation in view; guard sees one tool call. So in ``auto`` guard
 # keeps only its hard floor: FLOOR rules deny exactly as in every other mode,
 # STEER rules return no decision (logged as a ``pass``) and leave the call to
-# Claude Code's flow. Every other permission mode, and ``guard mode lockdown``,
-# denies on both tiers as before.
+# Claude Code's flow. Every other permission mode denies on both tiers.
 #
 # FLOOR: irreversible or catastrophic, code injection, hook / guard evasion,
 # supply chain, credential exfiltration, and boundaries the auto classifier
@@ -1614,7 +1086,6 @@ RULE_TIERS: dict[str, TierEntry] = {
         _S,
         "schedules code past the session (cron, launchd, systemd); the classifier judges the job",
     ),
-    "bash.admin_unknown_flag_strict": TierEntry(_S, "lockdown-only unknown-flag escalation"),
     "bash.conditional_denied_flag": TierEntry(_S, "find -exec / -delete, yq -i on a project path"),
     "bash.dangerous_construct": TierEntry(
         _S,
@@ -1644,8 +1115,6 @@ RULE_TIERS: dict[str, TierEntry] = {
     ),
     "bash.tool_alternative": TierEntry(_S, "prefer-a-dedicated-tool nudge"),
     "bash.use_corpus_harness": TierEntry(_S, "guard-checkout workflow nudge"),
-    "bash.strict_default_deny": TierEntry(_S, "lockdown-only default deny"),
-    "bash.strict_feedback": TierEntry(_S, "lockdown-only feedback deny"),
     # --- git_c_validator (sub-shapes; the allowlist key is the hook id) ---
     "guard.git_c_validator": TierEntry(_F, "unclassified git -C deny fails closed"),
     "guard.git_c_validator:paths_config": TierEntry(
@@ -1728,14 +1197,14 @@ def rule_tier(key: str) -> Tier:
     return entry.tier if entry is not None else Tier.FLOOR
 
 
-def defers_steer(permission_mode: str | None, *, lockdown: bool) -> bool:
-    """True when STEER rules hand the call to Claude Code (``auto``, not lockdown)."""
-    return permission_mode == AUTO_PERMISSION_MODE and not lockdown
+def defers_steer(permission_mode: str | None) -> bool:
+    """True when STEER rules hand the call to Claude Code (``auto``)."""
+    return permission_mode == AUTO_PERMISSION_MODE
 
 
-def is_deferred_to_auto(key: str, permission_mode: str | None, *, lockdown: bool) -> bool:
+def is_deferred_to_auto(key: str, permission_mode: str | None) -> bool:
     """True when a deny under ``key`` becomes an auto-mode pass."""
-    return defers_steer(permission_mode, lockdown=lockdown) and rule_tier(key) is Tier.STEER
+    return defers_steer(permission_mode) and rule_tier(key) is Tier.STEER
 
 
 def auto_pass_reason(key: str) -> str:

@@ -7,8 +7,7 @@ produce a deny envelope) and LEGIT_CASES (must NOT deny). Every shape
 the matchers are designed to catch is exercised at least once.
 
 Tests run against the live ``decide()`` in interactive mode (permission_mode
-default) — this is the worst-case for false-negatives because strict
-mode default-denies anything not on the safe-prefix allowlist.
+default).
 """
 
 from __future__ import annotations
@@ -131,7 +130,6 @@ INTERPRETER_INLINE_CODE_DENY = [
 def test_interpreter_inline_code_denied(command: str) -> None:
     res = decide(command)
     assert _is_deny(res), f"inline-code bypass: {command!r} -> {res}"
-    assert _is_deny(decide(command, lockdown=True)), f"inline-code bypass: {command!r}"
 
 
 @pytest.mark.parametrize("command", INTERPRETER_LEGIT)
@@ -143,9 +141,8 @@ def test_interpreter_help_version_not_denied(command: str) -> None:
 # ============================================================================
 # python -m / python <script> — module + script execution
 # ============================================================================
-# Script and module runs are project work: not denied in enforce (they pass
-# through to Claude Code's own permission flow), but never known-safe, so
-# lockdown default-denies them.
+# Script and module runs are project work: not denied (they pass through to
+# Claude Code's own permission flow) and never known-safe.
 
 INTERPRETER_MODULE_OR_SCRIPT_RUNS = [
     # --- network / listener / encode / archive / installer modules ---
@@ -191,7 +188,7 @@ INTERPRETER_MODULE_OR_SCRIPT_RUNS = [
     "osascript ~/Library/x.scpt",
     "python ./local_script.py",
     "deno run -A main.ts",
-    # --- wrapped runs (env / runner wrappers are peeled for lockdown) ---
+    # --- wrapped runs ---
     "env python -m http.server",
     "env python /tmp/x.py",
     "uv run python tools/dev.py frog-run g1-claims",
@@ -209,11 +206,6 @@ def test_interpreter_module_or_script_not_denied(command: str) -> None:
     assert res is None or res.get("permissionDecision") != "allow", (
         f"script/module run auto-allowed: {command!r} -> {res}"
     )
-
-
-@pytest.mark.parametrize("command", INTERPRETER_MODULE_OR_SCRIPT_RUNS)
-def test_interpreter_module_or_script_denied_in_lockdown(command: str) -> None:
-    assert _is_deny(decide(command, lockdown=True)), f"lockdown let it run: {command!r}"
 
 
 # Modules whose argv is program text (timeit statements, pdb / IPython /
@@ -276,54 +268,6 @@ def test_interpreter_safe_module_not_denied(command: str) -> None:
     assert not _is_deny(res), f"safe-module false deny: {command!r} -> {res}"
 
 
-# The safe-module set only decides which ``-m`` runs a broad safe prefix
-# (``uv run python``) may cover, so spoofing it matters under lockdown, where
-# anything not known-safe is denied.
-INTERPRETER_FP1_ADVERSARIAL_LOCKDOWN_DENY = [
-    # Safe module name as a prefix of an unsafe module — must NOT match
-    "python -m json.tooling",  # not 'json.tool'
-    "python -m venvil",  # not 'venv'
-    "python -m pytestx",  # not 'pytest'
-    "python -m sitecustomize",  # not 'site'
-    "python -m thisthing",  # not 'this'
-    "uv run python -m json.tooling",
-    "uv run python -m pytestx",
-    # Safe-module token in the wrong position (not the -m operand)
-    "python /tmp/json.tool",  # bare script literally named json.tool
-    "python json.tool",  # positional, no -m → script path
-    "uv run python json.tool",
-    "python -m http.server json.tool",  # first module after -m is unsafe
-    "python -m json.tool -c 'import os'",  # bare python is never a safe prefix
-    "python -c 'import json.tool'",  # eval flag, not a module run
-    # Fused -m with safe-prefix-but-unsafe-full module
-    "python -mjson.tooling",
-    "python -mbase64",
-    "uv run python -mbase64",
-    # Double -m (only the first is the module; pathological)
-    "python -m http.server -m json.tool",  # first -m unsafe
-    "uv run python -m http.server -m json.tool",
-    # env-prefixed unsafe (candidate-forms peels env)
-    "env python -m http.server",
-    "env python /tmp/x.py",
-    "env X=1 uv run python /tmp/x.py",
-    # sudo / wrapper-stacked unsafe
-    "sudo python -m http.server",
-    # osascript -e (eval arm, listed as dangerous interpreter)
-    "osascript -e 'do shell script \"id\"'",
-]
-
-
-@pytest.mark.parametrize("command", INTERPRETER_FP1_ADVERSARIAL_LOCKDOWN_DENY)
-def test_interpreter_fp1_adversarial_denied_in_lockdown(command: str) -> None:
-    assert _is_deny(decide(command, lockdown=True)), f"adversarial bypass: {command!r}"
-
-
-def test_uv_run_python_safe_module_allowed_in_lockdown() -> None:
-    res = decide("uv run python -m json.tool", lockdown=True)
-    assert res is not None, res
-    assert res.get("permissionDecision") == "allow", res
-
-
 INTERPRETER_FP1_ADVERSARIAL_ALLOW = [
     # Fused/spaced parity for the safe modules
     "python3 -mcompileall",
@@ -384,13 +328,10 @@ def test_real_glob_head_still_denied(command: str) -> None:
 
 
 # ============================================================================
-# NEW-C: read-only diagnostics must be allowed in strict mode
+# NEW-C: read-only diagnostics are never denied
 # ============================================================================
-# These are genuinely read-only and were hard-denied by strict default-deny
-# (not on SAFE_PREFIXES). `fd` is intentionally EXCLUDED (it has --exec/-x, an
-# RCE sink like find -exec); sed/awk stay out (write/exec sinks -> FP-3).
 
-STRICT_READONLY_DIAGNOSTIC_ALLOW = [
+READONLY_DIAGNOSTIC_ALLOW = [
     "hostname",
     "whoami",
     "id",
@@ -407,30 +348,16 @@ STRICT_READONLY_DIAGNOSTIC_ALLOW = [
     "printenv PATH",
     "printenv",
     "yq '.a.b' config.yaml",
-    # POSIX test builtins reach strict default-deny once glob_head exempts them
+    # POSIX test builtins: glob_head exempts them
     "[ -f /tmp/x ]",
     "[[ -d /tmp ]]",
 ]
 
 
-@pytest.mark.parametrize("command", STRICT_READONLY_DIAGNOSTIC_ALLOW)
-def test_strict_readonly_diagnostic_allowed(command: str) -> None:
-    res = decide(command, lockdown=True)
-    assert not _is_deny(res), f"read-only diagnostic false deny in strict: {command!r} -> {res}"
-
-
-# fd must NOT become a blanket allow — --exec is an RCE sink.
-FD_EXEC_STILL_DENY = [
-    "fd -x rm {}",
-    "fd --exec rm",
-    "fd -e py -x python {}",
-]
-
-
-@pytest.mark.parametrize("command", FD_EXEC_STILL_DENY)
-def test_fd_exec_not_allowed_in_strict(command: str) -> None:
-    # fd is deliberately unregistered; strict mode denies it (no exec sink slips through).
-    assert _is_deny(decide(command, lockdown=True)), f"fd exec must not allow: {command!r}"
+@pytest.mark.parametrize("command", READONLY_DIAGNOSTIC_ALLOW)
+def test_readonly_diagnostic_not_denied(command: str) -> None:
+    res = decide(command)
+    assert not _is_deny(res), f"read-only diagnostic false deny: {command!r} -> {res}"
 
 
 # ============================================================================
@@ -1640,7 +1567,7 @@ def test_a3_force_refspec_3token_denied(command: str) -> None:
 
 
 # A4: bun run/test/x with a script-file path is a script run (not a package
-# script name): not denied in enforce, never known-safe, denied in lockdown.
+# script name): not denied, never known-safe.
 A4_BUN_SCRIPT_PATH_RUNS = [
     "bun run /tmp/attacker.js",
     "bun run ./evil.js",
@@ -1663,7 +1590,6 @@ A4_BUN_SCRIPT_NAME_LEGIT = [
 def test_a4_bun_script_path_is_a_script_run(command: str) -> None:
     res = decide(command)
     assert not _is_deny(res), f"bun script run denied: {command!r} -> {res}"
-    assert _is_deny(decide(command, lockdown=True)), f"lockdown let it run: {command!r}"
 
 
 @pytest.mark.parametrize("command", A4_BUN_SCRIPT_NAME_LEGIT)
@@ -2012,7 +1938,7 @@ GUARD_LOG_PROTECT_DENY = [
     "cp /tmp/forge.jsonl ~/.claude/guard-decisions.jsonl",
     "tee ~/.claude/guard-decisions.jsonl",
     "truncate -s 0 ~/.claude/guard-decisions.jsonl",
-    "mv /tmp/x ~/.claude/guard-strict-deny-queue.jsonl",
+    "mv /tmp/x ~/.claude/guard-decisions.jsonl",
     "cp /tmp/x ~/.claude/guard/allowlist.json",
     "tee ~/.claude/guard/allowlist.json",
     "ln -sf /tmp/evil ~/.claude/guard-decisions.jsonl",

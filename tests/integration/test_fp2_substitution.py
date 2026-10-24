@@ -3,8 +3,7 @@
 FP-2: ``$(...)`` / backtick substitutions whose inner command is itself
 non-denying must not deny; genuinely dangerous inners (``rm -rf /``, pipe-to-
 shell, ``eval``, interpreter ``-c``) still deny. Recursion is depth-bounded
-(``_MAX_SUBSTITUTION_DEPTH``); overflow fails closed. STRICT mode still denies
-all executing ``$()`` segments (relaxation is interactive-only).
+(``_MAX_SUBSTITUTION_DEPTH``); overflow fails closed.
 
 NEW-Q: shell metacharacters inside single/double quotes are literal text, not
 executing constructs, so they must not trip ``bash.dangerous_construct``.
@@ -172,23 +171,6 @@ class TestFP2Adversarial:
         assert _not_denied(decide("echo ${HOME}"))
 
 
-# === FP-2: STRICT mode still denies executing substitutions ===
-
-
-class TestFP2StrictStillDenies:
-    @pytest.mark.parametrize(
-        "cmd",
-        [
-            "echo $(pwd)",
-            "ls -la $(which claude)",
-            "echo `hostname`",
-        ],
-    )
-    def test_executing_substitution_denied_in_strict(self, cmd: str) -> None:
-        # Relaxation is interactive-only; strict agents do not get substitution.
-        assert _denied(decide(cmd, lockdown=True)), cmd
-
-
 # === NEW-Q: quoted metacharacters are literal text, not constructs ===
 
 
@@ -208,18 +190,6 @@ class TestNewQQuotedConstructsAllowed:
     )
     def test_quoted_metachars_not_denied_interactive(self, cmd: str) -> None:
         assert _not_denied(decide(cmd)), f"quoted literal false deny: {cmd!r}"
-
-    @pytest.mark.parametrize(
-        "cmd",
-        [
-            'grep "a > b" file',
-            "jq '.a > .b' data.json",
-        ],
-    )
-    def test_quoted_metachars_not_denied_strict(self, cmd: str) -> None:
-        # is_safe_command masks quoted literals, so strict allows them too —
-        # while a real executing $() (preserved by the mask) still denies.
-        assert _not_denied(decide(cmd, lockdown=True)), f"strict quoted deny: {cmd!r}"
 
 
 class TestNewQRealConstructsStillDeny:
@@ -257,7 +227,7 @@ class TestNewQQuoteParityBypass:
         ],
     )
     def test_quote_parity_bypass_denied(self, cmd: str) -> None:
-        assert _denied(decide(cmd, lockdown=True)), f"parity bypass: {cmd!r}"
+        assert _denied(decide(cmd)), f"parity bypass: {cmd!r}"
 
     @pytest.mark.parametrize(
         "cmd",

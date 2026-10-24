@@ -30,16 +30,14 @@ def test_run_hook_sinks_logs_when_no_path_given(
     # default log path would resolve under tmp_path. Without the devnull
     # default, the denied command below would create it there.
     monkeypatch.delenv("GUARD_DECISIONS_PATH", raising=False)
-    monkeypatch.delenv("GUARD_STRICT_DENY_QUEUE_PATH", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
 
-    _, stdout, _ = run_hook("bash_command_validator", "rm -rf /", strict=True)
+    _, stdout, _ = run_hook("bash_command_validator", "rm -rf /")
 
     # The hook actually ran and reached its decision/logging path...
     assert decision_from_stdout(stdout) == "deny"
     # ...yet wrote nothing to the developer's real (HOME-relative) logs.
     assert not (tmp_path / ".claude" / "guard-decisions.jsonl").exists()
-    assert not (tmp_path / ".claude" / "guard-strict-deny-queue.jsonl").exists()
 
 
 def test_run_hook_honors_explicit_decisions_path(
@@ -51,7 +49,7 @@ def test_run_hook_honors_explicit_decisions_path(
     monkeypatch.setenv("HOME", str(tmp_path))
     log = tmp_path / "decisions.jsonl"
 
-    run_hook("bash_command_validator", "rm -rf /", strict=True, decisions_path=log)
+    run_hook("bash_command_validator", "rm -rf /", decisions_path=log)
 
     assert log.exists()
     assert not (tmp_path / ".claude" / "guard-decisions.jsonl").exists()

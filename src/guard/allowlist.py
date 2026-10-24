@@ -3,7 +3,7 @@
 One JSON file, ``~/.claude/guard/allowlist.json`` (overridable via
 ``GUARD_DATA_DIR``), with two keys:
 
-1. **mode**: ``enforce`` (default), ``shadow``, ``off`` or ``lockdown``.
+1. **mode**: ``enforce`` (default), ``shadow`` or ``off``.
 2. **disable_rules**: a list of ``rule_id`` strings (e.g.
    ``"bash.disk_destruction"``, ``"guard.protected_files"``). When a hook is
    about to deny under one of these rule_ids, it falls through to allow
@@ -37,12 +37,11 @@ from typing import Any, Literal, cast
 from guard._utils import GUARD_HOME, log_decision, read_permission_mode, sanitize_for_stderr
 from guard.registry import auto_pass_reason, is_deferred_to_auto
 
-# ``lockdown`` is ``enforce`` plus strict default-deny for bash and the
-# extended protected-file list. It is opt-in only: Claude Code's
-# ``permission_mode`` never switches it on.
-Mode = Literal["enforce", "shadow", "off", "lockdown"]
-_VALID_MODES: frozenset[str] = frozenset(("enforce", "shadow", "off", "lockdown"))
+Mode = Literal["enforce", "shadow", "off"]
+_VALID_MODES: frozenset[str] = frozenset(("enforce", "shadow", "off"))
 _DEFAULT_MODE: Mode = "enforce"
+# A mode guard used to have. A file that still sets it gets the default.
+_RETIRED_MODE = "lockdown"
 
 # Where project allowlists used to live. Only looked at to warn that they're ignored.
 _RETIRED_PROJECT_RELPATH = Path(".claude") / "guard" / "allowlist.json"
@@ -60,7 +59,6 @@ _BASH_MATCHER_RULE_IDS: tuple[str, ...] = (
     "bash.admin_forbidden_flag",
     "bash.admin_forbidden_subcommand",
     "bash.admin_sensitive_env_override",
-    "bash.admin_unknown_flag_strict",
     "bash.aws_destructive",
     "bash.aws_s3_destructive",
     "bash.az_destructive",
@@ -117,8 +115,6 @@ _BASH_MATCHER_RULE_IDS: tuple[str, ...] = (
     "bash.secret_value",
     "bash.sensitive_write",
     "bash.shell_wrapper",
-    "bash.strict_default_deny",
-    "bash.strict_feedback",
     "bash.sudo_escalation",
     "bash.tool_alternative",
     "bash.trap_exploit",
@@ -153,7 +149,7 @@ class Allowlist:
 
     disable_rules: frozenset[str] = field(default_factory=frozenset)
     sources: tuple[Path, ...] = ()  # files actually read (for diagnostics)
-    mode: Mode = _DEFAULT_MODE  # enforce | shadow | off | lockdown
+    mode: Mode = _DEFAULT_MODE  # enforce | shadow | off
 
     def is_rule_disabled(self, rule_id: str) -> bool:
         """True if ``rule_id`` is in ``disable_rules``."""
@@ -163,6 +159,9 @@ class Allowlist:
 def _validate_mode(raw: Any, source: str) -> Mode | None:  # noqa: ANN401 -- JSON value is genuinely Any
     """Return a valid Mode or None (None means "key absent / invalid; skip")."""
     if raw is None:
+        return None
+    if raw == _RETIRED_MODE:
+        _warn_retired(f"mode {_RETIRED_MODE}")
         return None
     if not isinstance(raw, str) or raw not in _VALID_MODES:
         _warn(f"{source}: 'mode' must be one of {sorted(_VALID_MODES)}; ignoring (got {raw!r})")
@@ -281,7 +280,7 @@ def apply_decision(  # noqa: PLR0913 -- hook id, payload, envelope, excerpt + po
     except for ``trust_root`` decisions (guard's own files), which hold in
     every mode. ``hook_id`` in ``disable_rules`` turns the decision into a
     logged pass unless ``overridable`` is False. In Claude Code's ``auto``
-    permission mode (outside lockdown) a deny whose tier key (``rule``, else
+    permission mode a deny whose tier key (``rule``, else
     ``hook_id``) is a STEER rule becomes a logged pass with no output; FLOOR
     denies are unchanged. A deny exits 2.
     """
@@ -308,9 +307,7 @@ def apply_decision(  # noqa: PLR0913 -- hook id, payload, envelope, excerpt + po
         log_decision(decision="pass", reason=bypass, **record)
         return
     tier_key = rule or hook_id
-    if decision == "deny" and is_deferred_to_auto(
-        tier_key, permission_mode, lockdown=allowlist.mode == "lockdown"
-    ):
+    if decision == "deny" and is_deferred_to_auto(tier_key, permission_mode):
         log_decision(decision="pass", reason=auto_pass_reason(tier_key), **record)
         return
     log_decision(decision=decision, reason=hso["permissionDecisionReason"], **record)

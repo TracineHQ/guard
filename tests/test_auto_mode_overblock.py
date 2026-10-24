@@ -129,11 +129,6 @@ def test_floor_still_denies(command: str, permission_mode: str) -> None:
     assert is_deny(bcv.decide(command, permission_mode=permission_mode))
 
 
-@pytest.mark.parametrize("command", STILL_DENIES)
-def test_floor_still_denies_in_lockdown(command: str) -> None:
-    assert is_deny(bcv.decide(command, permission_mode="auto", lockdown=True))
-
-
 @pytest.mark.parametrize(
     "command",
     [
@@ -146,7 +141,6 @@ def test_floor_still_denies_in_lockdown(command: str) -> None:
 )
 def test_literal_inline_program_still_denies_outside_auto(command: str) -> None:
     assert is_deny(bcv.decide(command))
-    assert is_deny(bcv.decide(command, permission_mode="auto", lockdown=True))
 
 
 @pytest.mark.parametrize(

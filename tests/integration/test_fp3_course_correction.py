@@ -115,18 +115,3 @@ class TestFP3SafetyFloor:
         # before the walk — a pre-existing gap unrelated to FP-3, not a
         # regression this change introduces.
         assert _is_deny(decide(cmd)), f"awk exec sink must deny: {cmd!r}"
-
-
-# === Strict mode: advisory passthrough does not leak ===
-
-
-class TestFP3StrictUnaffected:
-    def test_advisory_does_not_leak_into_strict_mode(self) -> None:
-        # Strict path is _evaluate_strict, not _evaluate_segments. A piped awk is
-        # not on SAFE_PREFIXES/SAFE_PIPE_COMMANDS, so it still default-denies in
-        # strict — advisory passthrough is an interactive-mode posture only.
-        # (`ls && find . -type f` is NOT a good probe: post-FP-6a `find . -type f`
-        # is a standalone conditional-safe segment that strict legitimately
-        # allows, independent of the advisory set.)
-        res = decide("git log | awk '{print $1}'", lockdown=True)
-        assert _is_deny(res)

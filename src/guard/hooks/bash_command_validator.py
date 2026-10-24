@@ -33,7 +33,6 @@ import os
 import re
 import shlex
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -41,9 +40,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 from guard._utils import (
-    GUARD_STRICT_DENY_QUEUE_PATH,
-    _log_debug,
-    append_jsonl,
     log_decision,
     read_permission_mode,
     safe_main,
@@ -80,7 +76,6 @@ from guard.registry import (
     PLAIN_RUNNER_PREFIXES,
     SAFE_PIPE_COMMANDS,
     SAFE_PREFIXES,
-    STRICT_FEEDBACK,
     Safety,
     Tier,
     always_deny_key,
@@ -126,9 +121,8 @@ _REQUEST_CONTEXT: dict[str, Any] = {
     "session_id": "",
     "cwd": None,
     "permission_mode": "default",
-    "mode": "enforce",  # guard mode (enforce|shadow|off|lockdown) resolved from allowlist at hook entry
-    "lockdown": False,  # strict default-deny; set by decide() from guard mode, never permission_mode
-    # auto permission mode outside lockdown: STEER rules are deferred to Claude
+    "mode": "enforce",  # guard mode (enforce|shadow|off) resolved from allowlist at hook entry
+    # auto permission mode: STEER rules are deferred to Claude
     # Code instead of denying. ``deferred`` collects the STEER keys one decide()
     # call skipped; ``floor_depth`` bounds the nested floor checks.
     "defer_steer": False,
@@ -921,8 +915,8 @@ def is_safe_command(segment: str, *, is_piped: bool = False, strict: bool = Fals
         return False
     # A script or ``-m`` module run is not denied, but it runs code guard
     # can't see, so it is never known-safe: a broad prefix like
-    # ``uv run python`` must not auto-allow it. Enforce passes it through to
-    # Claude Code's permission flow; lockdown default-denies it.
+    # ``uv run python`` must not auto-allow it. Guard passes it through to
+    # Claude Code's permission flow.
     if any(_is_interpreter_program_run(cand) for cand in _exec_wrapper_candidates(segment)):
         return False
     if is_piped:
@@ -2490,8 +2484,8 @@ _BUN_PACKAGE_SUBCOMMANDS = {
 
 # stdlib ``-m`` modules that are inert (format/inspect/compile) or trusted dev
 # runners. Every other ``-m <module>`` run counts as running project code, so
-# a broad safe prefix (``uv run python``) never auto-allows it and lockdown
-# default-denies it; these are the exceptions such a prefix may still cover.
+# a broad safe prefix (``uv run python``) never auto-allows it; these are the
+# exceptions such a prefix may still cover.
 # Exact top-level match only: ``json.tool.foo`` is NOT a member (submodules
 # are not wildcarded). ``timeit`` and ``unittest`` are left out on purpose:
 # both run caller-supplied code (``timeit`` is also in _INLINE_CODE_MODULES).
@@ -2515,8 +2509,8 @@ def _interpreter_runs_module_or_script(tokens: list[str]) -> bool:
     Running a script or module is normal project work, so guard does not deny
     it (only inline code is denied, see ``_interpreter_runs_inline_code``).
     It does run code guard can't see, though, so ``is_safe_command`` never
-    treats it as known-safe: enforce passes it through to Claude Code's own
-    permission flow, and lockdown default-denies it. Any positional argument
+    treats it as known-safe: guard passes it through to Claude Code's own
+    permission flow. Any positional argument
     that is not a recognized flag counts as a script.
 
     Tolerates fused short flags like ``-mhttp.server`` (no space).
@@ -2989,7 +2983,6 @@ _SYNTH_ADMIN_DEFAULT_DENY = "admin-default-deny"
 _SYNTH_ADMIN_SENSITIVE_ENV = "admin-sensitive-env"
 _SYNTH_ADMIN_FORBIDDEN_SUBCOMMAND = "admin-forbidden-subcommand"
 _SYNTH_ADMIN_FORBIDDEN_FLAG = "admin-forbidden-flag"
-_SYNTH_ADMIN_UNKNOWN_FLAG_STRICT = "admin-unknown-flag-strict"
 
 # Both-mode hard-deny additions: sibling filesystem-attribute commands the
 # chmod matcher doesn't cover, and credential-file network egress.
@@ -3299,11 +3292,6 @@ _SYNTH_DENY_REASONS: dict[str, str] = {
         " disables TLS, or impersonates identity. These flags have no safe"
         " use on an allowlisted read verb in an agent context. Remove the"
         " flag."
-    ),
-    _SYNTH_ADMIN_UNKNOWN_FLAG_STRICT: (
-        "Unrecognized flags may alter request destination, credentials, or"
-        " output format in ways guard cannot statically verify. Remove the"
-        " unknown flags, or ask the user to run the command."
     ),
 }
 
@@ -4015,13 +4003,11 @@ _SENSITIVE_DEST_HOME_PATTERNS = (
     "Library/LaunchAgents/",
     "Library/LaunchDaemons/",
     ".local/bin/",
-    # Guard's own audit log + strict-deny queue. Without this, an agent
-    # can ``> ~/.claude/guard-decisions.jsonl`` to truncate the audit trail
-    # or ``echo > ~/.claude/guard-strict-deny-queue.jsonl`` to forge entries.
+    # Guard's own audit log. Without this, an agent can
+    # ``> ~/.claude/guard-decisions.jsonl`` to truncate the audit trail.
     # The append-side writer already uses O_NOFOLLOW + O_APPEND for symlink
     # safety; this closes the truncate/overwrite vector via WRITE_HEAD verbs.
     ".claude/guard-decisions.jsonl",
-    ".claude/guard-strict-deny-queue.jsonl",
     ".claude/guard/",
 )
 _WRITE_HEAD_VERBS = {
@@ -6490,60 +6476,6 @@ def _match_elevated_risk(segments: list[str]) -> tuple[str, str] | None:
     return None
 
 
-# === Strict-mode safety net (guard mode lockdown) ===
-# Opt-in via ``guard mode lockdown``; Claude Code's permission_mode never
-# turns it on. Anything not on the safe-prefix allowlist is denied with
-# either a STRICT_FEEDBACK message (if the prefix is registered) or a
-# generic default-deny.
-
-DEFAULT_STRICT_DENY_BODY = (
-    "command shape not on safe-prefix allowlist. guard lockdown mode denies "
-    "anything it doesn't know is safe. If this command is genuinely safe, add "
-    "a rule to guard's registry; otherwise leave it for the user to run"
-)
-
-
-def get_strict_deny(segment: str) -> tuple[dict[str, str], str]:
-    """Return ``(deny envelope, rule_id)`` for a strict-mode segment.
-
-    Matches the segment against ``STRICT_FEEDBACK`` (longest prefix wins).
-    Normalizes via ``_normalize_segment`` so quoting/whitespace cannot bypass
-    a feedback rule. Falls back to the generic strict default-deny on no
-    match. Every branch routes through ``_format_deny_reason`` so the
-    ``guard [permission_mode=...] denied: <rule_id>`` annunciator appears
-    on every strict deny -- not just the rule-matched ones. The rule_id is
-    returned alongside so callers can route the deny through
-    ``_maybe_allow_via_allowlist`` (the annunciator advertises an override
-    path; that path has to actually fire).
-    """
-    normalized = _normalize_segment(segment)
-    for prefix, feedback in sorted(STRICT_FEEDBACK.items(), key=lambda kv: -len(kv[0])):
-        if normalized == prefix or normalized.startswith(prefix + " "):
-            return _deny(
-                _format_deny_reason("bash.strict_feedback", feedback)
-            ), "bash.strict_feedback"
-    return (
-        _deny(_format_deny_reason("bash.strict_default_deny", DEFAULT_STRICT_DENY_BODY)),
-        "bash.strict_default_deny",
-    )
-
-
-def queue_denied_command(command: str) -> None:
-    """Best-effort append a denied command to the strict-mode review queue.
-
-    The queue is a JSONL file at ``GUARD_STRICT_DENY_QUEUE_PATH``; a human can
-    review it after the session ends. I/O failures are swallowed by
-    ``append_jsonl`` — the hook must never block on logging.
-    """
-    entry = {
-        "timestamp": datetime.now(UTC).isoformat(),
-        "command": command[:_QUEUE_COMMAND_TRUNC],
-        "session_id": os.environ.get("CLAUDE_SESSION_ID", ""),
-    }
-    append_jsonl(GUARD_STRICT_DENY_QUEUE_PATH, entry)
-    _log_debug(f"queue_denied_command: appended to {GUARD_STRICT_DENY_QUEUE_PATH}")
-
-
 _HEREDOC_OP_RE = re.compile(r"(<<-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 _HEREDOC_HEAD_SKIP = frozenset({"sudo", "time", "env", "nice", "nohup", "command"})
 _HEREDOC_WRITE_CMDS = frozenset({"tee", "cat", "dd"})
@@ -7208,12 +7140,6 @@ _AGENT_GUIDANCE_INTERACTIVE = (
     "that fits the user's intent → wait for explicit user approval → apply."
 )
 
-_AGENT_GUIDANCE_STRICT = (
-    "Agents: guard lockdown is on, so this is a hard fence. Do not retry, "
-    "do not invoke an override. Surface this deny in your output for the "
-    "operator's later review."
-)
-
 
 def _format_deny_reason(rule_id: str, body: str) -> str:
     """Append the unified rule_id + override-path footer to a deny ``body``.
@@ -7223,19 +7149,17 @@ def _format_deny_reason(rule_id: str, body: str) -> str:
     grepping the source. The footer is identical across matchers: users
     learn the shape once.
 
-    An agent-guidance sentence is appended so agents know whether to take
-    it to the user (enforce) or surface and stop (lockdown). The body is
-    prefixed with a ``guard [permission_mode=<mode>] denied: <rule_id>``
-    annunciator so reviewers can see the session's permission mode at a
-    glance; only ``auto`` changes a decision (STEER rules are skipped there).
+    An agent-guidance sentence is appended so agents take it to the user.
+    The body is prefixed with a ``guard [permission_mode=<mode>] denied:
+    <rule_id>`` annunciator so reviewers can see the session's permission
+    mode at a glance; only ``auto`` changes a decision (STEER rules are
+    skipped there).
     """
     body = body.rstrip(" .")
     mode = _REQUEST_CONTEXT.get("permission_mode") or "default"
-    lockdown = bool(_REQUEST_CONTEXT.get("lockdown"))
-    guidance = _AGENT_GUIDANCE_STRICT if lockdown else _AGENT_GUIDANCE_INTERACTIVE
     return (
         f"guard [permission_mode={mode}] denied: {rule_id}. {body}. "
-        f"Override: `guard allowlist disable-rule {rule_id}`. {guidance}"
+        f"Override: `guard allowlist disable-rule {rule_id}`. {_AGENT_GUIDANCE_INTERACTIVE}"
     )
 
 
@@ -7339,16 +7263,11 @@ _COMMAND_LENGTH_CAP = 8192
 # Reasons land in stderr / the transcript, so we keep them to ~one terminal line.
 _SEGMENT_DISPLAY_TRUNC = 80
 
-# Truncate the command stored in the strict-deny review queue. Far larger than
-# the display cap because a human reviewing the queue may want enough context
-# to reconstruct intent, but still small enough to keep the JSONL line tidy.
-_QUEUE_COMMAND_TRUNC = 500
-
 
 _CORPUS_STEER_BODY = (
     "ad-hoc classification probe. Do not spray `guard test '<cmd>'` to check how a command "
     "is classified -- the check evaporates the moment the shell returns, and the next agent "
-    "redoes it. Instead run `guard corpus add '<cmd>' --expect allow|deny [--mode lockdown]` -- "
+    "redoes it. Instead run `guard corpus add '<cmd>' --expect allow|deny` -- "
     "it appends the case to tests/corpus and adjudicates it in one step, so your case becomes a "
     "permanent regression fixture; `guard corpus` then re-runs the WHOLE set in one process. "
     "See tests/corpus/README.md. (One-off debugging? this fires only inside a guard source "
@@ -7430,8 +7349,6 @@ def decide(
     command: str,
     original_command: str | None = None,
     permission_mode: str = "default",
-    *,
-    lockdown: bool = False,
 ) -> dict[str, str] | None:
     """Decide whether to allow a bash command. ``None`` means passthrough.
 
@@ -7440,24 +7357,21 @@ def decide(
 
     ``permission_mode`` is the documented Claude Code permission mode. Outside
     ``auto`` it is recorded in deny reasons and the log for context only. In
-    ``auto`` (and not in lockdown) guard keeps only its hard floor: a STEER
-    rule that matches is skipped, the scan goes on so a FLOOR rule anywhere in
-    the command still denies, and when nothing on the floor matches the call
-    returns ``None`` with one ``pass`` record per skipped rule. ``lockdown``
-    (guard mode ``lockdown``) routes through strict default-deny evaluation;
-    otherwise only the blocklist applies. Both are stamped onto
-    ``_REQUEST_CONTEXT`` so downstream helpers (deny annunciator,
-    agent-guidance selector) can read them without an extra parameter through
-    the call graph.
+    ``auto`` guard keeps only its hard floor: a STEER rule that matches is
+    skipped, the scan goes on so a FLOOR rule anywhere in the command still
+    denies, and when nothing on the floor matches the call returns ``None``
+    with one ``pass`` record per skipped rule. The mode is stamped onto
+    ``_REQUEST_CONTEXT`` so downstream helpers (the deny annunciator) can read
+    it without an extra parameter through the call graph.
     """
     if original_command is None:
         original_command = command
-    _REQUEST_CONTEXT["defer_steer"] = defers_steer(permission_mode, lockdown=lockdown)
+    _REQUEST_CONTEXT["defer_steer"] = defers_steer(permission_mode)
     _REQUEST_CONTEXT["deferred"] = []
     _REQUEST_CONTEXT["floor_depth"] = 0
     _REQUEST_CONTEXT["original_command"] = original_command
     try:
-        result = _decide_inner(command, original_command, permission_mode, lockdown=lockdown)
+        result = _decide_inner(command, original_command, permission_mode)
     finally:
         _REQUEST_CONTEXT["defer_steer"] = False
         _REQUEST_CONTEXT["allowlist"] = None
@@ -7483,13 +7397,13 @@ def _floor_check(text: str, command: str, *, floor_only: bool = False) -> dict[s
     logged as auto-mode passes.
     """
     if floor_only and not _REQUEST_CONTEXT["defer_steer"]:
-        saved = (list(_REQUEST_CONTEXT["deferred"]), _REQUEST_CONTEXT["lockdown"])
+        saved = list(_REQUEST_CONTEXT["deferred"])
         _REQUEST_CONTEXT["defer_steer"] = True
         try:
             return _floor_check(text, command)
         finally:
             _REQUEST_CONTEXT["defer_steer"] = False
-            _REQUEST_CONTEXT["deferred"], _REQUEST_CONTEXT["lockdown"] = saved
+            _REQUEST_CONTEXT["deferred"] = saved
     depth: int = _REQUEST_CONTEXT["floor_depth"]
     if depth >= _MAX_SUBSTITUTION_DEPTH:
         body = (
@@ -7506,7 +7420,6 @@ def _floor_check(text: str, command: str, *, floor_only: bool = False) -> dict[s
                 text,
                 _REQUEST_CONTEXT["original_command"],
                 _REQUEST_CONTEXT["permission_mode"],
-                lockdown=False,
             )
         finally:
             _REQUEST_CONTEXT["floor_depth"] = depth
@@ -7517,7 +7430,7 @@ def _floor_check(text: str, command: str, *, floor_only: bool = False) -> dict[s
 
 
 def _joined_readings_deny(
-    command: str, original_command: str, permission_mode: str, *, lockdown: bool
+    command: str, original_command: str, permission_mode: str
 ) -> dict[str, str] | None:
     """Deny envelope if ``command``, read with its quoted newlines joined, hits a rule.
 
@@ -7533,9 +7446,7 @@ def _joined_readings_deny(
         ctx["floor_depth"] = depth + 1
         ctx["floor_hit"] = ""
         try:
-            hit = _decide_inner(
-                command, original_command, permission_mode, lockdown=lockdown, joined=reading
-            )
+            hit = _decide_inner(command, original_command, permission_mode, joined=reading)
         finally:
             ctx["floor_depth"] = depth
             ctx["deferred"] = list(deferred)
@@ -7550,7 +7461,6 @@ def _decide_inner(
     original_command: str,
     permission_mode: str,
     *,
-    lockdown: bool,
     joined: tuple[str, frozenset[str]] | None = None,
 ) -> dict[str, str] | None:
     """The decision itself; ``decide`` wraps it with the auto-mode bookkeeping.
@@ -7560,7 +7470,6 @@ def _decide_inner(
     instead of the exact quote walk or the line split.
     """
     _REQUEST_CONTEXT["permission_mode"] = permission_mode
-    _REQUEST_CONTEXT["lockdown"] = lockdown
     # Adversarial-length inputs (200 KB single-token ``echo aaaa...``) drive
     # the candidate-forms / fixpoint pipeline into ~10 s of redundant
     # ``shlex.split`` work. Real bash command lines sit far below 8 KiB; deny
@@ -7593,9 +7502,7 @@ def _decide_inner(
         # The quoting can't be read exactly, so the line split below may read a
         # command after a multi-line quote as inside it. Deny if a reading that
         # joins the quoted lines denies.
-        joined_deny = _joined_readings_deny(
-            command, original_command, permission_mode, lockdown=lockdown
-        )
+        joined_deny = _joined_readings_deny(command, original_command, permission_mode)
         if joined_deny is not None:
             return joined_deny
     # Fold POSIX line continuations and unicode whitespace before any other
@@ -7765,18 +7672,6 @@ def _decide_inner(
             return bypass
         _log_local(command, "deny", f"elevated-risk ({rule_id})")
         return decision
-
-    # === Lockdown: default-deny ===
-    # Opt-in via ``guard mode lockdown``. Anything not on the safe-prefix
-    # allowlist is denied with structured feedback.
-    if lockdown:
-        return _evaluate_strict(
-            command,
-            segments,
-            seg_ops,
-            allowlist=allowlist,
-            original_command=original_command,
-        )
 
     has_comments = command.strip() != cleaned
     has_pipes = len(segments) > 1
@@ -9448,109 +9343,6 @@ def _pre_evaluate_dangerous(
     return None
 
 
-def _matches_strict_feedback(segment: str) -> bool:
-    """Return True if the segment matches an STRICT_FEEDBACK prefix.
-
-    STRICT_FEEDBACK entries are commands that need explicit human approval
-    in driven-agent contexts, so they must NOT be allowed by SAFE_PREFIXES
-    coverage (e.g. `git branch -d` falls under the broader `git branch` safe
-    prefix, but is registered separately as feedback-required).
-
-    Longest-prefix-wins: a *more specific* SAFE_PREFIXES entry overrides a
-    broader feedback prefix, so a read-only subcommand registered explicitly
-    (``git stash list`` / ``git stash show``) is not shadowed into a strict
-    deny by the broader ``git stash`` ASK rule. A more specific feedback prefix
-    still beats a broader safe prefix (the original direction).
-
-    Normalizes via ``_normalize_segment`` so quoting/whitespace bypasses are
-    closed (``"git" add -A`` matches the ``git add`` ASK rule).
-    """
-    normalized = _normalize_segment(segment)
-    fb_len = max(
-        (len(p) for p in STRICT_FEEDBACK if normalized == p or normalized.startswith(p + " ")),
-        default=-1,
-    )
-    if fb_len < 0:
-        return False
-    safe_len = max(
-        (len(p) for p in SAFE_PREFIXES if normalized == p or normalized.startswith(p + " ")),
-        default=-1,
-    )
-    return safe_len <= fb_len
-
-
-def _evaluate_strict(
-    command: str,
-    segments: list[str],
-    seg_ops: list[str],
-    *,
-    allowlist: Allowlist,
-    original_command: str,
-) -> dict[str, str]:
-    """Walk every segment under strict-mode rules.
-
-    Returns deny on first non-safe segment (with optional STRICT_FEEDBACK
-    message), or allow if every segment is on the safe-prefix allowlist.
-
-    STRICT_FEEDBACK matches take priority over SAFE_PREFIXES — a command
-    explicitly registered as feedback-required is denied even if a broader
-    safe prefix would otherwise cover it.
-
-    Unknown-flag escalation: if an allowed admin CLI segment has unknown long
-    flags (not in spec.known_flags or spec.forbidden_flags), deny with
-    bash.admin_unknown_flag_strict in strict mode.
-
-    Every strict-mode deny is routed through ``_maybe_allow_via_allowlist``
-    so the override path that ``_format_deny_reason`` advertises (`guard
-    allowlist disable-rule ...`) actually fires.
-    """
-    for i, segment in enumerate(segments):
-        is_piped = seg_ops[i] == "|"
-        if not _matches_strict_feedback(segment) and is_safe_command(
-            segment, is_piped=is_piped, strict=True
-        ):
-            # Unknown-flag strict escalation for admin CLIs.
-            raw = segment.split()
-            if raw:
-                head = _basename(raw[0])
-                for spec in ADMIN_CLI_SPECS:
-                    if spec.cli_name == head and spec.known_flags:
-                        unknown = _collect_unknown_flags(spec, raw[1:])
-                        if unknown:
-                            body = (
-                                f"Unknown flags on admin CLI `{head}` in lockdown:"
-                                f" {', '.join(unknown)}. "
-                                f"{_SYNTH_DENY_REASONS[_SYNTH_ADMIN_UNKNOWN_FLAG_STRICT]}"
-                            )
-                            deny_body = _format_deny_reason("bash.admin_unknown_flag_strict", body)
-                            deny = _deny(deny_body)
-                            bypass = _maybe_allow_via_allowlist(
-                                allowlist,
-                                "bash.admin_unknown_flag_strict",
-                                original_command,
-                                deny,
-                            )
-                            if bypass is not None:
-                                return bypass
-                            _log_local(command, "deny", "admin-unknown-flag-strict")
-                            queue_denied_command(command)
-                            return deny
-                        break
-            continue
-        result, rule_id = get_strict_deny(segment)
-        bypass = _maybe_allow_via_allowlist(allowlist, rule_id, original_command, result)
-        if bypass is not None:
-            return bypass
-        reason = result["permissionDecisionReason"]
-        _log_local(command, "deny", reason)
-        queue_denied_command(command)
-        return result
-    reason = "All command segments are safe (lockdown)"
-    extra = _admin_unknown_flags_extra(segments)
-    _log_local(command, "allow", reason, extra=extra)
-    return _allow(reason)
-
-
 _LOOP_RE = re.compile(r"^(for|while)\s+")
 
 
@@ -9601,9 +9393,7 @@ def hook(payload: dict[str, Any]) -> None:
 
     _hard_deny_check(command)
 
-    decision = decide(
-        command, permission_mode=permission_mode, lockdown=effective_mode == "lockdown"
-    )
+    decision = decide(command, permission_mode=permission_mode)
     if decision is None:
         return
 

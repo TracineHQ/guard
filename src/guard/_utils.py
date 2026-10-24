@@ -59,14 +59,6 @@ GUARD_DECISIONS_PATH = os.environ.get(
     "GUARD_DECISIONS_PATH", str(Path("~/.claude/guard-decisions.jsonl").expanduser())
 )
 
-# Autonomous-mode denial queue (env-overridable for tests). Mirrors the
-# GUARD_DECISIONS_PATH pattern — driven-agent contexts append denied commands
-# here so a human can review them after the session ends.
-GUARD_STRICT_DENY_QUEUE_PATH: str = os.environ.get(
-    "GUARD_STRICT_DENY_QUEUE_PATH",
-    str(Path("~/.claude/guard-strict-deny-queue.jsonl").expanduser()),
-)
-
 
 def _log_debug(msg: str) -> None:
     """Emit a debug line to stderr when ``GUARD_DEBUG=1``."""
@@ -81,8 +73,6 @@ def read_permission_mode(hook_input: dict[str, Any] | None) -> str:
     Unknown literal values are returned as-is. The value is recorded in the
     decision log. Only ``auto`` changes a decision: there guard keeps its
     hard floor and hands STEER rules to Claude Code (``guard.registry``).
-    Strict default-deny is opt-in through ``guard mode lockdown``, which
-    ``permission_mode`` never turns on or off.
     """
     if hook_input is not None:
         raw = hook_input.get("permission_mode")
@@ -332,7 +322,7 @@ def log_decision(  # noqa: PLR0913 -- spec-defined record fields per docs/output
 
     - ``v: 1`` -- short schema-version alias for fast consumers
     - ``schema_version: 1`` -- long form, kept for backward compatibility
-    - ``mode`` -- effective guard mode (``enforce``/``shadow``/``off``/``lockdown``);
+    - ``mode`` -- effective guard mode (``enforce``/``shadow``/``off``);
       callers pass the value resolved from the allowlist via the ``mode``
       kwarg, defaulting to ``"enforce"`` when omitted
     - ``timestamp`` -- ISO-8601 UTC with microsecond precision and ``Z`` suffix

@@ -3,9 +3,9 @@
 """Claude Code ``auto`` permission mode keeps only guard's hard floor.
 
 Every deny rule is FLOOR or STEER (``guard.registry.RULE_TIERS``). In ``auto``
-(outside ``guard mode lockdown``) a STEER match returns no decision and logs a
-``pass`` with reason ``deferred to auto mode (steer rule <key>)``; a FLOOR match
-denies exactly as in every other mode. Default mode and lockdown are unchanged.
+a STEER match returns no decision and logs a ``pass`` with reason
+``deferred to auto mode (steer rule <key>)``; a FLOOR match denies exactly as
+in every other mode. Default mode is unchanged.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from guard.registry import (
     is_deferred_to_auto,
     rule_tier,
 )
-from tests._helpers import HOOKS_DIR, decision_from_stdout, lockdown_guard_home, run_hook
+from tests._helpers import HOOKS_DIR, decision_from_stdout, run_hook
 
 # A high-entropy value built at runtime so no literal secret sits in the source.
 _SECRET = base64.b64encode(hashlib.sha256(b"guard-auto-mode").digest()).decode()
@@ -184,24 +184,22 @@ def test_unknown_keys_fail_closed() -> None:
 
 
 @pytest.mark.parametrize(
-    ("permission_mode", "lockdown", "deferred"),
+    ("permission_mode", "deferred"),
     [
-        ("auto", False, True),
-        ("auto", True, False),
-        ("default", False, False),
-        ("acceptEdits", False, False),
-        ("plan", False, False),
-        ("dontAsk", False, False),
-        ("bypassPermissions", False, False),
+        ("auto", True),
+        ("default", False),
+        ("acceptEdits", False),
+        ("plan", False),
+        ("dontAsk", False),
+        ("bypassPermissions", False),
     ],
 )
-def test_only_auto_outside_lockdown_defers(
+def test_only_auto_defers(
     permission_mode: str,
-    lockdown: bool,  # noqa: FBT001 -- parametrize value
     deferred: bool,  # noqa: FBT001 -- parametrize value
 ) -> None:
-    assert is_deferred_to_auto("bash.shell_wrapper", permission_mode, lockdown=lockdown) is deferred
-    assert not is_deferred_to_auto("bash.dangerous_rm", permission_mode, lockdown=lockdown)
+    assert is_deferred_to_auto("bash.shell_wrapper", permission_mode) is deferred
+    assert not is_deferred_to_auto("bash.dangerous_rm", permission_mode)
 
 
 def test_tables_cover_the_tiers_they_claim() -> None:
@@ -238,14 +236,6 @@ def test_steer_shape_defers_in_auto(key: str, command: str) -> None:
     assert all(r["decision"] == "pass" for r in records), records
     assert auto_pass_reason(key) in [r["reason"] for r in records]
     assert all(r["permission_mode"] == "auto" for r in records)
-
-
-@pytest.mark.parametrize(("key", "command"), FLOOR_SHAPES + STEER_SHAPES)
-def test_lockdown_ignores_auto(key: str, command: str) -> None:
-    """``guard mode lockdown`` denies both tiers, whatever the permission mode."""
-    envelope = bcv.decide(command, permission_mode="auto", lockdown=True)
-    assert envelope is not None, key
-    assert envelope["permissionDecision"] == "deny"
 
 
 @pytest.mark.parametrize("permission_mode", ["default", "acceptEdits", "plan", "dontAsk"])
@@ -429,11 +419,8 @@ def test_worktree_steer_suggests_allowed_commands() -> None:
 # === other hooks, end to end ===
 
 
-def _hook_env(tmp_path: Path, *, lockdown: bool = False) -> dict[str, str]:
-    env = {"GUARD_DECISIONS_PATH": str(tmp_path / "log.jsonl")}
-    if lockdown:
-        env["GUARD_DATA_DIR"] = str(lockdown_guard_home(str(tmp_path / "home")))
-    return env
+def _hook_env(tmp_path: Path) -> dict[str, str]:
+    return {"GUARD_DECISIONS_PATH": str(tmp_path / "log.jsonl")}
 
 
 def _hook_records(tmp_path: Path) -> list[dict[str, Any]]:
@@ -466,17 +453,12 @@ def test_git_c_floor_shape_denies_in_auto(tmp_path: Path) -> None:
     assert decision_from_stdout(stdout) == "deny"
 
 
-@pytest.mark.parametrize(("permission_mode", "lockdown"), [("default", False), ("auto", True)])
-def test_git_c_steer_shape_denies_outside_auto(
-    tmp_path: Path,
-    permission_mode: str,
-    lockdown: bool,  # noqa: FBT001 -- parametrize value
-) -> None:
+def test_git_c_steer_shape_denies_outside_auto(tmp_path: Path) -> None:
     _rc, stdout, _ = run_hook(
         "git_c_validator",
         "git -C /repo config user.name bob",
-        permission_mode=permission_mode,
-        env_extra=_hook_env(tmp_path, lockdown=lockdown),
+        permission_mode="default",
+        env_extra=_hook_env(tmp_path),
     )
     assert decision_from_stdout(stdout) == "deny"
 
@@ -525,7 +507,7 @@ def test_read_only_guard_cli_is_not_a_protected_write(tmp_path: Path, command: s
 @pytest.mark.parametrize(
     "command",
     [
-        "guard mode lockdown",
+        "guard mode shadow",
         "guard mode off 2>&1",
         "guard allowlist disable-rule bash.dangerous_rm",
         "guard allowlist allow-command --rule x --command y --reason z > /dev/null",

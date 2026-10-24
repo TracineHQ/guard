@@ -49,7 +49,6 @@ def _run_hook(
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO / "src")
     env["GUARD_DECISIONS_PATH"] = str(decisions_path)
-    env["GUARD_STRICT_DENY_QUEUE_PATH"] = str(decisions_path.parent / "queue.jsonl")
     if env_overrides:
         env.update(env_overrides)
     proc = subprocess.run(

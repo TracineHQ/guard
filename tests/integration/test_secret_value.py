@@ -137,12 +137,12 @@ class TestSecretValueNoFalsePositives:
         assert _not_denied(decide(cmd)), f"non-secret name must not false-positive: {cmd!r}"
 
 
-# === Hard fence in strict; allowlist-routable ===
+# === Hard fence; allowlist-routable ===
 
 
-class TestSecretValueStrictAndOverride:
-    def test_denies_in_strict_mode(self) -> None:
-        assert _is_secret_value_deny(decide("echo AKIAIOSFODNN7EXAMPLE", lockdown=True))
+class TestSecretValueFenceAndOverride:
+    def test_denies(self) -> None:
+        assert _is_secret_value_deny(decide("echo AKIAIOSFODNN7EXAMPLE"))
 
     def test_deny_reason_names_rule_and_override(self) -> None:
         res = decide("echo AKIAIOSFODNN7EXAMPLE")

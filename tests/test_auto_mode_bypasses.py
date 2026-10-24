@@ -9,7 +9,7 @@ every row has to deny in ``auto`` and in ``default``.
 
 ``STEER_IN_AUTO`` rows hide a floor action behind a shape detector that is STEER
 on purpose: in real sessions those detectors denied almost only harmless
-commands. Guard still denies the rows in every other mode and in lockdown; in
+commands. Guard still denies the rows in every other mode; in
 ``auto`` it passes them to Claude Code's classifier, which sees the whole call.
 """
 
@@ -232,15 +232,9 @@ def test_floor_action_denies(command: str, permission_mode: str) -> None:
     assert is_deny(bcv.decide(command, permission_mode=permission_mode))
 
 
-@pytest.mark.parametrize("command", BYPASSES)
-def test_floor_action_denies_in_lockdown(command: str) -> None:
-    assert is_deny(bcv.decide(command, permission_mode="auto", lockdown=True))
-
-
 @pytest.mark.parametrize("command", STEER_IN_AUTO)
 def test_steer_shape_denies_outside_auto(command: str) -> None:
     assert is_deny(bcv.decide(command, permission_mode="default"))
-    assert is_deny(bcv.decide(command, permission_mode="auto", lockdown=True))
 
 
 @pytest.mark.parametrize("command", STEER_IN_AUTO)

@@ -42,7 +42,7 @@ def test_guard_cli_subcommands_all_classified() -> None:
     The safe-prefix auto-registration of guard's own read-only subcommands is
     derived from ``GUARD_READ_ONLY_SUBCOMMANDS``; a new subcommand added to the
     CLI without classifying it here fails this test instead of silently being
-    unregistered (strict-mode friction) or wrongly blanket-allowed.
+    unregistered or wrongly blanket-allowed.
     """
     import argparse
 

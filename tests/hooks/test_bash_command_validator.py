@@ -35,7 +35,6 @@ from guard.registry import (
     DANGEROUS_INTERPRETERS,
     DANGEROUS_RM_OPERANDS,
     INTERPRETER_EVAL_FLAGS,
-    STRICT_FEEDBACK,
 )
 
 HOOK_PATH = (
@@ -1145,52 +1144,6 @@ class TestRobustness:
         assert "malformed JSON" in result.stderr
 
 
-class TestStrictMode:
-    """Direct decide() calls under lockdown=True.
-
-    Locks in the strict-mode contract for subagents / driven agents at the
-    unit level (no subprocess overhead).
-    """
-
-    def test_unknown_command_denied(self, strict_env):
-        result = decide("flarbnoz --gronk", lockdown=True)
-        assert result is not None
-        assert result["permissionDecision"] == "deny"
-
-    def test_safe_command_allowed(self, strict_env):
-        result = decide("ls -la", lockdown=True)
-        assert result is not None
-        assert result["permissionDecision"] == "allow"
-
-    def test_strict_feedback_message_used(self, strict_env):
-        # `rm` is in STRICT_FEEDBACK
-        result = decide("rm somefile", lockdown=True)
-        assert result is not None
-        assert result["permissionDecision"] == "deny"
-        # Annunciator-wrapped: full STRICT_FEEDBACK text appears within
-        # the reason, prefixed by the mode/rule_id annunciator.
-        assert STRICT_FEEDBACK["rm"] in result["permissionDecisionReason"]
-        assert "bash.strict_feedback" in result["permissionDecisionReason"]
-
-    def test_default_deny_for_unregistered(self, strict_env):
-        result = decide("noexist --flag", lockdown=True)
-        assert result is not None
-        assert result["permissionDecision"] == "deny"
-        assert "lockdown" in result["permissionDecisionReason"].lower()
-
-    def test_git_status_allowed_strict(self, strict_env):
-        # `git status` is on SAFE_PREFIXES — must allow even in strict mode.
-        result = decide("git status", lockdown=True)
-        assert result is not None
-        assert result["permissionDecision"] == "allow"
-
-    def test_git_push_denied_strict(self, strict_env):
-        # `git push` is in STRICT_FEEDBACK — must deny.
-        result = decide("git push origin main", lockdown=True)
-        assert result is not None
-        assert result["permissionDecision"] == "deny"
-
-
 # === Quoted-whitespace bypass ===
 # Smuggling internal whitespace inside quoted tokens used to fold into a
 # single shlex token (``python3  -c``) that the literal ``python3 -c`` deny
@@ -1327,18 +1280,6 @@ def test_interpreter_script_run_in_sequence_passes_through(cmd):
     # The `uv run python` safe prefix must not turn a script run into an
     # explicit allow: guard stays out of it and Claude Code decides.
     assert decide(cmd) is None, cmd
-
-
-@pytest.mark.parametrize(
-    "cmd",
-    [
-        "uv run python tools/dev.py frog-run g1-claims",
-        "python3 scripts/x.py --flag",
-        "python -m http.server",
-    ],
-)
-def test_interpreter_script_and_module_runs_denied_in_lockdown(cmd):
-    assert _is_deny(decide(cmd, lockdown=True)), f"lockdown let it run: {cmd!r}"
 
 
 @pytest.mark.parametrize(

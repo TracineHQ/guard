@@ -125,9 +125,7 @@ def test_healthcheck_returns_healthy(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     probes = payload["probes"]
     assert len(probes) >= 2, "healthcheck should run multiple probes"
     modes_seen = {probe["mode"] for probe in probes}
-    assert modes_seen == {"enforce", "lockdown"}, (
-        f"healthcheck must cover both enforce and lockdown; saw {modes_seen}"
-    )
+    assert modes_seen == {"enforce"}, f"healthcheck probes pin enforce; saw {modes_seen}"
     for probe in probes:
         assert probe["passed"] is True, f"probe failed: {probe}"
         assert probe["command"]

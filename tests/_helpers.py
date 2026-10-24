@@ -14,7 +14,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -30,6 +29,28 @@ HOOKS_DIR = REPO_ROOT / "src" / "guard" / "hooks"
 # that runs, so in-process tests name live files under it; tests that spawn
 # a hook from src/ use HOOKS_DIR instead.
 LIVE_GUARD = Path(guard.__file__).resolve().parent
+
+# Patterns of every shape protected_files' matcher understands (directories,
+# exact files, dotfiles, nested paths), for matcher tests that need more than
+# guard's own trust root.
+SAMPLE_PATTERNS: tuple[str, ...] = (
+    ".git/hooks",
+    ".git/config",
+    ".git/info/attributes",
+    ".git/info/exclude",
+    ".gitmodules",
+    ".gitattributes",
+    ".claude/CLAUDE.md",
+    ".aider.conf.yml.user",
+    "CLAUDE.md",
+    ".cursorrules",
+    ".cursor/rules",
+    ".aider.conf.yml",
+    ".continue/config.json",
+    ".claude/mcp_servers",
+    ".claude/mcp.json",
+    ".aws/config",
+)
 
 
 def hook_path(name: str) -> Path:
@@ -65,27 +86,10 @@ def decision_from_stdout(stdout: str) -> str | None:
     return envelope.get("permissionDecision") if isinstance(envelope, dict) else None
 
 
-def lockdown_guard_home(guard_data_dir: str | None = None) -> Path:
-    """Return a guard home whose global allowlist sets ``mode: lockdown``.
-
-    Created next to the test's isolated ``GUARD_DATA_DIR`` when one is given,
-    else in a fresh temp dir.
-    """
-    home = (
-        Path(guard_data_dir).parent / "guard-home-lockdown"
-        if guard_data_dir
-        else Path(tempfile.mkdtemp(prefix="guard-lockdown-"))
-    )
-    home.mkdir(parents=True, exist_ok=True)
-    (home / "allowlist.json").write_text('{"mode": "lockdown"}', encoding="utf-8")
-    return home
-
-
 def run_hook(  # noqa: PLR0913 -- kw-only flags, all optional and orthogonal
     hook_name: str,
     command: str,
     *,
-    strict: bool = False,
     permission_mode: str | None = None,
     decisions_path: Path | None = None,
     env_extra: Mapping[str, str] | None = None,
@@ -94,9 +98,7 @@ def run_hook(  # noqa: PLR0913 -- kw-only flags, all optional and orthogonal
 ) -> tuple[int, str, str]:
     """Spawn the named hook with a Bash PreToolUse payload, return (rc, stdout, stderr).
 
-    The default payload is the canonical bash-command shape. ``strict=True``
-    runs the hook in guard's ``lockdown`` mode (strict default-deny) by
-    pointing ``GUARD_DATA_DIR`` at a scratch home whose allowlist sets it.
+    The default payload is the canonical bash-command shape.
     ``permission_mode`` sets the payload field; only ``auto`` changes the
     decision (STEER denies become logged passes).
     """
@@ -111,11 +113,8 @@ def run_hook(  # noqa: PLR0913 -- kw-only flags, all optional and orthogonal
         # real ~/.claude/guard-decisions.jsonl. setdefault preserves an already
         # isolated path from the inherited environment.
         env.setdefault("GUARD_DECISIONS_PATH", os.devnull)
-    env.setdefault("GUARD_STRICT_DENY_QUEUE_PATH", os.devnull)
     if env_extra:
         env.update(env_extra)
-    if strict:
-        env["GUARD_DATA_DIR"] = str(lockdown_guard_home(env.get("GUARD_DATA_DIR")))
     mode = permission_mode if permission_mode is not None else "default"
     payload: dict[str, Any] = {
         "session_id": session_id,

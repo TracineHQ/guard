@@ -22,7 +22,7 @@
 {"command": "runuser -u postgres -- psql", "expected": "deny", "mode": "default", "source": "adversarial", "note": "runuser -u <user> -- <cmd> run-as form denies even for a benign inner cmd: head-based, -- and inner not inspected"}
 {"command": "machinectl shell", "expected": "deny", "mode": "default", "source": "adversarial", "note": "machinectl shell with no user/host still opens a host shell -- tokens[1]=='shell' is the trigger, not a user arg"}
 {"command": "machinectl shell user@mycontainer /bin/bash", "expected": "deny", "mode": "default", "source": "adversarial", "note": "machinectl shell into a named container with explicit shell path still denies"}
-{"command": "machinectl shell root@container", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "strict counterpart: machinectl container shell-drop denies under bash.escalation_shell when unattended"}
+{"command": "machinectl shell root@container", "expected": "deny", "mode": "default", "source": "adversarial", "note": "strict counterpart: machinectl container shell-drop denies under bash.escalation_shell when unattended (was a lockdown row)"}
 {"command": "machinectl status mycontainer", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP: machinectl status is read-only introspection; tokens[1] != 'shell' so no escalation"}
 {"command": "machinectl show-image fedora", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP: machinectl show-* read subcommand; second token is not 'shell'"}
 {"command": "supervisorctl status", "expected": "allow", "mode": "default", "source": "adversarial", "note": "anti-FP: 'su' is only a substring of supervisorctl; _basename head is not in _ESCALATION_HEADS"}
