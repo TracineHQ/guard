@@ -1157,8 +1157,8 @@ _BRACE_EXPANSION_TOKEN_CAP = 4096
 # quoted body and escaped pair for ``_LITERAL_OPEN`` + its index in a side list
 # + ``_LITERAL_CLOSE``, so the expansion can't read into it, and
 # ``_restore_literals`` puts the text back.
-_LITERAL_OPEN = ""
-_LITERAL_CLOSE = ""
+_LITERAL_OPEN = "\ue001"
+_LITERAL_CLOSE = "\ue002"
 _LITERAL_RE = re.compile(f"{_LITERAL_OPEN}([0-9]+){_LITERAL_CLOSE}")
 
 
@@ -1234,11 +1234,12 @@ def _restore_literals(text: str, literals: list[str]) -> str:
     return _LITERAL_RE.sub(lambda m: literals[int(m.group(1))], text)
 
 
-def _expand_braces_in_line(line: str) -> str:
+def _expand_braces_in_line(line: str, *, quote_aware: bool = True) -> str:
     """Apply brace expansion to a single newline-free line.
 
     Braces inside quotes or after a backslash are left alone, as bash leaves
-    them; see ``_brace_words``.
+    them; see ``_brace_words``. ``quote_aware=False`` splits on whitespace
+    and expands every group.
 
     Bails out of the fixpoint loop once the accumulated token count exceeds
     ``_BRACE_EXPANSION_TOKEN_CAP``. The per-group 32-alternative cap in
@@ -1252,7 +1253,7 @@ def _expand_braces_in_line(line: str) -> str:
     """
     if "{" not in line:
         return line
-    split = _brace_words(line)
+    split = _brace_words(line) if quote_aware else None
     tokens, literals = split if split is not None else (line.split(), [])
     for _ in range(4):
         out: list[str] = []
@@ -1272,7 +1273,7 @@ def _expand_braces_in_line(line: str) -> str:
     return _restore_literals(" ".join(tokens), literals)
 
 
-def _expand_braces(command: str) -> str:
+def _expand_braces(command: str, *, quote_aware: bool = True) -> str:
     """Apply brace expansion to each line, preserving newlines.
 
     Iterates with a bounded fixpoint so nested forms (``{a,b}{c,d}``) expand
@@ -1283,7 +1284,9 @@ def _expand_braces(command: str) -> str:
     """
     if "{" not in command:
         return command
-    return "\n".join(_expand_braces_in_line(line) for line in command.split("\n"))
+    return "\n".join(
+        _expand_braces_in_line(line, quote_aware=quote_aware) for line in command.split("\n")
+    )
 
 
 def _canonicalize(command: str) -> str:
@@ -1296,11 +1299,16 @@ def _canonicalize(command: str) -> str:
     - ``rm\xa0-rf\xa0/`` (NBSP) and similar unicode whitespace bypasses
     - ``$'\\x72\\x6d' -rf /`` (ANSI-C quoting hides the head token)
     - ``{r,r}m -rf /`` (brace expansion produces ``rm rm -rf /``)
+
+    Brace expansion reads quotes (see ``_brace_words``) unless the command has
+    a ``$'``: decoding turns ``$'\\x27'`` into a bare quote that bash never
+    saw, so the quotes left are not the shell's.
     """
     command = command.replace("\\\n", " ")
     command = _UNICODE_WS_RE.sub(" ", command)
+    quote_aware = "$'" not in command
     command = _decode_ansi_c_quoted(command)
-    return _expand_braces(command)
+    return _expand_braces(command, quote_aware=quote_aware)
 
 
 # A newline inside quotes is part of an argument (a multi-line awk, jq or
@@ -1316,7 +1324,7 @@ _WORD_START_CHARS = frozenset(" \t\n;&|()<>")
 _ALIAS_RE = re.compile(r"\balias\b")
 
 
-def _mark_quoted_newlines(command: str) -> str | None:
+def _mark_quoted_newlines(command: str, *, comments: bool | None = None) -> str | None:
     """``command`` with each newline inside quotes swapped for ``_QUOTED_NEWLINE``.
 
     Reads the raw command the way the shell does: single quotes, double quotes
@@ -1329,15 +1337,23 @@ def _mark_quoted_newlines(command: str) -> str | None:
     than a plain name, the word ``alias`` anywhere (an alias can change how
     later lines are quoted), or a quote still open at the end. A backslash-newline inside
     double quotes is dropped, as the shell drops it.
+
+    ``comments`` set to ``True`` or ``False`` is the best-effort second look
+    the caller takes when the exact reading gives up: it reads past every one
+    of those bail-outs (``$'...'`` is an ANSI-C quote, a ``#`` starts a
+    comment only when ``comments`` is ``True``, heredoc bodies are skipped as
+    raw text, a stray ``_QUOTED_NEWLINE`` is replaced) and may be wrong about
+    them. A deny from that reading is worth having; an allow from it is not.
     """
-    if (
-        "\n" not in command
-        or _QUOTED_NEWLINE in command
-        or "$'" in command
-        or _ALIAS_RE.search(command)
-    ):
+    best_effort = comments is not None
+    if "\n" not in command:
+        return None
+    if best_effort:
+        command = command.replace(_QUOTED_NEWLINE, " ")
+    elif _QUOTED_NEWLINE in command or "$'" in command or _ALIAS_RE.search(command):
         return None
     out: list[str] = []
+    heredocs: list[tuple[str, bool]] = []
     quote = ""
     marked = False
     i, n = 0, len(command)
@@ -1353,24 +1369,51 @@ def _mark_quoted_newlines(command: str) -> str | None:
             out.append(command[i : i + 2])
             i += 2
             continue
+        elif quote == "$":
+            if c == "'":
+                quote = ""
         elif c == "`":
-            return None
+            if not best_effort:
+                return None
         elif command.startswith("${", i):
             param = _PLAIN_PARAM_RE.match(command, i)
-            if param is None:
+            if param is not None:
+                out.append(param.group())
+                i = param.end()
+                continue
+            if not best_effort:
                 return None
-            out.append(param.group())
-            i = param.end()
-            continue
         elif quote == '"':
-            if command.startswith("$(", i):
+            if command.startswith("$(", i) and not best_effort:
                 return None
             if c == '"':
                 quote = ""
         elif command.startswith("<<", i) or (
             c == "#" and (i == 0 or command[i - 1] in _WORD_START_CHARS)
         ):
-            return None
+            if not best_effort:
+                return None
+            if c == "#" and comments:
+                end = command.find("\n", i)
+                end = n if end < 0 else end
+                out.append(command[i:end])
+                i = end
+                continue
+            if command.startswith("<<<", i):
+                out.append("<<<")
+                i += 3
+                continue
+            operator = _HEREDOC_OP_RE.match(command, i) if c == "<" else None
+            if operator is not None:
+                heredocs.append((operator.group(3), operator.group(1) == "<<-"))
+                out.append(operator.group())
+                i = operator.end()
+                continue
+        elif best_effort and command.startswith("$'", i):
+            quote = "$"
+            out.append("$'")
+            i += 2
+            continue
         elif c in "'\"":
             quote = c
         if c == "\n" and quote:
@@ -1379,9 +1422,55 @@ def _mark_quoted_newlines(command: str) -> str | None:
         else:
             out.append(c)
         i += 1
-    if quote or not marked:
+        if c == "\n" and heredocs and not quote:
+            # The line's heredoc bodies are raw text: no quote in one opens a quote.
+            body_end = _heredoc_bodies_end(command, i, heredocs)
+            out.append(command[i:body_end])
+            i = body_end
+            heredocs = []
+    if not marked or (quote and not best_effort):
         return None
     return "".join(out)
+
+
+def _heredoc_bodies_end(command: str, start: int, heredocs: list[tuple[str, bool]]) -> int:
+    """Index in ``command`` just past the bodies of ``heredocs``, which begin at ``start``.
+
+    Each body runs through the line that is its delimiter (leading tabs
+    ignored for ``<<-``); an unterminated one runs to the end.
+    """
+    i, n = start, len(command)
+    for delimiter, tab_strip in heredocs:
+        while i < n:
+            end = command.find("\n", i)
+            end = n if end < 0 else end
+            line = command[i:end]
+            i = min(end + 1, n)
+            if (line.lstrip("\t") if tab_strip else line) == delimiter:
+                break
+    return i
+
+
+def _joined_readings(command: str) -> list[tuple[str, frozenset[str]]]:
+    """Best-effort readings of ``command`` with its quoted newlines joined.
+
+    For a command whose quoting ``_mark_quoted_newlines`` can't read exactly.
+    The caller splits on every newline there, so it can read the line after a
+    multi-line quoted argument as inside the quote: ``echo 'a<newline>b' ; rm
+    -rf / # x``. Each reading is a marked text, with the heredoc bodies that
+    are data taken out as the line split does, and the delimiters whose body
+    expands. There is one for each way of reading a ``#`` (a comment, or not).
+    Empty when no newline is quoted.
+    """
+    readings: list[tuple[str, frozenset[str]]] = []
+    for comments in (True, False):
+        walked = _mark_quoted_newlines(command, comments=comments)
+        if walked is None:
+            continue
+        reading = _heredoc_skeleton(walked)
+        if all(reading[0] != seen for seen, _ in readings):
+            readings.append(reading)
+    return readings
 
 
 # Regex matching a shell variable assignment of the form ``KEY=VALUE``.
@@ -1695,7 +1784,7 @@ _TIMING_RUNNERS: frozenset[str] = frozenset({"timeout", "nice", "ionice"})
 _UVX_MIN_TOKENS = 2  # `uvx <interpreter>`
 _PIPX_RUN_MIN_TOKENS = 3  # `pipx run <interpreter>`
 _UV_RUN_MIN_TOKENS = 3  # `uv run <interpreter>`
-_SCRIPT_C_MIN_TOKENS = 4  # `script <output> -c <cmd>`
+_SCRIPT_C_MIN_TOKENS = 3  # `script -c <cmd>`
 
 
 def _shlex_tokens(segment: str) -> list[str]:
@@ -1854,27 +1943,62 @@ def _strip_xargs(tokens: list[str]) -> str | None:
     return None
 
 
+# GNU parallel options whose value is the next word (``-j 2``); a fused value
+# (``-j2``, ``--jobs=2``) is one word and needs no entry.
+_PARALLEL_VALUE_FLAGS = frozenset(
+    {
+        "-j",
+        "--jobs",
+        "-P",
+        "--max-procs",
+        "-n",
+        "--max-args",
+        "-N",
+        "-L",
+        "--max-lines",
+        "-a",
+        "--arg-file",
+        "-d",
+        "--delimiter",
+        "-S",
+        "--sshlogin",
+        "-I",
+        "-s",
+        "-E",
+        "--colsep",
+        "--delay",
+        "--timeout",
+        "--retries",
+        "--joblog",
+        "--results",
+        "--load",
+        "--halt",
+    }
+)
+
+
 def _strip_parallel(tokens: list[str]) -> str | None:
     """Strip ``parallel [flags] <cmd> ::: <args>``.
 
     Args after ``:::`` are the operands the command runs against, so they're
     substituted into ``{}`` (or appended) so the deny matchers see the real
-    shape (``rm -rf /``, not ``rm -rf {}``).
+    shape (``rm -rf /``, not ``rm -rf {}``). With no command before ``:::``,
+    parallel runs each arg as a command, so they are returned as a sequence.
     """
     if _basename(tokens[0]) != "parallel":
         return None
     i = 1
     while i < len(tokens) and tokens[i].startswith("-"):
-        i += 1
+        i += 2 if tokens[i] in _PARALLEL_VALUE_FLAGS else 1
     if i >= len(tokens):
         return None
     end = i
     while end < len(tokens) and tokens[end] != ":::":
         end += 1
     cmd_tokens = tokens[i:end]
-    if not cmd_tokens:
-        return None
     args = tokens[end + 1 :] if end < len(tokens) else []
+    if not cmd_tokens:
+        return " ; ".join(args) or None
     if not args:
         return " ".join(cmd_tokens)
     substituted = [args[0] if t == "{}" else t for t in cmd_tokens]
@@ -1884,10 +2008,10 @@ def _strip_parallel(tokens: list[str]) -> str | None:
 
 
 def _strip_script(tokens: list[str]) -> str | None:
-    """Strip ``script <output> -c "<cmd>"``."""
+    """Strip ``script [-qc] -c "<cmd>" [<output>]``, with the output file on either side."""
     if _basename(tokens[0]) != "script" or len(tokens) < _SCRIPT_C_MIN_TOKENS:
         return None
-    for i in range(2, len(tokens) - 1):
+    for i in range(1, len(tokens) - 1):
         if _SHELL_C_FLAGS_RE.match(tokens[i]):
             return tokens[i + 1] if i + 1 < len(tokens) else None
     return None
@@ -5094,6 +5218,24 @@ _SANDBOX_VALUE_FLAGS: dict[str, int] = {
 }
 
 
+def _watch_flag_width(flag: str) -> int:
+    """Words a ``watch`` flag takes: itself, and its value when that is the next word.
+
+    ``-n SECONDS`` / ``--interval SECONDS`` and ``-q CYCLES`` / ``--equexit
+    CYCLES`` take a value, attached (``-n1``, ``--interval=1``) or separate. A
+    cluster ends in the letter that takes it (``-tn 1``). ``-d`` / ``--differences``
+    take theirs only when attached, so the word after them is the command.
+    """
+    if flag.startswith("--"):
+        return 2 if flag in {"--interval", "--equexit"} else 1
+    for k, letter in enumerate(flag[1:], start=1):
+        if letter == "d":
+            break
+        if letter in "nq":
+            return 2 if k == len(flag) - 1 else 1
+    return 1
+
+
 def _strip_exec_wrapper(tokens: list[str]) -> str | None:
     """Peel one pre-exec wrapper layer, returning the inner command.
 
@@ -5103,7 +5245,8 @@ def _strip_exec_wrapper(tokens: list[str]) -> str | None:
     ``flock``/``chrt``/``taskset``/``chroot`` take a leading positional before
     the inner command; the rest only take flags. ``bwrap``/``firejail`` take
     space-separated option values (``--dev-bind SRC DEST``) counted via
-    ``_SANDBOX_VALUE_FLAGS`` so the inner command isn't mistaken for a value.
+    ``_SANDBOX_VALUE_FLAGS`` so the inner command isn't mistaken for a value;
+    ``watch`` does the same for ``-n 1`` through ``_watch_flag_width``.
     """
     if not tokens:
         return None
@@ -5123,6 +5266,9 @@ def _strip_exec_wrapper(tokens: list[str]) -> str | None:
             and head == "runuser"
         ):
             cursor += 2
+            continue
+        if head == "watch":
+            cursor += _watch_flag_width(tokens[cursor])
             continue
         # ``bwrap --dev-bind SRC DEST`` etc.: consume space-separated values so
         # the loop doesn't break at the first value and leak the inner command.
@@ -5723,9 +5869,16 @@ def _expand_runner_payload_segments(seg: str) -> list[str]:
     if inner is None:
         return []
     marked = _mark_quoted_newlines(inner)
-    if marked is None:
-        return split_pipeline(_canonicalize(inner))
-    return [s.replace(_QUOTED_NEWLINE, "\n") for s in split_pipeline(_canonicalize(marked))]
+    if marked is not None:
+        return [s.replace(_QUOTED_NEWLINE, "\n") for s in split_pipeline(_canonicalize(marked))]
+    # The quoting can't be read exactly: check the line-by-line split and each
+    # joined reading, so a command after a multi-line quote is seen by one.
+    segments = split_pipeline(_canonicalize(inner))
+    for joined, _delimiters in _joined_readings(inner):
+        segments += [
+            s.replace(_QUOTED_NEWLINE, "\n") for s in split_pipeline(_canonicalize(joined))
+        ]
+    return segments
 
 
 # Inline programs that are STEER in auto mode when written out literally:
@@ -7159,14 +7312,49 @@ def _floor_check(text: str, command: str, *, floor_only: bool = False) -> dict[s
     return hit
 
 
+def _joined_readings_deny(
+    command: str, original_command: str, permission_mode: str, *, lockdown: bool
+) -> dict[str, str] | None:
+    """Deny envelope if ``command``, read with its quoted newlines joined, hits a rule.
+
+    Each reading from ``_joined_readings`` runs the whole decision quietly
+    (like a floor check: nothing is logged, the auto-mode passes it skips are
+    dropped) and only a deny counts, because the reading may be wrong about
+    the quoting. The caller goes on with its own line split when none denies.
+    """
+    ctx = _REQUEST_CONTEXT
+    depth: int = ctx["floor_depth"]
+    deferred: list[str] = list(ctx["deferred"])
+    for reading in _joined_readings(command):
+        ctx["floor_depth"] = depth + 1
+        ctx["floor_hit"] = ""
+        try:
+            hit = _decide_inner(
+                command, original_command, permission_mode, lockdown=lockdown, joined=reading
+            )
+        finally:
+            ctx["floor_depth"] = depth
+            ctx["deferred"] = list(deferred)
+        if hit is not None and hit.get("permissionDecision") == "deny":
+            _log_local(command, "deny", f"{ctx['floor_hit'] or 'floor'} (quoted lines joined)")
+            return hit
+    return None
+
+
 def _decide_inner(
     command: str,
     original_command: str,
     permission_mode: str,
     *,
     lockdown: bool,
+    joined: tuple[str, frozenset[str]] | None = None,
 ) -> dict[str, str] | None:
-    """The decision itself; ``decide`` wraps it with the auto-mode bookkeeping."""
+    """The decision itself; ``decide`` wraps it with the auto-mode bookkeeping.
+
+    ``joined`` is one best-effort reading from ``_joined_readings`` (its marked
+    text and heredoc delimiters): the command is then segmented from that text
+    instead of the exact quote walk or the line split.
+    """
     _REQUEST_CONTEXT["permission_mode"] = permission_mode
     _REQUEST_CONTEXT["lockdown"] = lockdown
     # Adversarial-length inputs (200 KB single-token ``echo aaaa...``) drive
@@ -7196,7 +7384,16 @@ def _decide_inner(
         return deny
     # Read the quoting before canonicalizing: decoding ``$'...'`` and expanding
     # braces don't respect quotes.
-    marked = _mark_quoted_newlines(command)
+    marked = _mark_quoted_newlines(command) if joined is None else joined[0]
+    if marked is None and joined is None:
+        # The quoting can't be read exactly, so the line split below may read a
+        # command after a multi-line quote as inside it. Deny if a reading that
+        # joins the quoted lines denies.
+        joined_deny = _joined_readings_deny(
+            command, original_command, permission_mode, lockdown=lockdown
+        )
+        if joined_deny is not None:
+            return joined_deny
     # Fold POSIX line continuations and unicode whitespace before any other
     # processing so downstream pipeline split / normalization sees a canonical
     # ASCII form.
@@ -7252,9 +7449,10 @@ def _decide_inner(
         skeleton, dynamic_heredocs = _heredoc_skeleton(cleaned)
         seg_pairs = split_pipeline_with_ops(skeleton) if skeleton else []
     else:
-        # The quote walk found no heredoc, and each quoted newline stays in
-        # the segment that holds its argument.
-        skeleton, dynamic_heredocs = cleaned, frozenset()
+        # The quote walk found no heredoc (or, for a joined reading, its
+        # bodies are out already), and each quoted newline stays in the
+        # segment that holds its argument.
+        skeleton, dynamic_heredocs = cleaned, frozenset() if joined is None else joined[1]
         seg_pairs = [
             (op, seg.replace(_QUOTED_NEWLINE, "\n"))
             for op, seg in split_pipeline_with_ops(strip_comments(_canonicalize(marked)))

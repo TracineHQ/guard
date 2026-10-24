@@ -198,3 +198,41 @@
 {"command": "echo '{a,b}' ; {r,r}m -rf /", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: the brace-expanded rm stays on the floor"}
 {"command": "rm -rf '/tmp/x{1,2}' /{etc,usr}", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a quoted brace group before an unquoted brace operand"}
 {"command": "rm -rf \"/tmp/x{1,2} y\" /{etc,usr}", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: a quoted group with a space before an unquoted brace operand"}
+{"command": "true $'\\x27';{r,r}m -rf /;true $'\\x27'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "decoding $'\\x27' leaves a bare quote bash never saw; it must not set the real {r,r}m aside as quoted"}
+{"command": "true $'\\x27';{r,r}m -rf /;true $'\\x27'", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: the brace-built rm stays on the floor"}
+{"command": "true $'\\'';{r,r}m -rf /;true $'\\''", "expected": "deny", "mode": "default", "source": "adversarial", "note": "an escaped quote inside $'...' decodes to a bare quote"}
+{"command": "true $'\\x22';{r,r}m -rf /;true $'\\x22'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a hex double quote inside $'...' decodes to a bare quote"}
+{"command": "bash -c \"true $'\\x27';{r,r}m -rf /;true $'\\x27'\"", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "the same shape inside a bash -c string, whose payload is floor-checked in auto"}
+{"command": "echo 'a\nb' ; rm -rf / # x", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a trailing comment makes the quote walk give up; the joined reading still sees the rm"}
+{"command": "echo 'a\nb' ; rm -rf / # x", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: a trailing comment after a multi-line quote"}
+{"command": "# note\necho 'a\nb' ; rm -rf /", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a leading comment line makes the quote walk give up"}
+{"command": "# note\necho 'a\nb' ; rm -rf /", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: a leading comment line"}
+{"command": "# it's\necho 'a\nb' ; rm -rf /", "expected": "deny", "mode": "default", "source": "adversarial", "note": "an apostrophe in a comment line: the reading that skips comments sees the rm"}
+{"command": "echo 'a\nb alias' ; rm -rf /", "expected": "deny", "mode": "default", "source": "adversarial", "note": "the word alias inside the quotes makes the quote walk give up"}
+{"command": "echo 'a\nb alias' ; rm -rf /", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: alias inside the quotes"}
+{"command": "echo 'a\nb' ; rm -rf / ; echo ${x:-y}", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a parameter operator makes the quote walk give up"}
+{"command": "echo 'a\nb' ; rm -rf / ; echo ${x:-y}", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: a parameter operator"}
+{"command": "echo 'a\nb' ; rm -rf / ; echo $'x'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "an ANSI-C quote makes the quote walk give up"}
+{"command": "echo 'a\nb' ; rm -rf / ; echo $'x'", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: an ANSI-C quote"}
+{"command": "echo 'a\nb' ; rm -rf / ; cat <<EOF\nx\nEOF", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a heredoc makes the quote walk give up"}
+{"command": "echo 'a\nb' ; rm -rf / ; cat <<EOF\nx\nEOF", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: a heredoc"}
+{"command": "cat <<EOF\nit's\nEOF\necho 'a\nb' ; rm -rf /", "expected": "deny", "mode": "default", "source": "adversarial", "note": "an apostrophe in a heredoc body is not a quote: the body is taken out before the walk"}
+{"command": "bash -c \"echo 'a\nb' ; rm -rf / # x\"", "expected": "deny", "mode": "default", "source": "adversarial", "note": "the same shape inside a bash -c payload"}
+{"command": "bash -c \"echo 'a\nb' ; rm -rf / # x\"", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: the payload is floor-checked"}
+{"command": "watch -n 1 'rm -rf /'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "watch -n takes a value; the command after it is rm"}
+{"command": "watch -n 1 'rm -rf /'", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: watch -n 1"}
+{"command": "watch -n 1 'rm -rf /; echo a'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "the first command of a watch payload after -n 1"}
+{"command": "watch -q 3 'rm -rf /'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "watch -q takes a value too"}
+{"command": "watch --interval 2 'rm -rf /'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "watch --interval takes a separate value"}
+{"command": "watch -d 'rm -rf /'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "watch -d takes no separate value, so the next word is the command"}
+{"command": "script -c 'rm -rf /' /dev/null", "expected": "deny", "mode": "default", "source": "adversarial", "note": "script -c as the first flag"}
+{"command": "script -qc 'echo a; rm -rf /' /dev/null", "expected": "deny", "mode": "default", "source": "adversarial", "note": "script with -c clustered into -qc"}
+{"command": "script -qc 'echo a; rm -rf /' /dev/null", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: script -qc"}
+{"command": "parallel -j 2 'rm -rf {}' ::: /", "expected": "deny", "mode": "default", "source": "adversarial", "note": "parallel -j takes a value; the next word is the command"}
+{"command": "parallel -j 2 'rm -rf {}' ::: /", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: parallel -j 2"}
+{"command": "parallel ::: 'rm -rf /'", "expected": "deny", "mode": "default", "source": "adversarial", "note": "with no command, parallel runs each ::: argument as a command"}
+{"command": "parallel ::: 'echo a' 'rm -rf /'", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: the second argument is a command too"}
+{"command": "echo `date` 'a\nb' # it's\necho 'alias\nz' && cat <<'EOF'\n\"x\nEOF\necho 'it\ns' ; rm -rf / # x", "expected": "deny", "mode": "default", "source": "adversarial", "note": "a quote in a heredoc body, a comment and a backtick together: the heredoc body is skipped when joining quoted lines"}
+{"command": "echo `date` 'a\nb' # it's\necho 'alias\nz' && cat <<'EOF'\n\"x\nEOF\necho 'it\ns' ; rm -rf / # x", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: heredoc body skipped when joining quoted lines"}
+{"command": "cat <<EOF\n\"x\nEOF\necho \"a\nb\" && script -qc 'rm -rf /' /dev/null\necho \"a\nb\" # x", "expected": "deny", "mode": "default", "source": "adversarial", "note": "an odd quote in a heredoc body does not hide a later script -qc"}
+{"command": "cat <<EOF\n\"x\nEOF\necho \"a\nb\" && script -qc 'rm -rf /' /dev/null\necho \"a\nb\" # x", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "auto-mode counterpart: odd quote in a heredoc body"}

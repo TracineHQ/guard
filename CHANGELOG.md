@@ -103,10 +103,18 @@ adheres to [Semantic Versioning](https://semver.org/).
   on every newline, so the line after a quoted newline began inside the
   quote and the `;`, `&&` or `|` after its closing quote read as quoted:
   `echo 'a<newline>b' ; rm -rf /` passed in every mode. A `system()` call in
-  a multi-line awk program missed the awk floor the same way.
+  a multi-line awk program missed the awk floor the same way. Where the
+  quoting can't be read exactly (a `#` comment, a heredoc, `alias`, `$'...'`,
+  a backtick, `${x:-y}`), guard reads the command with the quoted lines
+  joined as well as line by line, and denies if either reading denies.
+  `echo 'a<newline>b' ; rm -rf / # x` passed in every mode before.
 - `watch`, `script -c` and `parallel` run their command through a shell, and
   that command is now split like a `bash -c` string. A second command in it
-  (`watch -n1 'echo a; rm -rf /'`) passed before.
+  (`watch -n1 'echo a; rm -rf /'`) passed before. The command is also found
+  behind the values `watch` (`-n 1`, `--interval 2`, `-q 3`) and `parallel`
+  (`-j 2`) take, behind a clustered `script -qc` or a leading `script -c`,
+  and `parallel ::: 'rm -rf /'` runs its arguments as the commands they are.
+  `watch -n 1 'rm -rf /'` and `parallel -j 2 'rm -rf {}' ::: /` passed before.
 
 ### Fixed
 
@@ -130,8 +138,8 @@ adheres to [Semantic Versioning](https://semver.org/).
     command named by an expansion. When the quoting can't be read exactly
     (a heredoc, a `#` that may start a comment, a backtick, `$'...'`,
     `$(...)` inside double quotes, a `${...}` other than a plain name,
-    `alias`, an unterminated quote), guard still splits on every newline.
-
+    `alias`, an unterminated quote), guard splits on every newline as before
+    and also checks the command with the quoted lines joined.
 - A brace inside quotes or after a backslash is left alone, as bash leaves it.
   Brace expansion split the line on whitespace and ignored quotes, so a
   quantifier such as `{1,2}` or `{3,}` in `grep -E "[0-9]{1,2} x|y"` became
@@ -140,8 +148,7 @@ adheres to [Semantic Versioning](https://semver.org/).
   no longer ends a word either. An unquoted `{a,b}` still expands and is
   checked as before. When the quoting can't be read exactly (an unterminated
   quote, a backtick, `$(...)` or a `${...}` other than a plain name inside
-  double quotes), every brace is expanded as before.
-
+  double quotes) or the command has a `$'`, every brace is expanded as before.
 - Read-only guard CLI calls (`guard status`, `guard allowlist list`,
   `guard mode --help`, `guard allowlist --help`) no longer trip
   `protected_files`.

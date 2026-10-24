@@ -13,9 +13,13 @@ from pathlib import Path
 import pytest
 
 from guard.hooks.bash_command_validator import (
+    _QUOTED_NEWLINE,
     _canonicalize,
     _get_alternative_feedback,
+    _joined_readings,
     _mark_quoted_newlines,
+    _strip_exec_wrapper,
+    _strip_runner_prefix,
     decide,
     get_credential_leak_deny,
     has_dangerous_constructs,
@@ -138,6 +142,82 @@ class TestMarkQuotedNewlines:
     def test_leaves_unmarked_or_unreadable_commands_alone(self, command):
         assert _mark_quoted_newlines(command) is None
 
+    @pytest.mark.parametrize(
+        ("command", "comments", "expected"),
+        [
+            pytest.param(
+                "echo 'a\nb' ; rm -rf / # x",
+                True,
+                f"echo 'a{_QUOTED_NEWLINE}b' ; rm -rf / # x",
+                id="trailing-comment",
+            ),
+            pytest.param(
+                "# it's\necho 'a\nb'",
+                True,
+                f"# it's\necho 'a{_QUOTED_NEWLINE}b'",
+                id="comment-skipped",
+            ),
+            pytest.param(
+                "# it's\necho 'a\nb'",
+                False,
+                f"# it's{_QUOTED_NEWLINE}echo 'a\nb'",
+                id="comment-read-as-text",
+            ),
+            pytest.param(
+                "echo 'a\nb alias'", True, f"echo 'a{_QUOTED_NEWLINE}b alias'", id="alias"
+            ),
+            pytest.param(
+                "echo ${x:-y} 'a\nb'", True, f"echo ${{x:-y}} 'a{_QUOTED_NEWLINE}b'", id="param"
+            ),
+            pytest.param(
+                "echo $'a\\'b\nc'", True, f"echo $'a\\'b{_QUOTED_NEWLINE}c'", id="ansi-c-quote"
+            ),
+            pytest.param(
+                "echo `date` 'a\nb'", True, f"echo `date` 'a{_QUOTED_NEWLINE}b'", id="tick"
+            ),
+            pytest.param(
+                "cat <<EOF 'a\nb'", True, f"cat <<EOF 'a{_QUOTED_NEWLINE}b'", id="heredoc-operator"
+            ),
+            pytest.param(
+                "cat <<EOF\nit's\nEOF\necho 'a\nb'",
+                True,
+                f"cat <<EOF\nit's\nEOF\necho 'a{_QUOTED_NEWLINE}b'",
+                id="heredoc-body-skipped",
+            ),
+            pytest.param(
+                "cat <<-EOF\n\tit's\n\tEOF\necho 'a\nb'",
+                False,
+                f"cat <<-EOF\n\tit's\n\tEOF\necho 'a{_QUOTED_NEWLINE}b'",
+                id="heredoc-tab-stripped-delimiter",
+            ),
+            pytest.param(
+                "cat <<A <<'B'\n'\nA\n\"\nB\necho 'a\nb'",
+                True,
+                f"cat <<A <<'B'\n'\nA\n\"\nB\necho 'a{_QUOTED_NEWLINE}b'",
+                id="two-heredocs-on-a-line",
+            ),
+            pytest.param(
+                "cat <<<it\necho 'a\nb'",
+                True,
+                f"cat <<<it\necho 'a{_QUOTED_NEWLINE}b'",
+                id="here-string-is-not-a-heredoc",
+            ),
+            pytest.param("echo 'open\nline", True, f"echo 'open{_QUOTED_NEWLINE}line", id="open"),
+            pytest.param(
+                f"echo 'a\nb{_QUOTED_NEWLINE}'", True, f"echo 'a{_QUOTED_NEWLINE}b '", id="sentinel"
+            ),
+        ],
+    )
+    def test_best_effort_reading_reads_past_what_the_exact_walk_gives_up_on(
+        self, command, comments, expected
+    ):
+        assert _mark_quoted_newlines(command, comments=comments) == expected
+
+    @pytest.mark.parametrize("comments", [True, False])
+    def test_best_effort_reading_still_needs_a_quoted_newline(self, comments):
+        assert _mark_quoted_newlines("echo a\nls 'b' # c", comments=comments) is None
+        assert _mark_quoted_newlines("echo 'a b'", comments=comments) is None
+
 
 class TestQuotedBraces:
     @pytest.mark.parametrize(
@@ -174,7 +254,12 @@ class TestQuotedBraces:
                 "echo \"${x:-a}\" '{a,b}'", "echo \"${x:-a}\" 'a' 'b'", id="parameter-word"
             ),
             pytest.param("echo `echo '{a,b}'`", "echo `echo 'a'` 'b'`", id="backtick"),
-            pytest.param("echo '' '{a,b}'", "echo '' 'a' 'b'", id="marker-in-input"),
+            pytest.param(
+                "echo '\ue001' '{a,b}'", "echo '\ue001' 'a' 'b'", id="open-marker-in-input"
+            ),
+            pytest.param(
+                "echo '\ue002' '{a,b}'", "echo '\ue002' 'a' 'b'", id="close-marker-in-input"
+            ),
         ],
     )
     def test_unreadable_quoting_is_expanded_as_before(self, command, expected):
@@ -226,6 +311,178 @@ class TestQuotedBraces:
     )
     def test_unquoted_braces_still_expand_and_deny(self, command):
         assert _is_deny(decide(command)), f"unquoted brace shape not denied: {command!r}"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param("true $'\\x27';{r,r}m -rf /;true $'\\x27'", id="hex-single-quote"),
+            pytest.param("true $'\\'';{r,r}m -rf /;true $'\\''", id="escaped-single-quote"),
+            pytest.param("true $'\\x22';{r,r}m -rf /;true $'\\x22'", id="hex-double-quote"),
+            pytest.param("bash -c \"true $'\\x27';{r,r}m -rf /;true $'\\x27'\"", id="in-bash-c"),
+        ],
+    )
+    @pytest.mark.parametrize("mode", ["default", "auto"])
+    def test_ansi_c_quote_does_not_hide_a_brace_built_head(self, command, mode):
+        # Decoding ``$'\x27'`` leaves a bare quote bash never saw; reading it as
+        # a real quote would set the real ``{r,r}m`` aside as quoted text.
+        assert _is_deny(decide(command, permission_mode=mode)), command
+
+    def test_a_line_with_an_ansi_c_quote_expands_every_group(self):
+        assert _canonicalize("echo '{a,b}' $'x'") == "echo 'a' 'b' x"
+
+
+class TestQuotedNewlinesTheExactWalkCannotRead:
+    """The line split reads the line after a multi-line quote as inside it.
+
+    Where ``_mark_quoted_newlines`` gives up, guard also reads the command with
+    its quoted newlines joined and denies if either reading denies.
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param("echo 'a\nb' ; rm -rf / # x", id="trailing-comment"),
+            pytest.param("# note\necho 'a\nb' ; rm -rf /", id="leading-comment"),
+            pytest.param("# it's\necho 'a\nb' ; rm -rf /", id="apostrophe-in-comment"),
+            pytest.param("echo 'a\nb alias' ; rm -rf /", id="alias-in-quotes"),
+            pytest.param("echo 'a\nb' ; rm -rf / ; echo ${x:-y}", id="parameter-operator"),
+            pytest.param("echo 'a\nb' ; rm -rf / ; echo $'x'", id="ansi-c"),
+            pytest.param("echo 'a\nb' ; rm -rf / ; cat <<EOF\nx\nEOF", id="heredoc"),
+            pytest.param(
+                "cat <<EOF\nit's\nEOF\necho 'a\nb' ; rm -rf /", id="apostrophe-in-heredoc"
+            ),
+            pytest.param("echo `date` 'a\nb' ; rm -rf /", id="backtick"),
+            pytest.param(
+                "echo 'a\nb' ; cat <<'EOF'\n\"x\nEOF\nrm -rf /", id="heredoc-operator-after-quote"
+            ),
+            pytest.param(
+                "echo `date` 'a\nb' # it's\necho 'alias\nz' && cat <<'EOF'\n\"x\nEOF\n"
+                "echo 'it\ns' ; rm -rf / # x",
+                id="heredoc-after-comment-and-quotes",
+            ),
+            pytest.param('echo "a\nb" ; rm -rf / # x', id="double-quoted"),
+            pytest.param(f"echo 'a\nb{_QUOTED_NEWLINE}' ; rm -rf / # x", id="sentinel-in-input"),
+            pytest.param("bash -c \"echo 'a\nb' ; rm -rf / # x\"", id="in-bash-c"),
+        ],
+    )
+    @pytest.mark.parametrize("mode", ["default", "auto"])
+    def test_command_after_the_quote_is_denied(self, command, mode):
+        assert _is_deny(decide(command, permission_mode=mode)), command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param("echo 'a\nb' # x", id="trailing-comment"),
+            pytest.param("# note\necho 'a\nb'", id="leading-comment"),
+            pytest.param("# it's\nls\necho 'a\nb'", id="apostrophe-in-comment"),
+            pytest.param('git commit -m "fix\n\nbody" # note', id="commit-message"),
+            pytest.param("cat <<'EOF'\nit's here\nrm -rf /\nEOF", id="heredoc-body-is-data"),
+            pytest.param("echo ${x:-y} 'a\nb'", id="parameter-operator"),
+            pytest.param(
+                "cat <<'EOF'\nit's here\nrm -rf /\nEOF\necho 'a\nb' # x", id="heredoc-then-quote"
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("mode", ["default", "auto"])
+    def test_harmless_commands_are_not_denied(self, command, mode):
+        assert not _is_deny(decide(command, permission_mode=mode)), command
+
+    def test_joined_readings(self):
+        def texts(command):
+            return [marked for marked, _delimiters in _joined_readings(command)]
+
+        assert texts("# it's\necho 'a\nb'") == [
+            f"# it's\necho 'a{_QUOTED_NEWLINE}b'",
+            f"# it's{_QUOTED_NEWLINE}echo 'a\nb'",
+        ]
+        assert texts("echo a\nls") == []
+        assert texts("echo 'a\nb' # x") == [f"echo 'a{_QUOTED_NEWLINE}b' # x"]
+
+
+class TestShellRunWrappers:
+    """``watch``, ``script -c`` and ``parallel`` run their command through a shell."""
+
+    @pytest.mark.parametrize(
+        ("tokens", "inner"),
+        [
+            pytest.param(["watch", "-n", "1", "rm -rf /"], "rm -rf /", id="n-separate"),
+            pytest.param(["watch", "-n1", "ls"], "ls", id="n-attached"),
+            pytest.param(["watch", "-n", "1", "-d", "ls"], "ls", id="n-then-d"),
+            pytest.param(["watch", "--interval", "2", "ls"], "ls", id="interval-separate"),
+            pytest.param(["watch", "--interval=2", "ls"], "ls", id="interval-attached"),
+            pytest.param(["watch", "-q", "3", "ls"], "ls", id="q-separate"),
+            pytest.param(["watch", "--equexit", "3", "ls"], "ls", id="equexit-separate"),
+            pytest.param(["watch", "-tn", "1", "ls"], "ls", id="cluster-ending-in-n"),
+            pytest.param(["watch", "-tn1", "ls"], "ls", id="cluster-with-attached-value"),
+            pytest.param(["watch", "-d", "ls"], "ls", id="d-takes-no-separate-value"),
+            pytest.param(["watch", "-d=cumulative", "ls"], "ls", id="d-attached-value"),
+            pytest.param(["watch", "--differences", "ls"], "ls", id="differences-takes-none"),
+            pytest.param(["watch", "-n", "1", "--", "ls"], "ls", id="terminator"),
+        ],
+    )
+    def test_watch_flag_values_are_skipped(self, tokens, inner):
+        assert _strip_exec_wrapper(tokens) == inner
+
+    @pytest.mark.parametrize(
+        ("command", "inner"),
+        [
+            pytest.param("script -c 'rm -rf /' /dev/null", "rm -rf /", id="c-first"),
+            pytest.param("script -qc 'echo a; rm -rf /' /dev/null", "echo a; rm -rf /", id="qc"),
+            pytest.param("script -q -c 'rm -rf /' /dev/null", "rm -rf /", id="q-then-c"),
+            pytest.param("script /dev/null -c 'rm -rf /'", "rm -rf /", id="file-first"),
+            pytest.param("script -c 'rm -rf /'", "rm -rf /", id="no-file"),
+            pytest.param("parallel -j 2 'rm -rf {}' ::: /", "rm -rf {} /", id="jobs-separate"),
+            pytest.param("parallel -j2 'rm -rf {}' ::: /", "rm -rf {} /", id="jobs-attached"),
+            pytest.param(
+                "parallel --jobs 2 -k 'rm -rf {}' ::: /", "rm -rf {} /", id="long-and-bare"
+            ),
+            pytest.param("parallel ::: 'rm -rf /'", "rm -rf /", id="args-are-commands"),
+            pytest.param("parallel ::: 'echo a' 'rm -rf /'", "echo a ; rm -rf /", id="two-args"),
+            pytest.param("parallel -j 2 ::: 'rm -rf /'", "rm -rf /", id="jobs-then-args"),
+        ],
+    )
+    def test_script_and_parallel_commands_are_found(self, command, inner):
+        assert _strip_runner_prefix(command) == inner
+
+    @pytest.mark.parametrize("command", ["parallel :::", "parallel -j 2", "script -q"])
+    def test_nothing_to_run(self, command):
+        assert _strip_runner_prefix(command) is None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param("watch -n 1 'rm -rf /'", id="watch-n"),
+            pytest.param("watch -n 1 rm -rf /", id="watch-n-unquoted"),
+            pytest.param("watch -n 1 'rm -rf /; echo a'", id="watch-n-first-of-two"),
+            pytest.param("watch -n1 'echo a; rm -rf /'", id="watch-n-attached-second"),
+            pytest.param("watch -q 3 'rm -rf /'", id="watch-q"),
+            pytest.param("watch --interval 2 'rm -rf /'", id="watch-interval"),
+            pytest.param("watch -tn 1 'rm -rf /'", id="watch-cluster"),
+            pytest.param("watch -d 'rm -rf /'", id="watch-d"),
+            pytest.param("script -c 'rm -rf /' /dev/null", id="script-c"),
+            pytest.param("script -qc 'echo a; rm -rf /' /dev/null", id="script-qc"),
+            pytest.param("parallel -j 2 'rm -rf {}' ::: /", id="parallel-j"),
+            pytest.param("parallel -j 2 'echo a; rm -rf {}' ::: /", id="parallel-j-second"),
+            pytest.param("parallel ::: 'rm -rf /'", id="parallel-args"),
+            pytest.param("parallel ::: 'echo a' 'rm -rf /'", id="parallel-second-arg"),
+        ],
+    )
+    @pytest.mark.parametrize("mode", ["default", "auto"])
+    def test_dangerous_command_is_denied(self, command, mode):
+        assert _is_deny(decide(command, permission_mode=mode)), command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "watch -n 1 'ls -la'",
+            "watch -d ls",
+            "watch --interval=2 ls",
+            "script -qc 'ls' /dev/null",
+            "parallel -j 2 'echo {}' ::: a b",
+        ],
+    )
+    def test_harmless_command_is_not_denied(self, command):
+        assert not _is_deny(decide(command)), command
 
 
 class TestStripComments:

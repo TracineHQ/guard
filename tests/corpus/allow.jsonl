@@ -94,3 +94,12 @@
 {"command": "grep -c -E -e '^\\[ft\\] f(3[4-9][0-9][0-9]|[4-9][0-9]{3}) guest +([2-9][0-9]|[0-9]{3,})\\.' build/probe/stdout.txt", "expected": "allow", "mode": "default", "source": "convo:session", "note": "an open-ended `{3,}` in a quoted regex stays one word; expanded, the quote broke and the `|` split the command"}
 {"command": "git -C /tmp/repo log --format='%s' -n 300 | grep -nE \"\\b[A-Z][0-9]{1,2}[a-z]?\\b|[Tt]ask [0-9]\"", "expected": "allow", "mode": "default", "source": "convo:session", "note": "`{1,2}` in a double-quoted regex stays literal; `[Tt]ask` was read as a glob command head"}
 {"command": "echo '{a,b} c' {d,e}", "expected": "allow", "mode": "default", "source": "curated", "note": "a quoted brace group with a space stays whole beside a real expansion"}
+{"command": "echo 'a\nb' # x", "expected": "allow", "mode": "default", "source": "curated", "note": "a trailing comment after a multi-line quote: both readings find one echo"}
+{"command": "# note\necho 'a\nb'", "expected": "allow", "mode": "default", "source": "curated", "note": "a leading comment line before a multi-line quote"}
+{"command": "# it's\nls\necho 'a\nb'", "expected": "allow", "mode": "default", "source": "curated", "note": "an apostrophe in a comment line does not turn later lines into commands"}
+{"command": "git commit -m \"fix\n\nbody\" # note", "expected": "allow", "mode": "default", "source": "curated", "note": "a multi-line commit message with a trailing comment"}
+{"command": "watch -n 1 'ls -la'", "expected": "allow", "mode": "default", "source": "curated", "note": "watch -n 1 around a harmless command"}
+{"command": "watch -d ls", "expected": "allow", "mode": "default", "source": "curated", "note": "watch -d around a harmless command"}
+{"command": "script -qc 'ls' /dev/null", "expected": "allow", "mode": "default", "source": "curated", "note": "script -qc around a harmless command"}
+{"command": "parallel -j 2 'echo {}' ::: a b", "expected": "allow", "mode": "default", "source": "curated", "note": "parallel -j 2 around a harmless command"}
+{"command": "cat <<'EOF'\nit's here\nrm -rf /\nEOF\necho 'a\nb' # x", "expected": "allow", "mode": "default", "source": "curated", "note": "a heredoc body is data even when a quoted newline follows it"}
