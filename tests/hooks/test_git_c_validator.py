@@ -87,6 +87,10 @@ class TestAllowedSubcommands:
         decision, _ = _run("git -C /path diff origin/main..feat -- file.py")
         assert decision == "allow"
 
+    def test_grep_pattern_that_looks_like_a_pager_flag(self):
+        decision, _ = _run("git -C /path grep -n -e -O2 -- .")
+        assert decision == "allow"
+
 
 class TestDeniedSubcommands:
     def test_git_c_validator_denies_unsafe_input(self):
@@ -205,6 +209,7 @@ class TestRuleKeys:
             ("git -C /repo reset --hard", "guard.git_c_validator:destructive"),
             ("git -C /repo clean -fd", "guard.git_c_validator:destructive"),
             ("git -C /repo log --output=/tmp/x", "guard.git_c_validator:read_exec"),
+            ("git -C /repo grep -nOvim x", "guard.git_c_validator:read_exec"),
             ("git -C /repo branch feature", "guard.git_c_validator:ref_mutation"),
             ("git -C /repo push", "guard.git_c_validator:not_read_only"),
             ("git -c core.hooksPath=/tmp/h -C /repo status", "guard.git_c_validator:paths_config"),

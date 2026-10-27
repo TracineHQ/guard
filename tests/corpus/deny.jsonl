@@ -55,6 +55,11 @@
 {"command": "git diff --ext-diff HEAD~1", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "form-fuzz: diff --ext-diff exec"}
 {"command": "git grep -O/bin/sh pattern", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "form-fuzz: fused -O<path> pager exec"}
 {"command": "git grep --open-files-in-pager sh", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "form-fuzz: bare --open-files-in-pager (default pager) still execs"}
+{"command": "git grep -nOsh pattern", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "-O<pager> bundled behind another short flag"}
+{"command": "git grep --op=sh pattern", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "git reads a unique prefix of --open-files-in-pager as the option"}
+{"command": "git grep -e -- -Osh pattern", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "-e takes the -- as its pattern, so -O<pager> is still an option"}
+{"command": "git grep -e 'x -e' -Osh pattern", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "the second -e is inside the first pattern, so -O<pager> is still an option"}
+{"command": "git grep -e 'x --' -Osh pattern", "expected": "deny", "mode": "auto", "source": "adversarial", "note": "the -- is inside the pattern, so -O<pager> is still an option"}
 {"command": "git -c core.pager=cat log --output=/tmp/x", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "form-fuzz: -c global wraps the exec flag; candidate-form canonicalization must still catch --output"}
 {"command": "git log --output=/tmp/x", "expected": "deny", "mode": "default", "source": "adversarial", "note": "exec/write flags deny in INTERACTIVE mode too (synthetic floor, both modes)"}
 {"command": "git tag -f release HEAD", "expected": "deny", "mode": "lockdown", "source": "adversarial", "note": "form-fuzz: -f force-moves an existing tag (mutation)"}

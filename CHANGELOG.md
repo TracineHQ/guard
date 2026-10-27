@@ -210,6 +210,10 @@ adheres to [Semantic Versioning](https://semver.org/).
   `set` subcommand is used.
 - `git -C <repo> fetch` is allowed when it only updates remote-tracking refs.
   Pruning, forcing, a destination refspec or `--upload-pack` still deny.
+- `git grep` reads its options the way git does. A pattern after `-e` or `-f`
+  and a pathspec after `--` are no longer read as `-O<pager>`
+  (`git grep -e '-O2'`). `-O` bundled behind another flag (`-nOvim`) and a
+  shortened `--open-files-in-pager` (`--op=vim`) now deny.
 - The `git worktree add` steer now gives a sequence guard actually allows
   (add the worktree detached, then `git switch -c` inside it).
 - Tests and the corpus no longer touch the developer's real home: conftest
