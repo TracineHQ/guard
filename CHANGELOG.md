@@ -114,6 +114,16 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- `credential_check` no longer passes a command it crashed on. A token shaped
+  like `~user/path` whose user doesn't exist (`~128GB/s`) made `expanduser`
+  raise, and a crashing hook passes silently, so
+  `echo "~128GB/s"; cat ~/.aws/credentials` went through. Such a token now
+  stays as written, and any other crash in `credential_check` denies with an
+  "internal error" reason instead of passing. The deny goes through the normal
+  decision path, so `off` mode and a disabled rule still pass. Other hooks
+  still fail open.
+- `internal_error` records name the hook that crashed (`hook_id`), and
+  `guard trace` shows it on crash lines.
 - Development dependencies pulled in by pre-commit move past published
   advisories: `filelock` 4.2.4 and `virtualenv` 21.14.13. Installed guard
   doesn't use either.

@@ -28,6 +28,7 @@ utility is independent of the hook entry point.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shlex
@@ -38,6 +39,7 @@ from typing import Any
 from guard._utils import (
     all_paths_in,
     emit_pretooluse_decision,
+    log_internal_error,
     safe_main,
     token_basename,
 )
@@ -150,9 +152,28 @@ _DENY_REASON_COPY = (
     "that needs them at the original path, or tell the user what you're "
     "setting up."
 )
+_DENY_REASON_INTERNAL = (
+    "Guard hit an internal error checking this command for credential access, "
+    "so it is blocked rather than let through unchecked. Rephrase or split the "
+    "command. If it keeps happening, tell the user; the error is in the guard "
+    "decision log."
+)
 # Write-class tools whose credential subject is the DESTINATION path, not paths
 # mentioned in the content body (see ``decide``).
 _WRITE_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+
+
+def _expanduser(path: str) -> Path:
+    """``Path.expanduser`` that leaves an unknown ``~user`` prefix as written.
+
+    ``Path("~128GB/s").expanduser()`` raises ``RuntimeError`` because there is
+    no user named ``128GB``. Such a token is not a home directory, so it can't
+    be one of the credential paths anchored on ``$HOME``.
+    """
+    try:
+        return Path(path).expanduser()
+    except RuntimeError:
+        return Path(path)
 
 
 def _expand(path: str) -> str:
@@ -160,7 +181,7 @@ def _expand(path: str) -> str:
 
     Falls back to the lexical form if ``Path.resolve()`` raises ``OSError``.
     """
-    expanded = str(Path(path).expanduser())
+    expanded = str(_expanduser(path))
     try:
         return str(Path(expanded).resolve())
     except OSError:
@@ -180,7 +201,7 @@ def _candidate_paths(path: str) -> list[str]:
         return out
     resolved = _expand(path)
     out.append(resolved)
-    lexical = os.path.normpath(str(Path(path).expanduser()))
+    lexical = os.path.normpath(str(_expanduser(path)))
     if lexical != resolved:
         out.append(lexical)
     if resolved.startswith("/private/"):
@@ -370,7 +391,17 @@ def hook(payload: dict[str, Any]) -> None:
     if not isinstance(tool_input, dict):
         return
 
-    envelope = decide(tool_name, tool_input)
+    # Credential access is a floor: a crash here blocks the call instead of
+    # passing it, still through apply_decision so mode and allowlist hold.
+    try:
+        envelope = decide(tool_name, tool_input)
+    except Exception as exc:  # noqa: BLE001 -- any crash must fail closed, not silently pass
+        sid = payload.get("session_id")
+        with contextlib.suppress(Exception):  # a failed log write must not reopen the hole
+            log_internal_error(
+                exc, session_id=sid if isinstance(sid, str) else "", hook_id=_HOOK_ID
+            )
+        envelope = emit_pretooluse_decision("deny", _DENY_REASON_INTERNAL)
     if envelope is None:
         return
 
