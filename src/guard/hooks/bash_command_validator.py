@@ -339,12 +339,41 @@ def strip_inline_comment(line: str) -> str:
     return line
 
 
+def _parameter_end(line: str, start: int) -> int:
+    """Index just past the ``}`` that closes the ``${`` at ``start``, else ``-1``.
+
+    Bash closes ``${`` at the first ``}`` and nests only on another ``${``. A
+    ``${`` that is escaped or single-quoted is text, not a nest, and a quoted or
+    escaped ``}`` closes early: a short end splits more, so it fails closed.
+    """
+    depth = 0
+    quoted = False
+    i = start
+    while i < len(line):
+        c = line[i]
+        if c == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        elif quoted:
+            quoted = c != "'"
+        elif c == "\\" and line[i + 1 : i + 2] != "}":
+            i += 1
+        elif c == "'":
+            quoted = True
+        elif c == "$" and line[i + 1 : i + 2] == "{":
+            depth += 1
+            i += 1
+        i += 1
+    return -1
+
+
 def _split_on_operators(line: str) -> list[tuple[str, str]]:
-    """Split a single (no-newline) line on ``|``/``||``/``&&``/``;`` outside quotes.
+    """Split a single (no-newline) line on ``|``/``|&``/``||``/``&&``/``&``/``;`` outside quotes.
 
     Returns ``(operator_before, segment)`` pairs. ``operator_before`` is the
     operator that PRECEDES the segment: ``""`` for the first segment, then one of
-    ``"|"``, ``"||"``, ``"&&"``, ``";"``. The operator identity lets callers
+    ``"|"`` (also for ``|&``), ``"||"``, ``"&&"``, ``"&"``, ``";"``. The operator identity lets callers
     distinguish a true pipe (RHS consumes the LHS's stdout, so only
     ``SAFE_PIPE_COMMANDS`` applies) from a sequence operator (each side is an
     independent command, so the full ``SAFE_PREFIXES`` set applies).
@@ -363,6 +392,8 @@ def _split_on_operators(line: str) -> list[tuple[str, str]]:
     pending_op = ""  # operator preceding the segment currently accumulating in buf
     in_single = in_double = in_backtick = False
     cmdsub_depth = 0  # nesting depth inside $( ... )
+    after_redirect = -1  # index just past the last unescaped ``<`` or ``>``
+    amp_literal_end = 0  # index just past the ``((...))`` or ``${...}`` being read
     i = 0
     n = len(line)
     while i < n:
@@ -463,10 +494,30 @@ def _split_on_operators(line: str) -> list[tuple[str, str]]:
             pending_op = "&&"
             i += 2
             continue
+        if c == "(" and nxt == "(" and i >= amp_literal_end:
+            amp_literal_end = max(_arithmetic_end(line, i), 0)
+        if c == "$" and nxt == "{" and i >= amp_literal_end:
+            amp_literal_end = max(_parameter_end(line, i), 0)
+        if c == "&" and nxt != ">" and after_redirect != i and i >= amp_literal_end:
+            # A lone ``&`` runs the command before it in the background, so what
+            # follows is a separate command. ``&>``, ``>&``, ``<&`` and ``&`` in
+            # arithmetic or a ``${...}`` are not that.
+            segments.append((pending_op, "".join(buf)))
+            buf = []
+            pending_op = "&"
+            i += 1
+            continue
         if c == "|" and buf and buf[-1] == ">":
             # ``>|`` is the noclobber-override redirect, not a pipe.
             buf.append(c)
             i += 1
+            continue
+        if c == "|" and nxt == "&":
+            # ``|&`` is a pipe that carries stderr too.
+            segments.append((pending_op, "".join(buf)))
+            buf = []
+            pending_op = "|"
+            i += 2
             continue
         if c in {"|", ";"}:
             segments.append((pending_op, "".join(buf)))
@@ -475,6 +526,8 @@ def _split_on_operators(line: str) -> list[tuple[str, str]]:
             i += 1
             continue
         buf.append(c)
+        if c in "<>":
+            after_redirect = i + 1
         i += 1
     if buf:
         segments.append((pending_op, "".join(buf)))
@@ -554,8 +607,8 @@ def split_pipeline_with_ops(command: str) -> list[tuple[str, str]]:
     Like :func:`split_pipeline` (operator splitting is quote-aware; subshell /
     brace-group / leading-bang wrappers are stripped), but each segment is paired
     with the operator that precedes it. ``operator_before`` is ``""`` for the very
-    first segment, ``"|"`` for a true pipe RHS, and ``"&&"`` / ``"||"`` / ``";"``
-    for sequence operators. A segment that is first on a continuation line
+    first segment, ``"|"`` for a true pipe RHS, and ``"&&"`` / ``"||"`` / ``"&"`` /
+    ``";"`` for sequence operators. A segment that is first on a continuation line
     (newline-separated) is reported as a sequence (``";"``) — a newline never
     pipes stdout into the next command.
 
