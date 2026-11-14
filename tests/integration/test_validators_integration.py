@@ -219,7 +219,7 @@ def test_protected_files_denies_hook_edit(tmp_path):
     hook = HOOKS_DIR / "protected_files.py"
     payload = {
         "tool_name": "Edit",
-        "tool_input": {"file_path": "/repo/src/guard/hooks/bash_command_validator.py"},
+        "tool_input": {"file_path": str(HOOKS_DIR / "bash_command_validator.py")},
         "hook_event_name": "PreToolUse",
         "cwd": str(tmp_path),
     }

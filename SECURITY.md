@@ -59,19 +59,22 @@ The validators are written with that in mind:
   replaces the previous `describe-*`/`list-*`/`get-*` prefix shortcut with
   an explicit `(service, verb)` catalog for `aws` (see
   [AWS allow/deny policy](#aws-allowdeny-policy) below). Override paths:
-  `allow_commands`, `disable_rules`, `GUARD_ADMIN_ALLOW_VERBS=<cli>:<verb.path>`.
-- A repo is attacker-influenceable too, so a project allowlist
-  (`.claude/guard/allowlist.json`) that git tracks can only tighten guard:
-  its `disable_rules` and `allow_commands` are ignored and its mode counts
-  only when stricter. Only an untracked or gitignored regular file at a git
-  work-tree root can loosen (see [Project trust](SKILL.md#project-trust)),
-  and "untracked" means no tracked path is the same file (device and
-  inode), since APFS case and Unicode folding, or code points HFS+ ignores
-  in names, let an index entry spelled differently land on it. The check
-  is the one subprocess on the hook path: a fixed-argv `git ls-files` (no shell,
-  `core.fsmonitor` off, inherited `GIT_*` overrides dropped, C locale, 2 s
-  timeout) that fails closed and runs only when a project file would
-  loosen something.
+  `disable_rules`, `GUARD_ADMIN_ALLOW_VERBS=<cli>:<verb.path>`.
+- A repo is attacker-influenceable too, so it can't loosen guard: mode and
+  `disable_rules` live only in `~/.claude/guard/allowlist.json`, and a
+  per-repo `.claude/guard/allowlist.json` is ignored, whatever it holds. The
+  files guard does read from the working directory only add limits:
+  `.claude/guard-protected.txt` adds protected paths to your
+  `GUARD_PROTECTED_EXTRA`, and `.claude/subagent-scope.json` narrows where
+  subagents write.
+- protected_files protects the install that is running, found by its real
+  path: everything under its `src/` (a module dropped there would shadow an
+  import), `bin/run-hook` and `hooks/hooks.json` for a source checkout, the
+  package directory for a wheel. It matches the file, not the spelling:
+  `~`, `$HOME`, variables the command sets, `cd` and `git -C` are
+  resolved, a hard link or a spelling the volume folds is the same inode,
+  and removing, moving, hard-linking or copying into a directory that holds
+  the install counts. A clone or worktree of the source is ordinary code.
 
 ## AWS allow/deny policy
 
@@ -307,21 +310,13 @@ known and explicitly deferred:
   hides the credential path behind an fd. Bind-mounts have the same shape.
 - **Archive reverse-form.** `tar c -C ~/.aws .` may not surface the
   credential path as a token in the argv.
-- **Project allowlist trust rests on local git state.** It stops a cloned
-  repo from shipping an allowlist that turns guard off. It does not stop an
-  agent that already has a shell from changing that state, for example
-  `git rm --cached .claude/guard/allowlist.json` or an edit to the trust
-  cache (`~/.claude/guard/project-trust-cache.json`), either of which can
-  make a tracked file trusted. It also can't tell a repo you made from one
-  you unpacked: a downloaded archive that contains its own `.git` is a work
-  tree of its own, so an untracked allowlist at its root is trusted when
-  you work there.
-- **NTFS name stripping isn't covered.** Windows drops trailing dots and
-  spaces from file names, so `.claude./guard/allowlist.json` can land on
-  the project file there. Guard is unsupported and untested on Windows: its
-  git query lists such spellings, but nothing verifies the identity check
-  on NTFS.
-- **Laundering after an allowed copy.** Once the user allowlists or runs
+- **Writes guard can't see.** protected_files reads the command, not what
+  it does at run time. A script file or a program on stdin that builds a
+  path into guard's install, paths fed to `xargs` from a pipe or heredoc,
+  `rsync` and `unzip` into it, and git commands run inside the live checkout
+  (`checkout`, `reset`, `stash`) are not flagged. Work on guard in a clone
+  or worktree, and keep the live checkout for `git pull --ff-only`.
+- **Laundering after an allowed copy.** Once the user runs
   `cp creds /tmp/x`, subsequent reads of `/tmp/x` are unguarded. The
   destination is not a credential path. This is inherent to path matching,
   not a fixable matcher gap.

@@ -19,6 +19,16 @@ adheres to [Semantic Versioning](https://semver.org/).
   `ssh` / `docker exec` command, a `find -exec` command) are still checked
   against the floor. Other permission modes, `lockdown` and allowlist
   overrides behave exactly as before.
+- Eight shape detectors move from FLOOR to STEER: `bash.var_expanded_head`,
+  `bash.glob_head`, `bash.dangerous_env_sink`, `bash.git_config_injection`,
+  `bash.npm_url_install`, `bash.npx_remote`, `bash.pip_install_url` and
+  `bash.persistence`. In real sessions under `auto` nearly every deny they
+  made was a harmless command (a variable set in the same command, a glob
+  inside quoted code, `PYTHONPATH`, a local install, `crontab -l`). In `auto`
+  Claude Code's classifier now judges those calls; every other mode and
+  `lockdown` still deny them. The trade-off: in `auto`, a destructive command
+  hidden behind one of these shapes (`R=rm; $R -rf ~`) is caught by the
+  classifier, not by guard.
 - `agent_output_guard` is FLOOR: a subagent transcript read denies in `auto`
   too, while background command output passes in every mode.
 - The floor holds against the wrappers that used to hide a command from it.
@@ -63,6 +73,44 @@ adheres to [Semantic Versioning](https://semver.org/).
   denied whatever its arguments (`wget -qO- x | python3 tool.py`).
   `| python3 -m json.tool`, `| jq` and a literal `-c` / `-e` program with no
   code sink (`| python3 -c 'import json,sys; ...'`) only parse it and pass.
+- `protected_files` protects the install that is running, found by its real
+  path, not any path ending in `guard/hooks/<name>.py`: everything under its
+  `src/`, `bin/run-hook` and `hooks/hooks.json` for a source checkout, the
+  package directory for a wheel. A clone or worktree of guard's source is
+  ordinary code an agent may edit; the live install stays protected in every
+  mode. It matches the file, not the spelling: `~`, `$HOME`, variables the
+  command sets (`F=...`, `for f in ...`), `cd`, `pushd` and `git -C` are
+  resolved, a hard link or a spelling the volume folds is the same file, and
+  removing, moving, hard-linking or copying into a directory that holds the
+  install counts. A name it can't know (`$X`, `$(...)`) inside the install,
+  or right beside it in a directory the command names, denies. The legacy
+  hook-script patterns match only under `.claude/hooks/`.
+- `protected_files` reads Bash the way bash does: comments, `$'...'`, line
+  continuations, heredocs (a shell or interpreter reading one runs it; for
+  anything else it is data), and `find -exec` with a read-only program. A
+  command it can't read for sure (an unterminated quote, substitution or
+  heredoc) denies when it names a protected path.
+- The `protected_files` deny reason names the text that matched (a path in a
+  script body, a relative target) next to the protected path it reaches.
+- `GUARD_PROTECTED_EXTRA` and `.claude/guard-protected.txt` add up; a repo's
+  file no longer replaces your environment variable.
+- Deny reasons offer `guard allowlist disable-rule <rule_id>` as the only
+  override. The protected-files deny for guard's code offers none.
+
+### Removed
+
+- **Breaking for anyone with `allow_commands`:** per-command allowlisting
+  is gone. `allow_commands` entries no longer exempt anything, and
+  `guard allowlist allow-command` / `remove-command` no longer exist. Every
+  exemption it held was a false positive that belonged fixed in the rule:
+  turn the rule off with `guard allowlist disable-rule <rule_id>`, or report
+  it. Per-repo `.claude/guard/allowlist.json` files are ignored too, `mode`
+  included, and `--project` is gone from `guard allowlist` and `guard mode`
+  (`--global` is still accepted and changes nothing). Config lives only in
+  `~/.claude/guard/allowlist.json`: `mode` and `disable_rules`. An old file
+  still loads. Guard ignores the retired key or project file, and the first
+  time each hook process meets one it prints one stderr line naming it.
+  Delete it to quiet the line.
 
 ### Security
 
@@ -76,29 +124,48 @@ adheres to [Semantic Versioning](https://semver.org/).
   still fail open.
 - `internal_error` records name the hook that crashed (`hook_id`), and
   `guard trace` shows it on crash lines.
-- A project allowlist (`.claude/guard/allowlist.json`) that git tracks can
-  no longer loosen guard. Any repo could ship one with `"mode": "off"` or
-  disabled rules and switch guard off for every agent working in it. The
-  project file is now trusted only when it is a regular file whose
-  `.claude` directory sits at the root of a git work tree and git does not
-  track it (untracked or gitignored, the usual home for your own local
-  entries). Tracking is checked by file identity, so an index entry spelled
-  to land on the same file can't hide it, whether it uses another case or
-  Unicode form that APFS folds together or code points that
-  case-insensitive HFS+ ignores in names. A trusted file works as before.
-  An untrusted one (tracked, below the repository root such as inside a gitignored
-  `node_modules/`, outside a work tree, behind a symlink, or unverifiable
-  because git is missing, fails or times out) can only tighten: its mode
-  applies only when stricter than the global/default mode, its
-  `disable_rules` and `allow_commands` are ignored, and each hook run
-  prints one stderr warning naming the file and the reason.
-  `guard status`, `guard mode` and `guard allowlist list` now show whether
-  the project file is trusted, why, and how to fix it, and
-  `guard allowlist disable-rule` / `allow-command` warn when the entry
-  they write won't take effect. Guard runs git only when a project file
-  would loosen something and caches the answer in
-  `~/.claude/guard/project-trust-cache.json`, keyed on the file and the
-  repo's git index (an unverifiable answer for about a minute).
+- Development dependencies pulled in by pre-commit move past published
+  advisories: `filelock` 4.2.4 and `virtualenv` 21.14.13. Installed guard
+  doesn't use either.
+- A repo can't loosen guard. Guard reads no mode or `disable_rules` from the
+  working directory, so a cloned repo's `.claude/guard/allowlist.json` with
+  `"mode": "off"` or disabled rules does nothing. What it does read there
+  only adds limits: `.claude/guard-protected.txt` and
+  `.claude/subagent-scope.json`.
+- A command after a multi-line quoted argument is checked again. Guard split
+  on every newline, so the line after a quoted newline began inside the
+  quote and the `;`, `&&` or `|` after its closing quote read as quoted:
+  `echo 'a<newline>b' ; rm -rf /` passed in every mode. A `system()` call in
+  a multi-line awk program missed the awk floor the same way. Where the
+  quoting can't be read exactly (a `#` comment, a heredoc, `alias`, `$'...'`,
+  a backtick, `${x:-y}`), guard reads the command with the quoted lines
+  joined as well as line by line, and denies if either reading denies. That
+  reading skips heredoc bodies for every delimiter form (`<<'END-X'`,
+  `<<END.X`, `<<\EOF`, `<<-EOF`) and reads a `<<` inside `$((...))` or
+  `((...))` as a shift, but `((echo 'a'; b) ; c)` as nested subshells, as
+  bash does. `echo 'a<newline>b' ; rm -rf / # x` passed in every mode before,
+  as did the same command after a `<<'END-X'` heredoc whose body has an
+  apostrophe.
+- `watch`, `parallel` and `script -c` run their command through a shell, and
+  that command is now split like a `bash -c` string. A second command in it
+  (`watch -n1 'echo a; rm -rf /'`) passed before. The command is also found
+  behind the values `watch` (`-n 1`, `--interval 2`, `-q 3`) and `parallel`
+  (`-j 2`, `--tmpdir`, `--nice`, `--env`, `--tagstring`, `-J`, `--memfree`)
+  take; an option guard doesn't list is read both with and without a value. A
+  `parallel` placeholder is replaced inside a quoted command and for every
+  `:::` argument by what it stands for: `{}` and `{1}` the argument, `{//}`
+  its dirname, `{/}` its basename, `{.}` and `{/.}` the name without its
+  extension. `parallel ::: 'rm -rf /'` runs its arguments as the commands
+  they are. `script` is read through a clustered `-qc`, a leading `-c`,
+  `--command <cmd>` or `--command=<cmd>`. macOS `script` has no `-c` and runs
+  the words after its output file directly, so they are read as the command,
+  after the options `-t` (which takes a value) and `-F` (which does not)
+  (`script -q /dev/null make test`).
+  `watch -n 1 'rm -rf /'`, `parallel -j 2 'rm -rf {}' ::: /`,
+  `parallel 'rm -rf {//}' ::: ./build`,
+  `parallel -j 2 'echo a ; rm -rf {} # x' ::: /`,
+  `script --command 'rm -rf /' /dev/null`, `script -q /dev/null rm -rf /` and
+  `script -F /dev/null rm -rf /` passed before.
 
 ### Fixed
 
@@ -116,7 +183,41 @@ adheres to [Semantic Versioning](https://semver.org/).
   - An awk command that starts with a literal (`cmd = "wc -l " $1`) is
     checked by that literal; only a command built entirely at run time
     (`system($0)`) is denied.
-
+  - A newline inside quotes no longer splits the command, so a multi-line
+    awk, jq or `-c` program is one argument rather than one command per
+    line. A program line such as `$4 <= 102800 {` is no longer denied as a
+    command named by an expansion. When the quoting can't be read exactly
+    (a heredoc, a `#` that may start a comment, a backtick, `$'...'`,
+    `$(...)` inside double quotes, a `${...}` other than a plain name,
+    `alias`, an unterminated quote), guard splits on every newline as before
+    and also checks the command with the quoted lines joined.
+- A brace inside quotes or after a backslash is left alone, as bash leaves it.
+  Brace expansion split the line on whitespace and ignored quotes, so a
+  quantifier such as `{1,2}` or `{3,}` in `grep -E "[0-9]{1,2} x|y"` became
+  extra words, the quote broke, a later `|` split the command, and a
+  fragment like `[Tt]ask` was denied as a glob command head. A quoted space
+  no longer ends a word either. An unquoted `{a,b}` still expands and is
+  checked as before. When the quoting can't be read exactly (an unterminated
+  quote, a backtick, `$(...)` or a `${...}` other than a plain name inside
+  double quotes) or an ANSI-C quote decodes to a quote or backslash
+  (`$'\x27'`), every brace is expanded as before. A `$` ending a quoted regex
+  (`'[Tt]ask$'`) is not an ANSI-C quote.
+- A redirect glued to a word is no longer read as part of the word. The
+  floor missed `rm -rf ~>/dev/null`, `rm -rf .>/dev/null`, `rm -rf ~</dev/null`,
+  `rm -rf ~&>/dev/null` and `rm -rf /<<'END-X'` because the operand it saw
+  was `~>/dev/null`, not `~`. An unquoted `>`, `>>`, `>|`, `<`, `<<`, `<<<`,
+  `&>` or `>&` now ends the word before the deny rules look at it, as it does
+  in bash. An operator inside single or double quotes or after a backslash,
+  a descriptor such as `2>&1`, and a digit that belongs to the word (`~2>x`)
+  are read as before. A `$'...'` string is decoded first, so an operator
+  inside one is split like a bare one.
+- A background `&` now separates commands. Guard split a command line on
+  `|`, `||`, `&&` and `;` only, so `a & b` was one segment and the deny rules
+  looked at `a` alone. A lone unquoted `&` now starts a new segment, as in
+  bash, and `|&` is a pipe. Each segment gets the same rules it gets after a
+  `;`. `&&`, `&>`, `&>>`, `>&`, `<&`, an `&` in quotes, after a backslash, in
+  `$(...)`, `${...}` or arithmetic, and a descriptor such as `2>&1` are not
+  separators.
 - Read-only guard CLI calls (`guard status`, `guard allowlist list`,
   `guard mode --help`, `guard allowlist --help`) no longer trip
   `protected_files`.

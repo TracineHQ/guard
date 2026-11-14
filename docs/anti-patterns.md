@@ -87,9 +87,9 @@ that can write it grants itself any override, and one that can rewrite the
 hook code can quietly remove a guardrail.
 
 **What guard does.** `protected_files` denies agent writes to guard's trust
-root (hook code, `registry.py`, `_utils.py`, the allowlist and
-`.claude/subagent-scope.json`) in every guard mode, `off` included. No
-allowlist entry unlocks `allowlist.json` itself; the deny tells the agent to
+root (the running install's hook code, `registry.py` and `_utils.py`, the
+allowlist and `.claude/subagent-scope.json`) in every guard mode, `off`
+included. No allowlist entry unlocks `allowlist.json` itself; the deny tells the agent to
 ask the user, who can run `guard allowlist`. Combined with `subagent_scope`,
 edits originating from a scoped subagent are blocked unless the scope file
 explicitly allows them.

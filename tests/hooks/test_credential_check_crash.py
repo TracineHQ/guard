@@ -64,7 +64,7 @@ class TestFailClosed:
         assert any(r.get("decision") == "deny" for r in records)
 
     def test_crash_passes_when_rule_is_disabled(self, monkeypatch, capsys, decision_log_env):
-        add_disable_rule("guard.credential_check", scope="global")
+        add_disable_rule("guard.credential_check")
         monkeypatch.setattr(credential_check, "decide", _crash)
         hook(_payload())
         assert capsys.readouterr().out == ""

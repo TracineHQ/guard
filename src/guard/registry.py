@@ -1464,7 +1464,11 @@ def get_rules_by_category(category: str) -> list[CommandRule]:
 # FLOOR: irreversible or catastrophic, code injection, hook / guard evasion,
 # supply chain, credential exfiltration, and boundaries the auto classifier
 # cannot see (guard's trust root, the user's protected list, subagent scope,
-# the commit-attribution policy). STEER: shape and style rules.
+# the commit-attribution policy). STEER: shape and style rules, plus the shape
+# detectors whose real-session denies were almost all harmless commands
+# (variable / glob command names, exec env vars, pip / npm / npx installs, git
+# config exec keys, cron / launchd writes). The classifier sees the whole
+# command and the conversation, so it makes those calls better than a pattern.
 #
 # Keys are rule ids (``bash.*``), hook ids (``guard.*``), or ``<id>:<shape>``
 # for a sub-shape whose tier differs from its rule's. The allowlist key a user
@@ -1513,13 +1517,6 @@ RULE_TIERS: dict[str, TierEntry] = {
     "bash.helm_remote_install": TierEntry(
         _F, "supply chain: installs charts from an arbitrary remote source"
     ),
-    "bash.npm_url_install": TierEntry(
-        _F, "supply chain: installs code from an arbitrary remote source"
-    ),
-    "bash.npx_remote": TierEntry(_F, "supply chain: runs an arbitrary remote package"),
-    "bash.pip_install_url": TierEntry(
-        _F, "supply chain: runs setup code from an arbitrary remote source"
-    ),
     "bash.registry_config": TierEntry(
         _F, "supply chain: repoints every later install at another registry"
     ),
@@ -1534,9 +1531,6 @@ RULE_TIERS: dict[str, TierEntry] = {
     "bash.secret_value": TierEntry(_F, "literal secret on the command line"),
     "bash.secret_egress": TierEntry(_F, "uploads a credential file"),
     "bash.dns_exfil": TierEntry(_F, "DNS-tunnel exfiltration shape"),
-    "bash.dangerous_env_sink": TierEntry(
-        _F, "exec / loader hijack env (GIT_SSH_COMMAND, LD_PRELOAD, ...)"
-    ),
     "bash.dangerous_interpreter": TierEntry(_F, "inline interpreter code"),
     "bash.eval_builtin": TierEntry(_F, "eval runs an arbitrary string as code"),
     "bash.dangerous_construct:executed": TierEntry(
@@ -1575,9 +1569,6 @@ RULE_TIERS: dict[str, TierEntry] = {
     "bash.gpg_secret_delete": TierEntry(_F, "destroys private key material"),
     "bash.git_force_push": TierEntry(_F, "rewrites shared remote history"),
     "bash.git_force_refspec": TierEntry(_F, "+refspec force-push rewrites shared remote history"),
-    "bash.git_config_injection": TierEntry(
-        _F, "git config exec sink (core.hooksPath, alias !cmd, ...)"
-    ),
     "bash.git_read_exec": TierEntry(
         _F, "read-only git verb coerced into exec or an arbitrary file write"
     ),
@@ -1586,9 +1577,6 @@ RULE_TIERS: dict[str, TierEntry] = {
     "bash.host_control": TierEntry(_F, "reboot / shutdown kills the session and the host"),
     "bash.kernel_module_load": TierEntry(_F, "loads code into the kernel"),
     "bash.network_policy_wipe": TierEntry(_F, "firewall wipe can lock the operator out"),
-    "bash.persistence": TierEntry(
-        _F, "schedules code that outlives the session (cron, launchd, systemd)"
-    ),
     "bash.process_attach": TierEntry(_F, "reads another process's memory"),
     "bash.process_tree_kill": TierEntry(_F, "kills every process the user owns"),
     "bash.sensitive_write": TierEntry(
@@ -1598,11 +1586,34 @@ RULE_TIERS: dict[str, TierEntry] = {
         _F,
         "cloud CLI verb off the read-only catalog: secret reads, IAM grants, public access, key minting",
     ),
-    "bash.var_expanded_head": TierEntry(
-        _F, "variable-named command ($R, $SHELL, $1, $@); what runs is unknowable"
-    ),
-    "bash.glob_head": TierEntry(_F, "glob in the command name (/bin/r?) hides which binary runs"),
     # --- bash_command_validator: STEER ---
+    "bash.var_expanded_head": TierEntry(
+        _S, "variable-named command ($R, $1, $@); the auto classifier sees what the variable holds"
+    ),
+    "bash.glob_head": TierEntry(
+        _S, "glob in the command name (/bin/r?); the auto classifier sees the whole command"
+    ),
+    "bash.dangerous_env_sink": TierEntry(
+        _S,
+        "exec / loader env (GIT_SSH_COMMAND, LD_PRELOAD, ...); the auto classifier judges the value",
+    ),
+    "bash.git_config_injection": TierEntry(
+        _S,
+        "git config exec key (core.hooksPath, alias !cmd, ...); the auto classifier judges the value",
+    ),
+    "bash.npm_url_install": TierEntry(
+        _S, "install from a URL or git source; the auto classifier judges the source"
+    ),
+    "bash.npx_remote": TierEntry(
+        _S, "runs a remote package; the auto classifier judges the package"
+    ),
+    "bash.pip_install_url": TierEntry(
+        _S, "install from a URL or VCS source; the auto classifier judges the source"
+    ),
+    "bash.persistence": TierEntry(
+        _S,
+        "schedules code past the session (cron, launchd, systemd); the classifier judges the job",
+    ),
     "bash.admin_unknown_flag_strict": TierEntry(_S, "lockdown-only unknown-flag escalation"),
     "bash.conditional_denied_flag": TierEntry(_S, "find -exec / -delete, yq -i on a project path"),
     "bash.dangerous_construct": TierEntry(
@@ -1644,7 +1655,7 @@ RULE_TIERS: dict[str, TierEntry] = {
         _F, "read verb coerced into exec or a file write; fetch --upload-pack"
     ),
     "guard.git_c_validator:config_write": TierEntry(
-        _S, "git -C config write; exec-sink keys are FLOOR under bash.git_config_injection"
+        _S, "git -C config write; exec-sink keys are matched by bash.git_config_injection"
     ),
     "guard.git_c_validator:commit_reuse": TierEntry(_S, "git commit -C / --reuse-message"),
     "guard.git_c_validator:destructive": TierEntry(

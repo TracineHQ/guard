@@ -2065,16 +2065,16 @@ DENY_REASON_FORMAT_CASES = [
 
 @pytest.mark.parametrize(("command", "expected_rule"), DENY_REASON_FORMAT_CASES)
 def test_deny_reason_includes_rule_id_and_override_path(command: str, expected_rule: str) -> None:
-    """Every allowlist-routed deny must surface the rule_id and the two CLI
-    verbs that turn it off, so a user hit by a false positive can act
-    without grepping the source.
+    """Every allowlist-routed deny must surface the rule_id and the CLI verb
+    that turns it off, so a user hit by a false positive can act without
+    grepping the source.
     """
     result = decide(command)
     assert result is not None
     assert result.get("permissionDecision") == "deny"
     reason = result.get("permissionDecisionReason", "")
     assert f"denied: {expected_rule}" in reason, f"missing rule_id in reason: {reason!r}"
-    assert f"guard allowlist allow-command --rule {expected_rule}" in reason
+    assert "allow-command" not in reason
     assert f"guard allowlist disable-rule {expected_rule}" in reason
 
 

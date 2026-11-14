@@ -39,8 +39,8 @@ runner and CI pick it up automatically. No code change needed to add a case.
 `expected` collapses guard's envelope: interactive passthrough (`None`) and an
 explicit allow both count as `allow`; `deny` is the literal decision. Guard never asks.
 
-Rows are adjudicated against guard's shipped policy: your global or project
-allowlist never changes an outcome, and a corpus run writes nothing to the
+Rows are adjudicated against guard's shipped policy: your allowlist never
+changes an outcome, and a corpus run writes nothing to the
 decision log or the strict-deny queue.
 
 Blank lines and `#` comment lines are ignored.

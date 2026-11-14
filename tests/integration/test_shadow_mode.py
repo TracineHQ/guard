@@ -16,16 +16,13 @@ from pathlib import Path
 
 from tests._helpers import REPO_ROOT as REPO
 from tests._helpers import decision_from_stdout as _decision
-from tests._helpers import init_git_repo
 
 HOOK = REPO / "src" / "guard" / "hooks" / "bash_command_validator.py"
 
 
 def _write_mode(cwd: Path, mode: str) -> None:
-    # An untracked project file in a git work tree is trusted, so its mode
-    # can loosen guard (a tracked one could only tighten).
-    init_git_repo(cwd)
-    allow_dir = cwd / ".claude" / "guard"
+    """Write ``mode`` to the global file ``_run`` points ``GUARD_DATA_DIR`` at."""
+    allow_dir = cwd / ".isolated-guard-home"
     allow_dir.mkdir(parents=True, exist_ok=True)
     (allow_dir / "allowlist.json").write_text(json.dumps({"mode": mode}))
 
@@ -114,20 +111,15 @@ def test_invalid_mode_falls_back_to_enforce(tmp_path: Path) -> None:
     assert _decision(stdout) == "deny"
 
 
-def test_project_mode_overrides_global(tmp_path: Path) -> None:
-    """When project sets shadow and global sets enforce, project wins."""
-    # Global mode: enforce (via isolated GUARD_DATA_DIR).
-    global_dir = tmp_path / ".isolated-guard-home"
-    global_dir.mkdir()
-    (global_dir / "allowlist.json").write_text(json.dumps({"mode": "enforce"}))
-    # Project mode: shadow.
-    _write_mode(tmp_path, "shadow")
+def test_retired_project_mode_is_ignored(tmp_path: Path) -> None:
+    """A project file's shadow no longer loosens the global enforce, and says so."""
+    _write_mode(tmp_path, "enforce")
+    project_file = tmp_path / ".claude" / "guard" / "allowlist.json"
+    project_file.parent.mkdir(parents=True)
+    project_file.write_text(json.dumps({"mode": "shadow"}))
 
     log = tmp_path / "log.jsonl"
-    rc, stdout, _stderr = _run("git push --force", cwd=tmp_path, decisions_path=log)
-    assert rc == 0, f"project shadow must override global enforce; got rc={rc}"
-    assert _decision(stdout) is None
-    recs = _records(log)
-    deny = next((r for r in recs if r.get("decision") == "deny"), None)
-    assert deny is not None
-    assert deny["mode"] == "shadow"
+    rc, stdout, stderr = _run("git push --force", cwd=tmp_path, decisions_path=log)
+    assert rc == 2, f"a project file must not loosen guard; got rc={rc}"
+    assert _decision(stdout) == "deny"
+    assert stderr.count("is retired and ignored") == 1, stderr

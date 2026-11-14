@@ -115,9 +115,9 @@ def test_off_mode_skips_logging(tmp_path: Path) -> None:
     cwd = tmp_path / "proj"
     cwd.mkdir()
     # mode=off in the global allowlist: _run points GUARD_DATA_DIR at <cwd>/.claude/guard.
-    project_allowlist = cwd / ".claude" / "guard" / "allowlist.json"
-    project_allowlist.parent.mkdir(parents=True)
-    project_allowlist.write_text(json.dumps({"mode": "off"}), encoding="utf-8")
+    global_allowlist = cwd / ".claude" / "guard" / "allowlist.json"
+    global_allowlist.parent.mkdir(parents=True)
+    global_allowlist.write_text(json.dumps({"mode": "off"}), encoding="utf-8")
 
     payload = {
         "tool_name": "Bash",
@@ -161,9 +161,9 @@ def test_shadow_mode_still_logs(tmp_path: Path) -> None:
     log_path = tmp_path / "decisions.jsonl"
     cwd = tmp_path / "proj"
     cwd.mkdir()
-    project_allowlist = cwd / ".claude" / "guard" / "allowlist.json"
-    project_allowlist.parent.mkdir(parents=True)
-    project_allowlist.write_text(json.dumps({"mode": "shadow"}), encoding="utf-8")
+    global_allowlist = cwd / ".claude" / "guard" / "allowlist.json"
+    global_allowlist.parent.mkdir(parents=True)
+    global_allowlist.write_text(json.dumps({"mode": "shadow"}), encoding="utf-8")
 
     payload = {
         "tool_name": "Bash",

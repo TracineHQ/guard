@@ -397,8 +397,9 @@ def _utc_now_iso() -> str:
 def log_internal_error(exc: BaseException, *, session_id: str = "", hook_id: str = "") -> None:
     """Append a structured ``internal_error`` JSONL record.
 
-    Called from ``safe_main`` before fail-open so a silent crash becomes an
-    observable event. The traceback is hashed (not stored) to avoid leaking
+    Called from ``safe_main`` before fail-open, and from ``credential_check``
+    before it fails closed, so a silent crash becomes an observable event. The
+    traceback is hashed (not stored) to avoid leaking
     file paths or payload contents; operators bucket repeat failures by hash.
     ``exc_msg`` is passed through ``_redact_secrets`` because a hook that
     crashes mid-credential-handling may surface the value in its exception

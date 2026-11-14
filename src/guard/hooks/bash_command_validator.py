@@ -153,10 +153,7 @@ def _defer_to_auto(rule_key: str) -> bool:
         return False
     allowlist: Allowlist | None = _REQUEST_CONTEXT.get("allowlist")
     rule_id = rule_key.split(":", 1)[0]  # tier sub-keys share their rule's allowlist id
-    if allowlist is not None and (
-        allowlist.is_rule_disabled(rule_id)
-        or allowlist.find_command(rule_id, _REQUEST_CONTEXT["original_command"]) is not None
-    ):
+    if allowlist is not None and allowlist.is_rule_disabled(rule_id):
         return False
     deferred: list[str] = _REQUEST_CONTEXT["deferred"]
     if rule_key not in deferred:
@@ -342,12 +339,41 @@ def strip_inline_comment(line: str) -> str:
     return line
 
 
+def _parameter_end(line: str, start: int) -> int:
+    """Index just past the ``}`` that closes the ``${`` at ``start``, else ``-1``.
+
+    Bash closes ``${`` at the first ``}`` and nests only on another ``${``. A
+    ``${`` that is escaped or single-quoted is text, not a nest, and a quoted or
+    escaped ``}`` closes early: a short end splits more, so it fails closed.
+    """
+    depth = 0
+    quoted = False
+    i = start
+    while i < len(line):
+        c = line[i]
+        if c == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        elif quoted:
+            quoted = c != "'"
+        elif c == "\\" and line[i + 1 : i + 2] != "}":
+            i += 1
+        elif c == "'":
+            quoted = True
+        elif c == "$" and line[i + 1 : i + 2] == "{":
+            depth += 1
+            i += 1
+        i += 1
+    return -1
+
+
 def _split_on_operators(line: str) -> list[tuple[str, str]]:
-    """Split a single (no-newline) line on ``|``/``||``/``&&``/``;`` outside quotes.
+    """Split a single (no-newline) line on ``|``/``|&``/``||``/``&&``/``&``/``;`` outside quotes.
 
     Returns ``(operator_before, segment)`` pairs. ``operator_before`` is the
     operator that PRECEDES the segment: ``""`` for the first segment, then one of
-    ``"|"``, ``"||"``, ``"&&"``, ``";"``. The operator identity lets callers
+    ``"|"`` (also for ``|&``), ``"||"``, ``"&&"``, ``"&"``, ``";"``. The operator identity lets callers
     distinguish a true pipe (RHS consumes the LHS's stdout, so only
     ``SAFE_PIPE_COMMANDS`` applies) from a sequence operator (each side is an
     independent command, so the full ``SAFE_PREFIXES`` set applies).
@@ -366,6 +392,8 @@ def _split_on_operators(line: str) -> list[tuple[str, str]]:
     pending_op = ""  # operator preceding the segment currently accumulating in buf
     in_single = in_double = in_backtick = False
     cmdsub_depth = 0  # nesting depth inside $( ... )
+    after_redirect = -1  # index just past the last unescaped ``<`` or ``>``
+    amp_literal_end = 0  # index just past the ``((...))`` or ``${...}`` being read
     i = 0
     n = len(line)
     while i < n:
@@ -466,10 +494,30 @@ def _split_on_operators(line: str) -> list[tuple[str, str]]:
             pending_op = "&&"
             i += 2
             continue
+        if c == "(" and nxt == "(" and i >= amp_literal_end:
+            amp_literal_end = max(_arithmetic_end(line, i), 0)
+        if c == "$" and nxt == "{" and i >= amp_literal_end:
+            amp_literal_end = max(_parameter_end(line, i), 0)
+        if c == "&" and nxt != ">" and after_redirect != i and i >= amp_literal_end:
+            # A lone ``&`` runs the command before it in the background, so what
+            # follows is a separate command. ``&>``, ``>&``, ``<&`` and ``&`` in
+            # arithmetic or a ``${...}`` are not that.
+            segments.append((pending_op, "".join(buf)))
+            buf = []
+            pending_op = "&"
+            i += 1
+            continue
         if c == "|" and buf and buf[-1] == ">":
             # ``>|`` is the noclobber-override redirect, not a pipe.
             buf.append(c)
             i += 1
+            continue
+        if c == "|" and nxt == "&":
+            # ``|&`` is a pipe that carries stderr too.
+            segments.append((pending_op, "".join(buf)))
+            buf = []
+            pending_op = "|"
+            i += 2
             continue
         if c in {"|", ";"}:
             segments.append((pending_op, "".join(buf)))
@@ -478,6 +526,8 @@ def _split_on_operators(line: str) -> list[tuple[str, str]]:
             i += 1
             continue
         buf.append(c)
+        if c in "<>":
+            after_redirect = i + 1
         i += 1
     if buf:
         segments.append((pending_op, "".join(buf)))
@@ -557,8 +607,8 @@ def split_pipeline_with_ops(command: str) -> list[tuple[str, str]]:
     Like :func:`split_pipeline` (operator splitting is quote-aware; subshell /
     brace-group / leading-bang wrappers are stripped), but each segment is paired
     with the operator that precedes it. ``operator_before`` is ``""`` for the very
-    first segment, ``"|"`` for a true pipe RHS, and ``"&&"`` / ``"||"`` / ``";"``
-    for sequence operators. A segment that is first on a continuation line
+    first segment, ``"|"`` for a true pipe RHS, and ``"&&"`` / ``"||"`` / ``"&"`` /
+    ``";"`` for sequence operators. A segment that is first on a continuation line
     (newline-separated) is reported as a sequence (``";"``) — a newline never
     pipes stdout into the next command.
 
@@ -1152,9 +1202,94 @@ def _expand_braces_once(token: str) -> list[str] | None:
 
 _BRACE_EXPANSION_TOKEN_CAP = 4096
 
+# Bash leaves a brace inside quotes (``grep -E 'a{1,2}'``) or after a backslash
+# alone, and a quoted space doesn't end the word. ``_brace_words`` swaps each
+# quoted body and escaped pair for ``_LITERAL_OPEN`` + its index in a side list
+# + ``_LITERAL_CLOSE``, so the expansion can't read into it, and
+# ``_restore_literals`` puts the text back.
+_LITERAL_OPEN = "\ue001"
+_LITERAL_CLOSE = "\ue002"
+_LITERAL_RE = re.compile(f"{_LITERAL_OPEN}([0-9]+){_LITERAL_CLOSE}")
 
-def _expand_braces_in_line(line: str) -> str:
+
+def _closing_quote(line: str, start: int) -> int:
+    """Index of the quote that closes the one at ``start``, or ``-1``."""
+    if line[start] == "'":
+        return line.find("'", start + 1)
+    i = start + 1
+    while i < len(line):
+        if line[i] == "\\":
+            i += 2
+        elif line[i] == '"':
+            return i
+        else:
+            i += 1
+    return -1
+
+
+def _brace_words(line: str) -> tuple[list[str], list[str]] | None:
+    """Split ``line`` into words for brace expansion, setting literal text aside.
+
+    Returns the words, with each quoted body and each backslash-escaped pair
+    replaced by a marker, and the list of text the markers stand for. Returns
+    ``None`` when the quoting can't be read exactly -- an unterminated quote, a
+    backtick, ``$(...)`` or a ``${...}`` other than a plain name inside double
+    quotes, or a marker character already in the line -- and the caller
+    expands every brace as it did before quotes were read.
+    """
+    if not any(ch in line for ch in "'\"\\"):
+        return line.split(), []
+    if _LITERAL_OPEN in line or _LITERAL_CLOSE in line or "`" in line:
+        return None
+    words: list[str] = []
+    literals: list[str] = []
+    word: list[str] = []
+
+    def set_aside(text: str) -> str:
+        literals.append(text)
+        return f"{_LITERAL_OPEN}{len(literals) - 1}{_LITERAL_CLOSE}"
+
+    i, n = 0, len(line)
+    while i < n:
+        c = line[i]
+        if c.isspace():
+            if word:
+                words.append("".join(word))
+                word = []
+            i += 1
+        elif c == "\\" and i + 1 < n and not line[i + 1].isspace():
+            word.append(set_aside(line[i : i + 2]))
+            i += 2
+        elif c in "'\"":
+            end = _closing_quote(line, i)
+            if end < 0:
+                return None
+            body = line[i + 1 : end]
+            if c == '"' and ("$(" in body or "${" in _PLAIN_PARAM_RE.sub("", body)):
+                return None
+            word.append(c + (set_aside(body) if body else "") + c)
+            i = end + 1
+        else:
+            word.append(c)
+            i += 1
+    if word:
+        words.append("".join(word))
+    return words, literals
+
+
+def _restore_literals(text: str, literals: list[str]) -> str:
+    """Put back the text ``_brace_words`` set aside."""
+    if not literals:
+        return text
+    return _LITERAL_RE.sub(lambda m: literals[int(m.group(1))], text)
+
+
+def _expand_braces_in_line(line: str, *, quote_aware: bool = True) -> str:
     """Apply brace expansion to a single newline-free line.
+
+    Braces inside quotes or after a backslash are left alone, as bash leaves
+    them; see ``_brace_words``. ``quote_aware=False`` splits on whitespace
+    and expands every group.
 
     Bails out of the fixpoint loop once the accumulated token count exceeds
     ``_BRACE_EXPANSION_TOKEN_CAP``. The per-group 32-alternative cap in
@@ -1168,7 +1303,8 @@ def _expand_braces_in_line(line: str) -> str:
     """
     if "{" not in line:
         return line
-    tokens = line.split()
+    split = _brace_words(line) if quote_aware else None
+    tokens, literals = split if split is not None else (line.split(), [])
     for _ in range(4):
         out: list[str] = []
         changed = False
@@ -1180,14 +1316,14 @@ def _expand_braces_in_line(line: str) -> str:
                 out.extend(expanded)
                 changed = True
             if len(out) > _BRACE_EXPANSION_TOKEN_CAP:
-                return " ".join(out)
+                return _restore_literals(" ".join(out), literals)
         tokens = out
         if not changed:
             break
-    return " ".join(tokens)
+    return _restore_literals(" ".join(tokens), literals)
 
 
-def _expand_braces(command: str) -> str:
+def _expand_braces(command: str, *, quote_aware: bool = True) -> str:
     """Apply brace expansion to each line, preserving newlines.
 
     Iterates with a bounded fixpoint so nested forms (``{a,b}{c,d}``) expand
@@ -1198,7 +1334,47 @@ def _expand_braces(command: str) -> str:
     """
     if "{" not in command:
         return command
-    return "\n".join(_expand_braces_in_line(line) for line in command.split("\n"))
+    return "\n".join(
+        _expand_braces_in_line(line, quote_aware=quote_aware) for line in command.split("\n")
+    )
+
+
+def _ansi_c_unsettles_quotes(command: str) -> bool:
+    r"""True when decoding an ANSI-C quote in ``command`` would leave quotes bash never saw.
+
+    ``$'\x27'`` decodes to a bare ``'``, which reading quotes after the decode
+    would take for a real one and so set the next ``{r,r}m`` aside as quoted
+    text. A ``$'...'`` outside quotes or inside double quotes (a ``bash -c``
+    payload) counts; one inside single quotes, such as the ``$'`` ending
+    ``'[Tt]ask$'``, is ordinary text. An unterminated one counts too, since
+    the quoting after it can't be read.
+    """
+    if "$'" not in command:
+        return False
+    quote = ""
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if quote == "'":
+            if c == "'":
+                quote = ""
+        elif c == "\\":
+            i += 1
+        elif command.startswith("$'", i):
+            # Outside quotes, or inside double quotes where a ``bash -c`` payload reads it.
+            literal = _ANSI_C_QUOTED_RE.match(command, i)
+            if literal is None:
+                return True
+            if any(ch in _decode_ansi_c_quoted(literal.group()) for ch in "'\"\\"):
+                return True
+            i = literal.end() - 1
+        elif quote == '"':
+            if c == '"':
+                quote = ""
+        elif c in "'\"":
+            quote = c
+        i += 1
+    return False
 
 
 def _canonicalize(command: str) -> str:
@@ -1211,11 +1387,216 @@ def _canonicalize(command: str) -> str:
     - ``rm\xa0-rf\xa0/`` (NBSP) and similar unicode whitespace bypasses
     - ``$'\\x72\\x6d' -rf /`` (ANSI-C quoting hides the head token)
     - ``{r,r}m -rf /`` (brace expansion produces ``rm rm -rf /``)
+
+    Brace expansion reads quotes (see ``_brace_words``) unless an ANSI-C quote
+    decodes to a quote or backslash (see ``_ansi_c_unsettles_quotes``).
     """
     command = command.replace("\\\n", " ")
     command = _UNICODE_WS_RE.sub(" ", command)
+    quote_aware = not _ansi_c_unsettles_quotes(command)
     command = _decode_ansi_c_quoted(command)
-    return _expand_braces(command)
+    return _expand_braces(command, quote_aware=quote_aware)
+
+
+# A newline inside quotes is part of an argument (a multi-line awk, jq or
+# ``python -c`` program), not a command boundary. ``_mark_quoted_newlines``
+# swaps each one for this private-use character so the line split keeps the
+# argument whole, and ``_decide_inner`` puts the newline back in each segment.
+_QUOTED_NEWLINE = "\ue000"
+# ``${name}``, ``${#name}``, ``${!name}`` and the special parameters: no
+# operator whose word could hold quotes.
+_PLAIN_PARAM_RE = re.compile(r"\$\{[#!]?(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#?$!-])\}")
+# Characters after which a ``#`` starts a word, so the shell may read a comment.
+_WORD_START_CHARS = frozenset(" \t\n;&|()<>")
+_ALIAS_RE = re.compile(r"\balias\b")
+
+
+def _mark_quoted_newlines(command: str, *, comments: bool | None = None) -> str | None:
+    """``command`` with each newline inside quotes swapped for ``_QUOTED_NEWLINE``.
+
+    Reads the raw command the way the shell does: single quotes, double quotes
+    with backslash escapes, and backslash escapes outside quotes. Returns
+    ``None`` when no newline is quoted, and also whenever the quoting can't be
+    read exactly here, so the caller keeps splitting on every newline: a
+    heredoc (its body is raw text), a ``#`` that may start a comment, a
+    backtick, ``$'...'`` anywhere (``_canonicalize`` decodes it without
+    regard to quotes), a ``$(...)`` inside double quotes, a ``${...}`` other
+    than a plain name, the word ``alias`` anywhere (an alias can change how
+    later lines are quoted), or a quote still open at the end. A backslash-newline inside
+    double quotes is dropped, as the shell drops it.
+
+    ``comments`` set to ``True`` or ``False`` is the best-effort second look
+    the caller takes when the exact reading gives up: it reads past every one
+    of those bail-outs (``$'...'`` is an ANSI-C quote, a ``#`` starts a
+    comment only when ``comments`` is ``True``, heredoc bodies are skipped as
+    raw text, a stray ``_QUOTED_NEWLINE`` is replaced) and may be wrong about
+    them. A deny from that reading is worth having; an allow from it is not.
+    """
+    best_effort = comments is not None
+    if "\n" not in command:
+        return None
+    if best_effort:
+        command = command.replace(_QUOTED_NEWLINE, " ")
+    elif _QUOTED_NEWLINE in command or "$'" in command or _ALIAS_RE.search(command):
+        return None
+    out: list[str] = []
+    heredocs: list[tuple[str, bool]] = []
+    quote = ""
+    marked = False
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if quote == "'":
+            if c == "'":
+                quote = ""
+        elif quote == '"' and command.startswith("\\\n", i):
+            i += 2
+            continue
+        elif c == "\\" and i + 1 < n and command[i + 1] != "\n":
+            out.append(command[i : i + 2])
+            i += 2
+            continue
+        elif quote == "$":
+            if c == "'":
+                quote = ""
+        elif c == "`":
+            if not best_effort:
+                return None
+        elif command.startswith("${", i):
+            param = _PLAIN_PARAM_RE.match(command, i)
+            if param is not None:
+                out.append(param.group())
+                i = param.end()
+                continue
+            if not best_effort:
+                return None
+        elif quote == '"':
+            if command.startswith("$(", i) and not best_effort:
+                return None
+            if c == '"':
+                quote = ""
+        elif best_effort and _arithmetic_end(command, i) >= 0:
+            # A ``<<`` in ``$((1<<n))`` is a shift, not a heredoc.
+            end = _arithmetic_end(command, i)
+            out.append(command[i:end])
+            i = end
+            continue
+        elif command.startswith("<<", i) or (
+            c == "#" and (i == 0 or command[i - 1] in _WORD_START_CHARS)
+        ):
+            if not best_effort:
+                return None
+            if c == "#" and comments:
+                end = command.find("\n", i)
+                end = n if end < 0 else end
+                out.append(command[i:end])
+                i = end
+                continue
+            if command.startswith("<<<", i):
+                out.append("<<<")
+                i += 3
+                continue
+            operator = _HEREDOC_DELIM_RE.match(command, i) if c == "<" else None
+            if operator is not None:
+                delimiter = next(g for g in operator.groups()[1:] if g)
+                heredocs.append((delimiter, operator.group(1) == "-"))
+                out.append(operator.group())
+                i = operator.end()
+                continue
+        elif best_effort and command.startswith("$'", i):
+            quote = "$"
+            out.append("$'")
+            i += 2
+            continue
+        elif c in "'\"":
+            quote = c
+        if c == "\n" and quote:
+            out.append(_QUOTED_NEWLINE)
+            marked = True
+        else:
+            out.append(c)
+        i += 1
+        if c == "\n" and heredocs and not quote:
+            # The line's heredoc bodies are raw text: no quote in one opens a quote.
+            body_end = _heredoc_bodies_end(command, i, heredocs)
+            out.append(command[i:body_end])
+            i = body_end
+            heredocs = []
+    if not marked or (quote and not best_effort):
+        return None
+    return "".join(out)
+
+
+def _arithmetic_end(command: str, start: int) -> int:
+    """Index just past the ``))`` of an arithmetic ``$((...))`` / ``((...))`` at ``start``, else ``-1``.
+
+    Bash reads ``((`` as arithmetic only when the paren that balances the
+    opening pair is immediately followed by another ``)``; otherwise it is
+    nested subshells (``((echo 'a'; b) ; c)``) and everything in it is
+    commands. A quote, backtick or newline before the close is not arithmetic
+    guard needs to see through, so it counts as not arithmetic too.
+    """
+    if command.startswith("$((", start):
+        i = start + 3
+    elif command.startswith("((", start) and (
+        start == 0 or command[start - 1] in _WORD_START_CHARS
+    ):
+        i = start + 2
+    else:
+        return -1
+    depth = 0
+    while i < len(command):
+        c = command[i]
+        if c in "'\"`\n":
+            return -1
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            if depth == 0:
+                return i + 2 if command.startswith("))", i) else -1
+            depth -= 1
+        i += 1
+    return -1
+
+
+def _heredoc_bodies_end(command: str, start: int, heredocs: list[tuple[str, bool]]) -> int:
+    """Index in ``command`` just past the bodies of ``heredocs``, which begin at ``start``.
+
+    Each body runs through the line that is its delimiter (leading tabs
+    ignored for ``<<-``); an unterminated one runs to the end.
+    """
+    i, n = start, len(command)
+    for delimiter, tab_strip in heredocs:
+        while i < n:
+            end = command.find("\n", i)
+            end = n if end < 0 else end
+            line = command[i:end]
+            i = min(end + 1, n)
+            if (line.lstrip("\t") if tab_strip else line) == delimiter:
+                break
+    return i
+
+
+def _joined_readings(command: str) -> list[tuple[str, frozenset[str]]]:
+    """Best-effort readings of ``command`` with its quoted newlines joined.
+
+    For a command whose quoting ``_mark_quoted_newlines`` can't read exactly.
+    The caller splits on every newline there, so it can read the line after a
+    multi-line quoted argument as inside the quote: ``echo 'a<newline>b' ; rm
+    -rf / # x``. Each reading is a marked text, with the heredoc bodies that
+    are data taken out as the line split does, and the delimiters whose body
+    expands. There is one for each way of reading a ``#`` (a comment, or not).
+    Empty when no newline is quoted.
+    """
+    readings: list[tuple[str, frozenset[str]]] = []
+    for comments in (True, False):
+        walked = _mark_quoted_newlines(command, comments=comments)
+        if walked is None:
+            continue
+        reading = _heredoc_skeleton(walked)
+        if all(reading[0] != seen for seen, _ in readings):
+            readings.append(reading)
+    return readings
 
 
 # Regex matching a shell variable assignment of the form ``KEY=VALUE``.
@@ -1529,7 +1910,6 @@ _TIMING_RUNNERS: frozenset[str] = frozenset({"timeout", "nice", "ionice"})
 _UVX_MIN_TOKENS = 2  # `uvx <interpreter>`
 _PIPX_RUN_MIN_TOKENS = 3  # `pipx run <interpreter>`
 _UV_RUN_MIN_TOKENS = 3  # `uv run <interpreter>`
-_SCRIPT_C_MIN_TOKENS = 4  # `script <output> -c <cmd>`
 
 
 def _shlex_tokens(segment: str) -> list[str]:
@@ -1688,43 +2068,227 @@ def _strip_xargs(tokens: list[str]) -> str | None:
     return None
 
 
+# GNU parallel options whose value is the next word (``-j 2``); a fused value
+# (``-j2``, ``--jobs=2``) is one word and needs no entry.
+_PARALLEL_VALUE_FLAGS = frozenset(
+    {
+        "-j",
+        "--jobs",
+        "-P",
+        "--max-procs",
+        "-n",
+        "--max-args",
+        "-N",
+        "-L",
+        "--max-lines",
+        "-a",
+        "--arg-file",
+        "-d",
+        "--delimiter",
+        "-S",
+        "--sshlogin",
+        "-I",
+        "-s",
+        "-E",
+        "--colsep",
+        "--delay",
+        "--timeout",
+        "--retries",
+        "--joblog",
+        "--results",
+        "--load",
+        "--halt",
+        "--tmpdir",
+        "--tempdir",
+        "--nice",
+        "--env",
+        "--tag-string",
+        "--tagstring",
+        "-J",
+        "--profile",
+        "--memfree",
+        "--memsuspend",
+        "--wd",
+        "--workdir",
+        "--sshloginfile",
+        "--slf",
+        "--header",
+        "--rpl",
+    }
+)
+# Options that take no value, so the word after one is already the command.
+_PARALLEL_BARE_FLAGS = frozenset(
+    {
+        "--bar",
+        "--citation",
+        "--dry-run",
+        "--eta",
+        "--group",
+        "--keep-order",
+        "--line-buffer",
+        "--lb",
+        "--no-notice",
+        "--null",
+        "--pipe",
+        "--plus",
+        "--progress",
+        "--quote",
+        "--shuf",
+        "--tag",
+        "--ungroup",
+        "--verbose",
+        "--will-cite",
+        "--",
+    }
+)
+# Letters of clustered short options (``-kq``): bare ones, and the ones that
+# take the next word when they end a cluster (``-kj 2``).
+_PARALLEL_BARE_LETTERS = frozenset("gkmpqrtuvxX0")
+_PARALLEL_VALUE_LETTERS = frozenset("aCdEIjJLnNPsS")
+# Most command starts ``_parallel_command_starts`` follows, one per way of
+# reading the options it can't classify.
+_PARALLEL_MAX_STARTS = 4
+# Placeholders parallel replaces with an argument: ``{}``, ``{.}`` (no
+# extension), ``{/}`` (basename), ``{//}`` (dirname) and ``{/.}``, each with an
+# optional input-source number (``{2}``, ``{1//}``). Group 1 is the modifier.
+_PARALLEL_PLACEHOLDER_RE = re.compile(r"\{[0-9]*(\.|//|/\.|/)?\}")
+
+
+def _parallel_flag_takes_value(flag: str) -> bool | None:
+    """Whether ``flag`` takes the next word as its value; ``None`` when unknown."""
+    if flag in _PARALLEL_VALUE_FLAGS:
+        return True
+    if flag in _PARALLEL_BARE_FLAGS or "=" in flag:
+        return False
+    if flag.startswith("--") or len(flag) == 1:
+        return None
+    letters = flag[1:]
+    if letters[-1].isdigit():
+        return False  # fused value: ``-j2``
+    if all(letter in _PARALLEL_BARE_LETTERS for letter in letters):
+        return False
+    if len(letters) > 1 and all(letter in _PARALLEL_BARE_LETTERS for letter in letters[:-1]):
+        return letters[-1] in _PARALLEL_VALUE_LETTERS or None
+    return None
+
+
+def _parallel_command_starts(tokens: list[str]) -> list[int]:
+    """Indexes in ``tokens`` where ``parallel``'s command can start, past its options.
+
+    An option in neither list may or may not take a value, so each adds a
+    second start one word later: both readings get checked.
+    """
+    starts: list[int] = []
+    pending = [1]
+    while pending and len(starts) < _PARALLEL_MAX_STARTS:
+        i = pending.pop()
+        while i < len(tokens) and tokens[i].startswith("-"):
+            takes_value = _parallel_flag_takes_value(tokens[i])
+            if takes_value is None and len(starts) + len(pending) + 1 < _PARALLEL_MAX_STARTS:
+                pending.append(i + 2)
+            i += 2 if takes_value else 1
+        if i not in starts:
+            starts.append(i)
+    return starts
+
+
+def _parallel_placeholder_value(arg: str, modifier: str) -> str:
+    """What a placeholder with ``modifier`` (``""``, ``.``, ``/``, ``//``, ``/.``) stands for on ``arg``."""
+    if modifier == "//":
+        stripped = arg.rstrip("/") or arg[:1]
+        head, slash, _tail = stripped.rpartition("/")
+        return head or ("/" if slash else ".")
+    if modifier.startswith("/"):
+        arg = arg.rstrip("/").rsplit("/", 1)[-1]
+    if modifier.endswith("."):
+        arg = re.sub(r"\.[^/.]+$", "", arg)
+    return arg
+
+
+def _fill_placeholders(word: str, arg: str) -> str:
+    """``word`` with each of ``parallel``'s placeholders replaced by what it stands for on ``arg``."""
+    return _PARALLEL_PLACEHOLDER_RE.sub(
+        lambda match: _parallel_placeholder_value(arg, match.group(1) or ""), word
+    )
+
+
+def _parallel_command(tokens: list[str], start: int) -> str | None:
+    """The shell command ``parallel`` runs when its command starts at ``tokens[start]``."""
+    if start >= len(tokens):
+        return None
+    end = start
+    while end < len(tokens) and tokens[end] != ":::":
+        end += 1
+    words = tokens[start:end]
+    args = [t for t in tokens[end + 1 :] if t not in (":::", ":::+")]
+    if not words:
+        return " ; ".join(args) or None
+    if not args:
+        return " ".join(words)
+    if any(_PARALLEL_PLACEHOLDER_RE.search(w) for w in words):
+        return " ; ".join(" ".join(_fill_placeholders(w, arg) for w in words) for arg in args)
+    return " ".join([*words, *args])
+
+
 def _strip_parallel(tokens: list[str]) -> str | None:
     """Strip ``parallel [flags] <cmd> ::: <args>``.
 
-    Args after ``:::`` are the operands the command runs against, so they're
-    substituted into ``{}`` (or appended) so the deny matchers see the real
-    shape (``rm -rf /``, not ``rm -rf {}``).
+    Args after ``:::`` are the operands the command runs against. Each
+    replaces the placeholders wherever they sit in a word (``{}`` is the
+    argument, ``{//}`` its dirname, ``{/}`` its basename, ``{.}`` the argument
+    without its extension), and with no placeholder they're appended, so the
+    deny matchers see the real shape (``rm -rf /``, not ``rm -rf {}``). With no command before ``:::``,
+    parallel runs each arg as a command, so they are returned as a sequence.
+    When an option's arity is unknown, each reading of where the command
+    starts is returned, as a sequence.
     """
     if _basename(tokens[0]) != "parallel":
         return None
+    commands: list[str] = []
+    for start in _parallel_command_starts(tokens):
+        command = _parallel_command(tokens, start)
+        if command is not None and command not in commands:
+            commands.append(command)
+    return " ; ".join(commands) or None
+
+
+# A word with one of these needs its quotes back when words are joined into a command.
+_SHELL_META_RE = re.compile(r"[\s;&|<>()$`\\'\"]")
+
+
+def _bsd_script_command(tokens: list[str]) -> str | None:
+    """The command in BSD/macOS ``script [-aeFkqr] [-t time] [file [command ...]]``, which has no ``-c``.
+
+    ``-t`` is the only option with a value, and a cluster takes one only when
+    it ends in ``t`` (``-qt 0``); ``-F`` just flushes output.
+    """
     i = 1
-    while i < len(tokens) and tokens[i].startswith("-"):
-        i += 1
-    if i >= len(tokens):
+    while i < len(tokens) and tokens[i].startswith("-") and tokens[i] != "-":
+        i += 2 if not tokens[i].startswith("--") and tokens[i].endswith("t") else 1
+    command = tokens[i + 1 :]  # tokens[i] is the output file
+    if not command or command[0].startswith("-"):
         return None
-    end = i
-    while end < len(tokens) and tokens[end] != ":::":
-        end += 1
-    cmd_tokens = tokens[i:end]
-    if not cmd_tokens:
-        return None
-    args = tokens[end + 1 :] if end < len(tokens) else []
-    if not args:
-        return " ".join(cmd_tokens)
-    substituted = [args[0] if t == "{}" else t for t in cmd_tokens]
-    if "{}" not in cmd_tokens:
-        substituted = substituted + args
-    return " ".join(substituted)
+    return " ".join(shlex.quote(t) if _SHELL_META_RE.search(t) else t for t in command)
 
 
 def _strip_script(tokens: list[str]) -> str | None:
-    """Strip ``script <output> -c "<cmd>"``."""
-    if _basename(tokens[0]) != "script" or len(tokens) < _SCRIPT_C_MIN_TOKENS:
+    """Strip ``script [-qc] -c "<cmd>" [<output>]`` and ``script --command=<cmd>``.
+
+    The output file may sit on either side, and ``--command`` may be
+    abbreviated, as ``getopt`` allows. With no such option, it is the BSD form,
+    where the words after the output file are the command.
+    """
+    if _basename(tokens[0]) != "script":
         return None
-    for i in range(2, len(tokens) - 1):
-        if _SHELL_C_FLAGS_RE.match(tokens[i]):
-            return tokens[i + 1] if i + 1 < len(tokens) else None
-    return None
+    for i in range(1, len(tokens)):
+        flag, equals, value = tokens[i].partition("=")
+        is_long = len(flag) >= len("--c") and "--command".startswith(flag)
+        if equals:
+            if is_long:
+                return value
+        elif i + 1 < len(tokens) and (is_long or _SHELL_C_FLAGS_RE.match(flag)):
+            return tokens[i + 1]
+    return _bsd_script_command(tokens)
 
 
 # Helpers are mutually exclusive on head-token basename, so dispatch order
@@ -2350,7 +2914,79 @@ def _exceeds_unwrap_cap(segment: str) -> bool:
     return nxt_norm != current and nxt_norm not in seen
 
 
-def _candidate_forms(segment: str) -> list[str]:
+_GLUED_REDIRECT_OP_RE = re.compile(r"&>>?|<<<|<<-?|<>|<&|>&|>>|>\||<|>")
+# Where the text of a quote, ``$'...'`` or ``${...}`` ends.
+_GLUED_QUOTE_END = {"'": "'", "$'": "'", '"': '"', "`": "`", "${": "}"}
+
+
+def _space_glued_redirects(segment: str) -> str:
+    r"""Put a space before each unquoted redirect operator that is glued to a word.
+
+    Bash ends a word at ``<`` and ``>``: ``rm -rf ~>/dev/null`` is ``rm -rf ~``
+    with its output redirected, so ``~`` is the operand. A word of only digits
+    before the operator is its file descriptor (``2>&1``) and stays attached.
+    Quotes, ``$'...'``, ``${...}`` and ``$(...)`` / ``<(...)`` bodies are left alone.
+    """
+    if "<" not in segment and ">" not in segment:
+        return segment
+    out: list[str] = []
+    in_word = False  # the text written so far ends in a run of non-blank characters
+    all_digits = False  # ... and that run is only digits
+    quote = ""
+    depth = 0
+    i = 0
+
+    def emit(text: str) -> None:
+        nonlocal in_word, all_digits
+        out.append(text)
+        for ch in text:
+            if ch.isspace():
+                in_word = all_digits = False
+            else:
+                all_digits = ch.isdigit() and (all_digits or not in_word)
+                in_word = True
+
+    while i < len(segment):
+        c = segment[i]
+        if quote:
+            if c == "\\" and quote != "'":
+                emit(segment[i : i + 2])
+                i += 2
+                continue
+            if c == _GLUED_QUOTE_END[quote]:
+                quote = ""
+        elif c == "\\":
+            emit(segment[i : i + 2])
+            i += 2
+            continue
+        elif c in "'\"`":
+            quote = c
+        elif segment.startswith(("$'", "${"), i):
+            quote = segment[i : i + 2]
+            emit(quote)
+            i += 2
+            continue
+        elif segment.startswith(("$(", "<(", ">("), i):
+            depth += 1
+            emit(segment[i : i + 2])
+            i += 2
+            continue
+        elif depth and c in "()":
+            depth += 1 if c == "(" else -1
+        elif c in "<>&" and not depth:
+            op = _GLUED_REDIRECT_OP_RE.match(segment, i)
+            if op:
+                if in_word and not all_digits:
+                    emit(" ")
+                emit(op.group())
+                i = op.end()
+                continue
+        emit(c)
+        i += 1
+    return "".join(out)
+
+
+def _candidate_forms(segment: str, *, raw: bool = True) -> list[str]:
     """Return all canonical forms of ``segment`` that matchers should consider.
 
     A single attacker-supplied segment may need to be evaluated under several
@@ -2369,6 +3005,11 @@ def _candidate_forms(segment: str) -> list[str]:
     so every matcher sees every peel layer.
     """
     forms: list[str] = []
+    if raw:
+        # A redirect glued to a word (``rm -rf ~>/dev/null``) is split off it, as
+        # bash does, so the deny matchers see ``~`` as the operand. Only raw text
+        # still has its quotes: a normalized form's ``'~>x'`` is a bare ``~>x``.
+        segment = _space_glued_redirects(segment)
     normalized = _normalize_segment(segment)
     forms.append(normalized)
     # Runner strip operates on the raw segment so ``bash -c "rm -rf /"``
@@ -4928,6 +5569,24 @@ _SANDBOX_VALUE_FLAGS: dict[str, int] = {
 }
 
 
+def _watch_flag_width(flag: str) -> int:
+    """Words a ``watch`` flag takes: itself, and its value when that is the next word.
+
+    ``-n SECONDS`` / ``--interval SECONDS`` and ``-q CYCLES`` / ``--equexit
+    CYCLES`` take a value, attached (``-n1``, ``--interval=1``) or separate. A
+    cluster ends in the letter that takes it (``-tn 1``). ``-d`` / ``--differences``
+    take theirs only when attached, so the word after them is the command.
+    """
+    if flag.startswith("--"):
+        return 2 if flag in {"--interval", "--equexit"} else 1
+    for k, letter in enumerate(flag[1:], start=1):
+        if letter == "d":
+            break
+        if letter in "nq":
+            return 2 if k == len(flag) - 1 else 1
+    return 1
+
+
 def _strip_exec_wrapper(tokens: list[str]) -> str | None:
     """Peel one pre-exec wrapper layer, returning the inner command.
 
@@ -4937,7 +5596,8 @@ def _strip_exec_wrapper(tokens: list[str]) -> str | None:
     ``flock``/``chrt``/``taskset``/``chroot`` take a leading positional before
     the inner command; the rest only take flags. ``bwrap``/``firejail`` take
     space-separated option values (``--dev-bind SRC DEST``) counted via
-    ``_SANDBOX_VALUE_FLAGS`` so the inner command isn't mistaken for a value.
+    ``_SANDBOX_VALUE_FLAGS`` so the inner command isn't mistaken for a value;
+    ``watch`` does the same for ``-n 1`` through ``_watch_flag_width``.
     """
     if not tokens:
         return None
@@ -4957,6 +5617,9 @@ def _strip_exec_wrapper(tokens: list[str]) -> str | None:
             and head == "runuser"
         ):
             cursor += 2
+            continue
+        if head == "watch":
+            cursor += _watch_flag_width(tokens[cursor])
             continue
         # ``bwrap --dev-bind SRC DEST`` etc.: consume space-separated values so
         # the loop doesn't break at the first value and leak the inner command.
@@ -5284,8 +5947,7 @@ def _is_dns_exfil_candidate(normalized: str) -> bool:
 
 
 # 3-tuples: (matcher, label, rule_id). The rule_id is the stable string a
-# user puts in their allowlist's ``disable_rules`` (or in an
-# ``allow_commands`` ``rule`` field). Names are mechanical: the matcher
+# user puts in their allowlist's ``disable_rules``. Names are mechanical: the matcher
 # function name with the ``_is_`` / ``_has_`` prefix dropped, namespaced
 # under ``bash.``. Keep these stable across releases — changing one is a
 # breaking change for users who allowlisted under the old name.
@@ -5528,24 +6190,45 @@ def _match_synthetic_deny(
     return None
 
 
+# Commands that hand their command argument to a shell, as ``bash -c`` does.
+_SHELL_RUN_EXECUTORS = frozenset({"watch", "script", "parallel"})
+
+
 def _expand_runner_payload_segments(seg: str) -> list[str]:
     """Expand a shell-wrapper invocation's inner payload into pipeline segments.
 
     ``bash -c "rm -rf /; other"`` has operators inside the payload that the
     outer split missed. Re-split the inner payload as a fresh pipeline so the
-    matchers see each inner sub-segment.
+    matchers see each inner sub-segment. ``watch``, ``script -c`` and
+    ``parallel`` run their command through a shell too, so theirs is re-split
+    the same way. A newline inside quotes in the payload stays in its segment.
 
-    Returns the empty list when ``seg`` doesn't start with a shell wrapper.
+    Returns the empty list when ``seg`` doesn't start with one of these.
     """
     tokens = seg.split()
-    if not tokens or _basename(tokens[0]) not in DANGEROUS_SHELL_WRAPPERS:
+    if not tokens:
         return []
-    inner = _strip_runner_prefix(seg)
+    head = _basename(tokens[0])
+    if head == "watch":
+        # An exec wrapper: its command follows the flags, with no ``-c``.
+        inner = _strip_exec_wrapper(_shlex_tokens(seg))
+    elif head in DANGEROUS_SHELL_WRAPPERS or head in _SHELL_RUN_EXECUTORS:
+        inner = _strip_runner_prefix(seg)
+    else:
+        return []
     if inner is None:
         return []
-    # Re-canonicalize and re-split the inner payload as a fresh pipeline.
-    inner_canon = _canonicalize(inner)
-    return split_pipeline(inner_canon)
+    marked = _mark_quoted_newlines(inner)
+    if marked is not None:
+        return [s.replace(_QUOTED_NEWLINE, "\n") for s in split_pipeline(_canonicalize(marked))]
+    # The quoting can't be read exactly: check the line-by-line split and each
+    # joined reading, so a command after a multi-line quote is seen by one.
+    segments = split_pipeline(_canonicalize(inner))
+    for joined, _delimiters in _joined_readings(inner):
+        segments += [
+            s.replace(_QUOTED_NEWLINE, "\n") for s in split_pipeline(_canonicalize(joined))
+        ]
+    return segments
 
 
 # Inline programs that are STEER in auto mode when written out literally:
@@ -5909,7 +6592,7 @@ def _exec_wrapper_candidates(seg: str) -> list[str]:
         # find`` -> ``sudo find`` -> ``find``), which _candidate_forms strips but
         # _strip_exec_wrapper does not. Without this, stacked exec-wrapper +
         # runner combos hide the inner command from every floor matcher.
-        nexts.extend(_normalize_segment(cf) for cf in _candidate_forms(item))
+        nexts.extend(_normalize_segment(cf) for cf in _candidate_forms(item, raw=False))
         for norm in nexts:
             if norm and norm not in seen:
                 seen.add(norm)
@@ -6665,12 +7348,10 @@ _AGENT_GUIDANCE_STRICT = (
 def _format_deny_reason(rule_id: str, body: str) -> str:
     """Append the unified rule_id + override-path footer to a deny ``body``.
 
-    Every allowlist-routed deny surfaces the rule_id and the two CLI verbs
-    that turn it off, so a user hit by a false positive can act without
+    Every allowlist-routed deny surfaces the rule_id and the CLI verb that
+    turns it off, so a user hit by a false positive can act without
     grepping the source. The footer is identical across matchers: users
-    learn the shape once. ``<command>`` is a placeholder — substituting
-    quoted shell text into the printed message is error-prone, so the
-    user supplies the exact form they want when they invoke the CLI.
+    learn the shape once.
 
     An agent-guidance sentence is appended so agents know whether to take
     it to the user (enforce) or surface and stop (lockdown). The body is
@@ -6684,9 +7365,7 @@ def _format_deny_reason(rule_id: str, body: str) -> str:
     guidance = _AGENT_GUIDANCE_STRICT if lockdown else _AGENT_GUIDANCE_INTERACTIVE
     return (
         f"guard [permission_mode={mode}] denied: {rule_id}. {body}. "
-        f"Override: `guard allowlist allow-command --rule {rule_id} --command '<command>' "
-        "--reason '...'` "
-        f"or `guard allowlist disable-rule {rule_id}`. {guidance}"
+        f"Override: `guard allowlist disable-rule {rule_id}`. {guidance}"
     )
 
 
@@ -6696,30 +7375,18 @@ def _maybe_allow_via_allowlist(
     original_command: str,
     pending_decision: dict[str, str],
 ) -> dict[str, str] | None:
-    """Return an allow envelope if the user's allowlist permits this denial.
+    """Return an allow envelope if ``rule_id`` is in the user's ``disable_rules``.
 
-    The override applies in two cases:
-    - ``rule_id`` is in ``disable_rules`` — the entire matcher is muted.
-    - An ``allow_commands`` entry has the same ``rule`` and a ``command``
-      string equal (after .strip()) to ``original_command`` — exact-command
-      override with a written justification.
-
-    Both bypasses are logged via ``log_decision()`` so the audit trail
-    captures the rule_id, the reason, and the original command. Returns
-    ``None`` if no allowlist rule applies — the caller keeps
-    ``pending_decision`` and proceeds with the denial as written.
-    ``pending_decision`` is currently accepted but unused — reserved for a
-    future "shadow"-mode implementation that records what would have been
-    denied.
+    The bypass is logged via ``log_decision()`` so the audit trail captures
+    the rule_id and the original command. Returns ``None`` otherwise; the
+    caller keeps ``pending_decision`` and proceeds with the denial as
+    written. ``pending_decision`` is currently accepted but unused,
+    reserved for a future "shadow"-mode implementation that records what
+    would have been denied.
     """
     del pending_decision
     if allowlist.is_rule_disabled(rule_id):
         reason = f"allowlist: rule '{rule_id}' disabled by user config"
-        _log_local(original_command, "allow", reason)
-        return _allow(reason)
-    entry = allowlist.find_command(rule_id, original_command)
-    if entry is not None:
-        reason = f"allowlist: {entry.reason} (rule={rule_id})"
         _log_local(original_command, "allow", reason)
         return _allow(reason)
     return None
@@ -6898,8 +7565,8 @@ def decide(
 ) -> dict[str, str] | None:
     """Decide whether to allow a bash command. ``None`` means passthrough.
 
-    ``original_command`` is the unmodified user-typed command string used for
-    allowlist exact-match lookups. When ``None``, defaults to ``command``.
+    ``original_command`` is the unmodified user-typed command string, recorded
+    in the decision log. When ``None``, defaults to ``command``.
 
     ``permission_mode`` is the documented Claude Code permission mode. Outside
     ``auto`` it is recorded in deny reasons and the log for context only. In
@@ -6979,14 +7646,49 @@ def _floor_check(text: str, command: str, *, floor_only: bool = False) -> dict[s
     return hit
 
 
+def _joined_readings_deny(
+    command: str, original_command: str, permission_mode: str, *, lockdown: bool
+) -> dict[str, str] | None:
+    """Deny envelope if ``command``, read with its quoted newlines joined, hits a rule.
+
+    Each reading from ``_joined_readings`` runs the whole decision quietly
+    (like a floor check: nothing is logged, the auto-mode passes it skips are
+    dropped) and only a deny counts, because the reading may be wrong about
+    the quoting. The caller goes on with its own line split when none denies.
+    """
+    ctx = _REQUEST_CONTEXT
+    depth: int = ctx["floor_depth"]
+    deferred: list[str] = list(ctx["deferred"])
+    for reading in _joined_readings(command):
+        ctx["floor_depth"] = depth + 1
+        ctx["floor_hit"] = ""
+        try:
+            hit = _decide_inner(
+                command, original_command, permission_mode, lockdown=lockdown, joined=reading
+            )
+        finally:
+            ctx["floor_depth"] = depth
+            ctx["deferred"] = list(deferred)
+        if hit is not None and hit.get("permissionDecision") == "deny":
+            _log_local(command, "deny", f"{ctx['floor_hit'] or 'floor'} (quoted lines joined)")
+            return hit
+    return None
+
+
 def _decide_inner(
     command: str,
     original_command: str,
     permission_mode: str,
     *,
     lockdown: bool,
+    joined: tuple[str, frozenset[str]] | None = None,
 ) -> dict[str, str] | None:
-    """The decision itself; ``decide`` wraps it with the auto-mode bookkeeping."""
+    """The decision itself; ``decide`` wraps it with the auto-mode bookkeeping.
+
+    ``joined`` is one best-effort reading from ``_joined_readings`` (its marked
+    text and heredoc delimiters): the command is then segmented from that text
+    instead of the exact quote walk or the line split.
+    """
     _REQUEST_CONTEXT["permission_mode"] = permission_mode
     _REQUEST_CONTEXT["lockdown"] = lockdown
     # Adversarial-length inputs (200 KB single-token ``echo aaaa...``) drive
@@ -7014,6 +7716,18 @@ def _decide_inner(
             return bypass
         _log_local(command, "deny", "command-too-long")
         return deny
+    # Read the quoting before canonicalizing: decoding ``$'...'`` and expanding
+    # braces don't respect quotes.
+    marked = _mark_quoted_newlines(command) if joined is None else joined[0]
+    if marked is None and joined is None:
+        # The quoting can't be read exactly, so the line split below may read a
+        # command after a multi-line quote as inside it. Deny if a reading that
+        # joins the quoted lines denies.
+        joined_deny = _joined_readings_deny(
+            command, original_command, permission_mode, lockdown=lockdown
+        )
+        if joined_deny is not None:
+            return joined_deny
     # Fold POSIX line continuations and unicode whitespace before any other
     # processing so downstream pipeline split / normalization sees a canonical
     # ASCII form.
@@ -7063,10 +7777,20 @@ def _decide_inner(
         return secret
 
     cleaned = strip_comments(command)
-    # Heredoc bodies that are data (a file being written, input to a filter)
-    # are not commands: take them out before the line split.
-    skeleton, dynamic_heredocs = _heredoc_skeleton(cleaned)
-    seg_pairs = split_pipeline_with_ops(skeleton) if skeleton else []
+    if marked is None:
+        # Heredoc bodies that are data (a file being written, input to a filter)
+        # are not commands: take them out before the line split.
+        skeleton, dynamic_heredocs = _heredoc_skeleton(cleaned)
+        seg_pairs = split_pipeline_with_ops(skeleton) if skeleton else []
+    else:
+        # The quote walk found no heredoc (or, for a joined reading, its
+        # bodies are out already), and each quoted newline stays in the
+        # segment that holds its argument.
+        skeleton, dynamic_heredocs = cleaned, frozenset() if joined is None else joined[1]
+        seg_pairs = [
+            (op, seg.replace(_QUOTED_NEWLINE, "\n"))
+            for op, seg in split_pipeline_with_ops(strip_comments(_canonicalize(marked)))
+        ]
     if not seg_pairs:
         return None
     segments = [seg for _op, seg in seg_pairs]
@@ -8908,7 +9632,7 @@ def _evaluate_strict(
 
     Every strict-mode deny is routed through ``_maybe_allow_via_allowlist``
     so the override path that ``_format_deny_reason`` advertises (`guard
-    allowlist allow-command ...` / `disable-rule ...`) actually fires.
+    allowlist disable-rule ...`) actually fires.
     """
     for i, segment in enumerate(segments):
         is_piped = seg_ops[i] == "|"

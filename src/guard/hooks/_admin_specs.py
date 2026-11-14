@@ -4,7 +4,7 @@
 
 Design: each CLI enrolled here moves from a denylist of dangerous verbs to a
 default-deny + read-only allowlist. Verbs NOT in the read-only set are denied;
-users override via allow_commands, disable_rules, or GUARD_ADMIN_ALLOW_VERBS.
+users override via disable_rules or GUARD_ADMIN_ALLOW_VERBS.
 
 When to add a new CLI here (v1.2+):
   1. Define verb_extractor (pure fn: list[str] -> tuple[str, ...]).

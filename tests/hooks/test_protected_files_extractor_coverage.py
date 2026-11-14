@@ -11,11 +11,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
 from guard.hooks.protected_files import (
     _bash_first_protected_match,
     _effective_patterns,
     bash_write_targets,
 )
+from tests._helpers import LIVE_GUARD
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -136,7 +139,7 @@ def test_find_without_exec_does_not_emit_root() -> None:
 def test_find_exec_on_dot_git_hooks_root_flagged() -> None:
     cmd = "find /repo/.git/hooks -exec rm {} \\;"
     matched = _bash_first_protected_match(cmd, _LOCKDOWN)
-    assert matched == ".git/hooks"
+    assert matched == (".git/hooks", "/repo/.git/hooks")
 
 
 # === find -fprint / -fprintf / -fls write flags ===
@@ -165,7 +168,7 @@ def test_find_fprint0_emits_file_target() -> None:
 def test_find_fprint_on_protected_path_flagged() -> None:
     """Real bypass: ``find . -fprint .git/config`` overwrites the protected file."""
     matched = _bash_first_protected_match("find . -fprint /repo/.git/config", _LOCKDOWN)
-    assert matched == ".git/config"
+    assert matched == (".git/config", "/repo/.git/config")
 
 
 # === nvim --headless batch mode ===
@@ -183,7 +186,7 @@ def test_nvim_headless_plus_command_extracts_target() -> None:
 
 def test_nvim_headless_on_protected_path_flagged() -> None:
     matched = _bash_first_protected_match("nvim --headless -c 'wq' /repo/CLAUDE.md", _LOCKDOWN)
-    assert matched == "CLAUDE.md"
+    assert matched == ("CLAUDE.md", "/repo/CLAUDE.md")
 
 
 # === Per-interpreter eval-flag map ===
@@ -194,6 +197,15 @@ def test_python_dash_c_with_protected_path_literal_extracted() -> None:
     targets = bash_write_targets(cmd, _LOCKDOWN)
     # The pattern ``.git/config`` should appear among extracted targets.
     assert ".git/config" in targets
+
+
+@pytest.mark.parametrize("redirect", ["2>/dev/null", "> /dev/null", ">>/tmp/log"])
+def test_python_dash_c_redirect_before_body_still_scanned(redirect: str) -> None:
+    cmd = f"python3 -c {redirect} \"open('/repo/.git/config','w').write('x')\""
+    assert ".git/config" in bash_write_targets(cmd, _LOCKDOWN)
+    matched = _bash_first_protected_match(cmd, _LOCKDOWN)
+    assert matched is not None
+    assert matched.pattern == ".git/config"
 
 
 def test_python_dash_c_without_protected_literal_yields_none() -> None:
@@ -264,7 +276,7 @@ def test_eval_body_over_cap_emits_overflow_sentinel() -> None:
     pad = "x" * (1024 * 1024 + 1024)
     cmd = f"python -c \"{pad};open('/repo/.git/config','w')\""
     targets = bash_write_targets(cmd, _LOCKDOWN)
-    assert "guard/_utils.py" in targets
+    assert str(LIVE_GUARD / "_utils.py") in targets
 
 
 def test_eval_body_over_cap_protected_match_is_forced() -> None:

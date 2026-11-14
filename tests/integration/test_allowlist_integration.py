@@ -1,4 +1,4 @@
-"""Integration: bash_command_validator honors the project + global allowlist."""
+"""Integration: hooks honor the global ``disable_rules`` and ignore retired config."""
 
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TracineHQ contributors
@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from tests._helpers import git, init_git_repo
+from tests._helpers import LIVE_GUARD
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -28,7 +28,7 @@ def _is_allow(decision: dict | None) -> bool:
     return decision is not None and decision.get("permissionDecision") == "allow"
 
 
-_REGISTRY = "/repo/src/guard/registry.py"
+_REGISTRY = str(LIVE_GUARD / "registry.py")
 _ALLOWLIST = "/repo/.claude/guard/allowlist.json"
 
 
@@ -36,9 +36,7 @@ _ALLOWLIST = "/repo/.claude/guard/allowlist.json"
 def allowlist_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point ``GUARD_DATA_DIR`` at a clean tmp dir; return the dir.
 
-    Tests write their allowlist file to ``<dir>/allowlist.json`` for
-    global-scope, or to ``<cwd>/.claude/guard/allowlist.json`` for project
-    scope (using the autouse ``monkeypatch.chdir`` they set up themselves).
+    Tests write the global file to ``<dir>/allowlist.json``.
     """
     home = tmp_path / "guard-home"
     monkeypatch.setenv("GUARD_DATA_DIR", str(home))
@@ -71,67 +69,6 @@ def test_disable_rules_does_not_affect_other_rules(allowlist_home: Path) -> None
     assert _is_deny(decide("sudo su -"))
 
 
-# === Synth matcher: exact-command override ===
-
-
-def test_allow_commands_exact_match_unblocks(allowlist_home: Path) -> None:
-    from guard.hooks.bash_command_validator import decide
-
-    cmd = "dd if=/dev/zero of=/tmp/disk.qcow2 bs=1M count=1"
-    assert _is_deny(decide(cmd))
-
-    _write_allowlist(
-        allowlist_home / "allowlist.json",
-        {
-            "allow_commands": [
-                {
-                    "rule": "bash.disk_destruction",
-                    "command": cmd,
-                    "reason": "build a throwaway VM image for the test fixture",
-                }
-            ]
-        },
-    )
-    decision = decide(cmd)
-    assert _is_allow(decision)
-    assert "throwaway VM image" in decision["permissionDecisionReason"]
-
-
-def test_allow_commands_does_not_match_different_command(allowlist_home: Path) -> None:
-    from guard.hooks.bash_command_validator import decide
-
-    _write_allowlist(
-        allowlist_home / "allowlist.json",
-        {
-            "allow_commands": [
-                {
-                    "rule": "bash.disk_destruction",
-                    "command": "dd if=/dev/zero of=/tmp/x.qcow2 bs=1M count=1",
-                    "reason": "fixture",
-                }
-            ]
-        },
-    )
-    # Different operands → not allowlisted, still denies.
-    assert _is_deny(decide("dd if=/dev/urandom of=/dev/sda bs=1M"))
-
-
-def test_allow_commands_wrong_rule_does_not_unblock(allowlist_home: Path) -> None:
-    from guard.hooks.bash_command_validator import decide
-
-    cmd = "dd if=/dev/zero of=/dev/sda"
-    _write_allowlist(
-        allowlist_home / "allowlist.json",
-        {
-            "allow_commands": [
-                # Wrong rule: this matches sudo, not disk_destruction.
-                {"rule": "bash.sudo_escalation", "command": cmd, "reason": "x"}
-            ]
-        },
-    )
-    assert _is_deny(decide(cmd))
-
-
 # === ALWAYS_DENY: coarse-grained disable ===
 
 
@@ -155,36 +92,34 @@ def test_disable_always_deny_lets_literal_through(allowlist_home: Path) -> None:
     assert "bash.always_deny" in decision["permissionDecisionReason"]
 
 
-# === Project allowlist takes effect from cwd ===
+# === Retired config grants nothing ===
 
 
-def test_project_allowlist_takes_effect(
+def test_retired_allow_commands_entry_does_not_unblock(allowlist_home: Path) -> None:
+    from guard.hooks.bash_command_validator import decide
+
+    cmd = "dd if=/dev/zero of=/tmp/disk.qcow2 bs=1M count=1"
+    _write_allowlist(
+        allowlist_home / "allowlist.json",
+        {"allow_commands": [{"rule": "bash.disk_destruction", "command": cmd, "reason": "x"}]},
+    )
+    decision = decide(cmd)
+    assert _is_deny(decision)
+    assert "allow-command" not in decision["permissionDecisionReason"]
+
+
+def test_retired_project_allowlist_does_not_take_effect(
     allowlist_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from guard.hooks.bash_command_validator import decide
 
-    project = init_git_repo(tmp_path / "project")  # untracked project file: trusted
-    monkeypatch.chdir(project)
+    project = tmp_path / "project"
     _write_allowlist(
         project / ".claude" / "guard" / "allowlist.json",
-        {"disable_rules": ["bash.disk_destruction"]},
+        {"mode": "off", "disable_rules": ["bash.disk_destruction"]},
     )
-    assert _is_allow(decide("dd if=/dev/zero of=/dev/sda bs=1M"))
-
-
-def test_tracked_project_allowlist_does_not_take_effect(
-    allowlist_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from guard.hooks.bash_command_validator import decide
-
-    project = init_git_repo(tmp_path / "project")
     monkeypatch.chdir(project)
-    _write_allowlist(
-        project / ".claude" / "guard" / "allowlist.json",
-        {"disable_rules": ["bash.disk_destruction"]},
-    )
-    git(project, "add", ".claude/guard/allowlist.json")
-    assert not _is_allow(decide("dd if=/dev/zero of=/dev/sda bs=1M"))
+    assert _is_deny(decide("dd if=/dev/zero of=/dev/sda bs=1M"))
 
 
 # === Audit log records the bypass ===
@@ -196,30 +131,16 @@ def test_audit_log_records_allowlist_bypass(
 ) -> None:
     from guard.hooks.bash_command_validator import decide
 
-    cmd = "dd if=/dev/zero of=/dev/sda"
     _write_allowlist(
-        allowlist_home / "allowlist.json",
-        {
-            "allow_commands": [
-                {
-                    "rule": "bash.disk_destruction",
-                    "command": cmd,
-                    "reason": "perf bench fixture: bs1m",
-                }
-            ]
-        },
+        allowlist_home / "allowlist.json", {"disable_rules": ["bash.disk_destruction"]}
     )
-    decide(cmd)
-    text = decision_log_env.read_text(encoding="utf-8")
-    assert text  # log file populated
-    # The most recent record should be the allow with the allowlist reason.
-    last = json.loads(text.strip().splitlines()[-1])
+    decide("dd if=/dev/zero of=/dev/sda")
+    last = json.loads(decision_log_env.read_text(encoding="utf-8").strip().splitlines()[-1])
     assert last["decision"] == "allow"
-    assert "perf bench fixture: bs1m" in last["reason"]
-    assert "rule=bash.disk_destruction" in last["reason"]
+    assert last["reason"] == "allowlist: rule 'bash.disk_destruction' disabled by user config"
 
 
-# === Other hooks: whole-hook disable + path/command exact-match override ===
+# === Other hooks: whole-hook disable ===
 
 
 def test_protected_files_disabled_by_allowlist(
@@ -246,37 +167,6 @@ def test_protected_files_disabled_by_allowlist(
     assert "guard.protected_files" in last["reason"]
 
 
-def test_protected_files_exact_path_allowlisted(
-    allowlist_home: Path,
-    decision_log_env: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    from guard.hooks.protected_files import hook
-
-    _write_allowlist(
-        allowlist_home / "allowlist.json",
-        {
-            "allow_commands": [
-                {
-                    "rule": "guard.protected_files",
-                    "command": _REGISTRY,
-                    "reason": "intentional registry update for the release",
-                }
-            ]
-        },
-    )
-    payload = {
-        "tool_name": "Edit",
-        "tool_input": {"file_path": _REGISTRY, "old_string": "x", "new_string": "y"},
-        "session_id": "s1",
-    }
-    hook(payload)
-    assert capsys.readouterr().out == ""
-    last = json.loads(decision_log_env.read_text(encoding="utf-8").strip().splitlines()[-1])
-    assert last["decision"] == "pass"
-    assert "intentional registry update" in last["reason"]
-
-
 def _protected_files_exits_deny(payload: dict, capsys: pytest.CaptureFixture[str]) -> bool:
     from guard.hooks.protected_files import hook
 
@@ -285,7 +175,7 @@ def _protected_files_exits_deny(payload: dict, capsys: pytest.CaptureFixture[str
     return exc.value.code == 2 and '"deny"' in capsys.readouterr().out
 
 
-def test_protected_files_exact_path_does_not_match_other_paths(
+def test_retired_exact_path_entry_does_not_unblock_protected_file(
     allowlist_home: Path,
     decision_log_env: Path,
     capsys: pytest.CaptureFixture[str],
@@ -300,11 +190,7 @@ def test_protected_files_exact_path_does_not_match_other_paths(
     )
     payload = {
         "tool_name": "Edit",
-        "tool_input": {
-            "file_path": "/repo/src/guard/_utils.py",
-            "old_string": "x",
-            "new_string": "y",
-        },
+        "tool_input": {"file_path": _REGISTRY, "old_string": "x", "new_string": "y"},
         "session_id": "s1",
     }
     assert _protected_files_exits_deny(payload, capsys)
@@ -323,7 +209,7 @@ def test_protected_files_exact_path_does_not_match_other_paths(
             ]
         },
     ],
-    ids=["disable_rules", "allow_commands"],
+    ids=["disable_rules", "retired_allow_commands"],
 )
 def test_protected_files_allowlist_file_is_unbypassable(
     allowlist_home: Path,
