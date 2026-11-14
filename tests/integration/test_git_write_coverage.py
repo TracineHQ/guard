@@ -126,7 +126,19 @@ def _difflike_subforms(sub: str) -> list[str]:
 
 
 def _grep_subforms() -> list[str]:
-    return ["grep --open-files-in-pager=id pat", "grep -Oid pat"]
+    return [
+        "grep --open-files-in-pager=id pat",
+        "grep -Oid pat",
+        "grep -nOid pat",  # -O bundled behind another short flag
+        "grep --op=id pat",  # git accepts a unique prefix of a long option
+        "grep -e pat -Oid",  # an option after -e's pattern is still an option
+        "grep -e -- -Oid pat",  # -e takes the -- as its pattern
+        "grep -e 'x -e' -Oid pat",  # the second -e is inside the first pattern
+        "grep -e 'x --' -Oid pat",  # so is the --
+        "grep 'x -e' -Oid pat",  # a quoted pattern folds to a fake -e
+        "grep 'x --' -Oid pat",  # or a fake --
+        "grep -n -e -Oid -- .",  # folded words cannot tell a pattern from -O
+    ]
 
 
 def _all_subforms() -> list[str]:

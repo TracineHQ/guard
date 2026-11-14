@@ -1365,14 +1365,40 @@ def _git_difflike_exec_violation(args: list[str]) -> str | None:
     return None
 
 
+# git grep short options that take the rest of a bundled word as their value
+# (``-ne-O2`` is the pattern ``-O2``).
+_GIT_GREP_VALUE_FLAGS: frozenset[str] = frozenset({"e", "f"})
+
+
+def _git_grep_opens_pager(tok: str) -> bool:
+    """Whether one word, read as a git grep option, opens files in a pager.
+
+    Short flags bundle (``-nOvim``) and a long option may be cut to a unique
+    prefix (``--op=vim``), as git allows.
+    """
+    if tok.startswith("--"):
+        flag = tok.partition("=")[0]
+        pager = len(flag) >= len("--op") and "--open-files-in-pager".startswith(flag)
+        return pager or flag == "--output"
+    if not tok.startswith("-"):
+        return False
+    for ch in tok[1:]:
+        if ch == "O":
+            return True
+        if ch in _GIT_GREP_VALUE_FLAGS or not ch.isalnum():
+            return False  # a glued value, or a word git rejects before any pager runs
+    return False
+
+
 def _git_grep_exec_violation(args: list[str]) -> str | None:
-    """Grep helper: ``--open-files-in-pager``/``-O<cmd>``/``--output`` exec a pager."""
+    """Grep helper: ``--open-files-in-pager``/``-O<cmd>``/``--output`` exec a pager.
+
+    Every word is read as an option, even after ``-e`` or ``--``. The bash
+    matcher passes quote-folded tokens, so ``'x -e' -Ovim`` arrives as
+    ``x -e -Ovim`` and no word can be trusted to be a pattern or a pathspec.
+    """
     for tok in args:
-        if tok in {"--open-files-in-pager", "--output", "-O"}:
-            return tok
-        if tok.startswith(("--open-files-in-pager=", "--output=")):
-            return tok
-        if tok.startswith("-O") and tok != "-O":
+        if _git_grep_opens_pager(tok):
             return tok
     return None
 
