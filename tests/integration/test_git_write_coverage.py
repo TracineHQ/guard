@@ -135,6 +135,9 @@ def _grep_subforms() -> list[str]:
         "grep -e -- -Oid pat",  # -e takes the -- as its pattern
         "grep -e 'x -e' -Oid pat",  # the second -e is inside the first pattern
         "grep -e 'x --' -Oid pat",  # so is the --
+        "grep 'x -e' -Oid pat",  # a quoted pattern folds to a fake -e
+        "grep 'x --' -Oid pat",  # or a fake --
+        "grep -n -e -Oid -- .",  # folded words cannot tell a pattern from -O
     ]
 
 

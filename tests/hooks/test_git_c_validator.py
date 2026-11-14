@@ -87,8 +87,8 @@ class TestAllowedSubcommands:
         decision, _ = _run("git -C /path diff origin/main..feat -- file.py")
         assert decision == "allow"
 
-    def test_grep_pattern_that_looks_like_a_pager_flag(self):
-        decision, _ = _run("git -C /path grep -n -e -O2 -- .")
+    def test_grep_glued_pattern_that_looks_like_a_pager_flag(self):
+        decision, _ = _run("git -C /path grep -ne-O2 -- .")
         assert decision == "allow"
 
 

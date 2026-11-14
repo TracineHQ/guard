@@ -29,12 +29,9 @@
 {"command": "git log -p", "expected": "allow", "mode": "lockdown", "source": "curated", "note": "patch log -- read-only, not --output"}
 {"command": "git show HEAD", "expected": "allow", "mode": "lockdown", "source": "curated", "note": "show a commit -- positional is a rev, not a ref to create"}
 {"command": "git grep -n TODO src", "expected": "allow", "mode": "lockdown", "source": "curated", "note": "plain grep -- read-only"}
-{"command": "git grep -n -e '-O2' -- .", "expected": "allow", "mode": "lockdown", "source": "convo:session", "note": "the word after -e is a pattern, not -O<pager>"}
 {"command": "git grep -n 'v[-1] -1|OBS_DIM' src", "expected": "allow", "mode": "lockdown", "source": "convo:session", "note": "a pattern piece like -1|OBS is not a bundle with -O; git rejects it at the |"}
 {"command": "git grep -ne-O2 src", "expected": "allow", "mode": "lockdown", "source": "curated", "note": "-e glued in a bundle takes the rest of the word as its pattern"}
-{"command": "git grep -n -f -O2.txt src", "expected": "allow", "mode": "lockdown", "source": "curated", "note": "the word after -f is a pattern file, not -O<pager>"}
-{"command": "git grep -n -- -O2", "expected": "allow", "mode": "lockdown", "source": "curated", "note": "a word after -- is a pathspec, not an option"}
-{"command": "git -C /repo grep -n -e -O3 CMakeLists.txt", "expected": "allow", "mode": "lockdown", "source": "curated", "note": "-e pattern under a git -C wrapper"}
+{"command": "git -C /repo grep -ne-O3 CMakeLists.txt", "expected": "allow", "mode": "lockdown", "source": "curated", "note": "glued -e pattern under a git -C wrapper"}
 {"command": "git remote -v", "expected": "allow", "mode": "lockdown", "source": "curated", "note": "list remotes"}
 {"command": "git remote show origin", "expected": "allow", "mode": "lockdown", "source": "curated", "note": "remote show is a read action"}
 {"command": "git diff --output-indicator-new=X HEAD~1", "expected": "allow", "mode": "lockdown", "source": "curated", "note": "--output-indicator-* is a display flag, NOT --output file write"}

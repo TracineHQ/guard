@@ -1365,61 +1365,41 @@ def _git_difflike_exec_violation(args: list[str]) -> str | None:
     return None
 
 
-# git grep short options whose value can be any word (a pattern, a pattern
-# file), so a value such as ``-O2`` is not an option.
+# git grep short options that take the rest of a bundled word as their value
+# (``-ne-O2`` is the pattern ``-O2``).
 _GIT_GREP_VALUE_FLAGS: frozenset[str] = frozenset({"e", "f"})
 
 
-def _git_grep_word(tok: str) -> str:
-    """Read one word as a git grep option: ``exec``, ``value``, ``glued`` or ``other``.
+def _git_grep_opens_pager(tok: str) -> bool:
+    """Whether one word, read as a git grep option, opens files in a pager.
 
-    ``exec`` opens files in a pager, ``value`` takes the next word as its value,
-    ``glued`` carries its value in the rest of the word. Short flags bundle
-    (``-nOvim``) and a long option may be cut to a unique prefix (``--op=vim``),
-    as git allows.
+    Short flags bundle (``-nOvim``) and a long option may be cut to a unique
+    prefix (``--op=vim``), as git allows.
     """
     if tok.startswith("--"):
         flag = tok.partition("=")[0]
         pager = len(flag) >= len("--op") and "--open-files-in-pager".startswith(flag)
-        return "exec" if pager or flag == "--output" else "other"
+        return pager or flag == "--output"
     if not tok.startswith("-"):
-        return "other"
-    for i, ch in enumerate(tok[1:], start=1):
+        return False
+    for ch in tok[1:]:
         if ch == "O":
-            return "exec"
-        if ch in _GIT_GREP_VALUE_FLAGS:
-            return "value" if i == len(tok) - 1 else "glued"
-        if not ch.isalnum():
-            return "other"  # git rejects the word here, before any pager runs
-    return "other"
+            return True
+        if ch in _GIT_GREP_VALUE_FLAGS or not ch.isalnum():
+            return False  # a glued value, or a word git rejects before any pager runs
+    return False
 
 
 def _git_grep_exec_violation(args: list[str]) -> str | None:
     """Grep helper: ``--open-files-in-pager``/``-O<cmd>``/``--output`` exec a pager.
 
-    A pattern after ``-e`` and a pathspec after ``--`` are not options. The bash
-    matcher passes quote-folded tokens, so ``-e "x -e" -Ovim`` arrives as
-    ``-e x -e -Ovim``: once a value has been read, a later ``-e`` or ``--`` may
-    be part of it. Only the first value is excused, and ``--`` only ends the
-    options before any value.
+    Every word is read as an option, even after ``-e`` or ``--``. The bash
+    matcher passes quote-folded tokens, so ``'x -e' -Ovim`` arrives as
+    ``x -e -Ovim`` and no word can be trusted to be a pattern or a pathspec.
     """
-    value_seen = False
-    expect_value = False
     for tok in args:
-        kind = _git_grep_word(tok)
-        if expect_value:
-            expect_value = False
-            if not (value_seen and kind == "exec"):
-                value_seen = True
-                continue
-        if tok == "--" and not value_seen:
-            return None
-        if kind == "exec":
+        if _git_grep_opens_pager(tok):
             return tok
-        if kind == "value":
-            expect_value = True
-        elif kind == "glued":
-            value_seen = True
     return None
 
 
